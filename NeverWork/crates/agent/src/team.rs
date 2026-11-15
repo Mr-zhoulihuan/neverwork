@@ -48,15 +48,25 @@ pub fn run_team(
 /// 解析角色模型名，若看起来是跨 provider 的模型（如 claude*）则切换到 anthropic。
 /// 返回 (provider 名称, 应用于该角色的配置)。
 fn role_provider(base_provider: &str, base: &ProviderConfig, role: &Role) -> (String, ProviderConfig) {
-    let model = role.model.to_lowercase();
-    let provider = if model.starts_with("claude") {
-        "anthropic".to_string()
-    } else {
-        base_provider.to_string()
-    };
+    // 只有看起来像**真实模型 id** 的才覆盖模型名。
+    // 团队里 `Claude Opus`、`GPT-5` 这类是展示标签（带空格/大写），
+    // 拿它们当模型 id 发给服务端只会得到 400；拿 `claude` 前缀切厂商更糟——
+    // 会把 DeepSeek 的 Key 发到 Anthropic。
+    let raw = role.model.trim();
+    // 真实模型 id 约定全小写（gpt-4o-mini / claude-sonnet-4-5 / deepseek-flash）；
+    // 展示标签总有大写（Claude Opus / GPT-5），据此区分。
+    let looks_like_id = !raw.is_empty()
+        && !raw.contains(' ')
+        && !raw.chars().any(|c| c.is_ascii_uppercase())
+        && raw.chars().any(|c| c.is_ascii_digit() || c == '-' || c == '.');
+
     let mut cfg = base.clone();
-    if !role.model.trim().is_empty() {
-        cfg.model = role.model.clone();
+    let mut provider = base_provider.to_string();
+    if looks_like_id {
+        cfg.model = raw.to_string();
+        if raw.to_lowercase().starts_with("claude-") {
+            provider = "anthropic".to_string();
+        }
     }
     (provider, cfg)
 }
@@ -95,6 +105,8 @@ fn run_pipeline(
                 }
             }
             StreamEvent::Error(e) => emit(TeamEvent::RoleError { role_index: idx, error: e }),
+            // 团队编排暂不使用工具调用（角色是「轮流发言」模型），忽略即可。
+            StreamEvent::ToolCalls(_) => {}
             StreamEvent::Done => {}
         };
         let _ = provider.stream_chat(&msgs, &mut on);
@@ -160,6 +172,7 @@ fn run_parallel(
                     emit(TeamEvent::Delta { role_index: idx, text: d });
                 }
                 StreamEvent::Error(e) => emit(TeamEvent::RoleError { role_index: idx, error: e }),
+                StreamEvent::ToolCalls(_) => {}
                 StreamEvent::Done => {
                     emit(TeamEvent::RoleDone { role_index: idx });
                     done_count += 1;
@@ -181,5 +194,61 @@ fn role_system_prompt(role: &Role) -> String {
         )
     } else {
         role.prompt.clone()
+    }
+}
+
+#[cfg(test)]
+mod role_provider_tests {
+    use super::*;
+
+    fn role(model: &str) -> Role {
+        let mut r = Role::new("r", "R", "R");
+        r.model = model.into();
+        r
+    }
+
+    fn base() -> ProviderConfig {
+        ProviderConfig {
+            api_key: "sk-deepseek".into(),
+            base_url: "https://api.deepseek.com/v1".into(),
+            model: "deepseek-flash".into(),
+            temperature: 0.7,
+        }
+    }
+
+    #[test]
+    fn display_label_does_not_switch_provider() {
+        // 默认团队里就是这个值，之前会被误判成 anthropic
+        let (p, cfg) = role_provider("openai", &base(), &role("Claude Opus"));
+        assert_eq!(p, "openai", "展示标签不应切换厂商");
+        assert_eq!(cfg.model, "deepseek-flash", "展示标签不应覆盖模型名");
+        assert_eq!(cfg.api_key, "sk-deepseek", "Key 必须保持原厂商的");
+    }
+
+    #[test]
+    fn gpt_label_does_not_override_model() {
+        let (_, cfg) = role_provider("openai", &base(), &role("GPT-5"));
+        assert_eq!(cfg.model, "deepseek-flash");
+    }
+
+    #[test]
+    fn real_claude_id_switches_to_anthropic() {
+        let (p, cfg) = role_provider("openai", &base(), &role("claude-sonnet-4-5"));
+        assert_eq!(p, "anthropic");
+        assert_eq!(cfg.model, "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn real_openai_id_overrides_model_keeps_provider() {
+        let (p, cfg) = role_provider("openai", &base(), &role("gpt-4o-mini"));
+        assert_eq!(p, "openai");
+        assert_eq!(cfg.model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn empty_model_falls_back_to_base() {
+        let (p, cfg) = role_provider("openai", &base(), &role(""));
+        assert_eq!(p, "openai");
+        assert_eq!(cfg.model, "deepseek-flash");
     }
 }

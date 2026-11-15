@@ -9,18 +9,18 @@
 
 ```bash
 cargo run -p neverwork          # 主界面
-cargo test --workspace          # 全部测试（78 个）
+cargo test --workspace          # 全部测试（113 个，其中 3 条打真实 DeepSeek 需 NW_DEEPSEEK_KEY）
 cargo build -p neverwork        # 只编应用（增量约 6s）
 ```
 
-运行期环境变量：`NW_ROOT`（工作区根）、`NW_API_KEY` / `NW_PROVIDER=openai|anthropic` / `NW_BASE_URL` / `NW_MODEL`（AI 配置）、`NW_VIEW=chat|team|skills|settings`、`NW_SETTINGS_TAB=general|models|skills|sync|about`、`NW_PICK_MODEL=<下标>`、`NW_OPEN=<path>`（启动即开文件）、`NW_WIN_W` / `NW_WIN_H`（覆盖窗口逻辑尺寸）、`NW_CONFIG_DIR`（覆盖 `~/.neverwork`）。
+运行期环境变量：`NW_ROOT`（工作区根）、`NW_API_KEY` / `NW_PROVIDER=openai|anthropic` / `NW_BASE_URL` / `NW_MODEL`（AI 配置）、`NW_VIEW=chat|team|skills|settings`、`NW_SETTINGS_TAB=general|models|skills|sync|about`、`NW_PICK_MODEL=<下标>`、`NW_SEND=<文本>`（启动即发一条）、`NW_AUTO_APPROVE=1`（仅验证用）、`NW_OPEN=<path>`（启动即开文件）、`NW_WIN_W` / `NW_WIN_H`（覆盖窗口逻辑尺寸）、`NW_CONFIG_DIR`（覆盖 `~/.neverwork`）。
 
 ## 红线
 
 - **仓库根是 `E:\AI\ide`（2026-11-15 起纳入 git，远程 `gitee.com/ZLH1995123/neverwork`）**，`NeverWork/` 是其中的子目录，不是独立仓库。`NeverWork/target`（约 9.7G）已在根 `.gitignore` 中忽略，**不要用 `git add -f` 强行加入**，也不要 `git clean -xfd`（会删构建产物）。
 - 分支：`main` 为开发主线，`master` 是 Gitee 默认分支，两者保持同一提交；`develop/feature/release` 目前同样指向主线。
-- **`NeverWork/target` 约 9.4G**。增量构建只需几秒，但 `target/debug/deps` 被删过，首次全量要重编约 700 个 crate；不要执行 `cargo clean`，也不要把慢构建当故障。
-- 团队配置持久化在 `~/.neverwork/config.json`（临时文件+rename 原子写），偏好设置在同目录 `settings.json`（含 API Key 明文，别提交、别外传）。不要删除或手改用户配置，测试请用 `NW_CONFIG_DIR` 指向临时目录。
+- **`NeverWork/target` 约 9.4G**。增量构建几秒可用，但 `target/debug/deps` 被删过，首次全量要重编约 700 个 crate；不要 `cargo clean`，也别把慢构建当故障。
+- 配置在 `~/.neverwork/`：团队 `config.json`、偏好 `settings.json`（**含 API Key 明文**，别提交别外传），均临时文件+rename 原子写。不要手改用户配置，测试用 `NW_CONFIG_DIR` 指向临时目录。
 - **主题必须走 `theme::set_theme_mode()`**，不要在视图里直接写死颜色代码——深浅两套色板由全局原子量切换，直接写 `rgb(0x…)` 的元素在浅色主题下会不可读。
 - **API Key 一律脱敏**：导出/同步必须走 `config::export_all(..., ExportOptions::default())`（不含密钥）；界面只显示 `masked_key()`（末尾 4 位）；不要给 `ProviderEntry` 加回 `derive(Debug)`，它手写的 Debug 会打码。新增任何把 Settings 序列化到文件或日志的路径，先确认 Key 不会跟着走。
 - `design/`、`pic/` 是设计交付与运行截图，`message.md` 是历史交付汇报，都不要当作待改代码。
@@ -32,26 +32,31 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - 光标/选区/撤销统一在 `text_buffer.rs`，对话输入框与编辑器共用；单行/多行只由 `multiline` 区分。
 - 带 `cursor_pointer` / `hover` 的元素必须有 `on_click` 或 `on_mouse_down`，否则就是骗人的死点击。
 - 编辑器按字符渲染成可点击单元，因此点击能精确落位；行内容走 `line_cache.rs` 缓存，不要在渲染里直接跑 `highlight_line`。
-- **文字截断不要只依赖 `.truncate()`**：gpui 只在首帧测量时已有确定宽度才生效，`flex_1` 嵌套下会硬裁且不出省略号。需要省略号时用 `views::text_fit::fit_text(text, 预算像素, 字号)`，并给元素 `.whitespace_nowrap()`。
-- **布局优先级**：中栏 > 左侧会话栏 > 右侧文件栏。窄窗口先隐藏右栏（<1080 逻辑宽），极窄（<620）才隐藏会话列表，48px 图标栏永远保留。`window.bounds()` 已是逻辑像素，不要再除以 `scale_factor`。
+- **文字截断别只靠 `.truncate()`**：gpui 首帧没确定宽度就不生效，`flex_1` 嵌套下会硬裁且无省略号。要省略号用 `views::text_fit::fit_text(text, 预算px, 字号)`，并加 `.whitespace_nowrap()`。
+- **布局优先级**：中栏 > 会话栏 > 文件栏。窄窗口先隐藏右栏（<1080），极窄（<620）才隐藏会话列表，52px 图标栏永远保留。`window.bounds()` 已是逻辑像素，不要再除 `scale_factor`。
 
 ## 左侧栏结构（`views/sidebar.rs`）
 
-`RAIL_W=52` 图标栏（对话/团队/编辑器/命令 + AI 状态 + 头像）+ `SESSION_W=264` 会话卡片列表。
-卡片两行：`头像 + 徽标 + 标题 +（右）状态圆圈` / `摘要 + 时间 + 状态胶囊`；无边框，选中项亮底。
-会话展示字段在 `core::Session`（`preview/status/meta/accent/icon/badge/action`，均带 serde 默认值）+ `SessionStatus`/`SessionAction` 枚举。
-**卡片内任何文本都要算准宽度**：`CARD_INNER = SESSION_W - LIST_PAD*2 - CARD_PAD*2`，漏算任一层内边距都会让右侧胶囊被裁。
+`RAIL_W=52` 图标栏 + `SESSION_W=264` 会话卡片列表。卡片两行：`头像+徽标+标题+（右）状态圆圈` / `摘要+时间+状态胶囊`；无边框，选中亮底。字段在 `core::Session`（`preview/status/meta/accent/icon/badge/action`）。
+**卡片内文本都要算准宽度**：`CARD_INNER = SESSION_W - LIST_PAD*2 - CARD_PAD*2`，漏算任一层内边距会让右侧胶囊被裁。
 
 ## 环境特性（容易误判）
 
-本机是 GameViewer 远程会话 + 200% DPI：GPUI 用 `GetDpiForWindow/96` 得到 scale=2，但窗口按 1:1 物理像素创建，内容被放大一倍并裁掉右侧，`window.resize` 也压不住。因此布局用 `visible_w = bounds.width / scale` 做响应式折叠（<1100 收右栏、<820 只留中栏），标题栏可用「◧ 专注」手动切换。**常规显示器（scale=1）下三栏正常，不要为此改写布局常量。** 自动化点按/键盘注入在该环境坐标被 DPI 虚拟化，且前台焦点常被其他进程抢占，无法作为可靠验收手段。
+本机是 GameViewer 远程会话 + 200% DPI：GPUI 由 `GetDpiForWindow/96` 得 scale=2，但窗口按 1:1 物理像素创建，于是只显示逻辑画布的左上四分之一，`window.resize` 压不住。**常规显示器（scale=1）下三栏正常，不要为此改写布局常量。** 自动化点按在该环境坐标被虚拟化，只有左上象限的控件点得到，聊天区底部（含审批按钮）无法点击；验收靠集成测试 + 截图。
+
+## Agent 工具调用（改这里前必读）
+
+- 工具定义在 `agent/src/tools.rs`。**所有路径必须走 `ToolContext::resolve`**，它负责把 `..`、跨盘绝对路径、符号链接逃逸挡在工作区外；新增工具不要自己拼路径。
+- **写操作必须 `requires_approval = true`**，并在 `agent_loop` 里经 `NeedApproval` → 用户点允许后才执行；不要在工具内部直接落盘绕过审批。
+- 团队角色的 `model` 字段是**展示标签**（`Claude Opus`），不能拿来当模型 id 或据此切厂商——只有全小写的真实 id 才算数，否则会把 A 厂商的 Key 发到 B 厂商。
+- 不新增 shell/exec 类工具。
 
 ## 代码现状与已知缺口
 
 - 编辑器已具备：光标、选区、撤销/重做、剪贴板、按字符点击、行号、语法高亮、虚拟滚动、保存（原子写）。仍**没有**查找替换、多光标、代码折叠、自动缩进重排、括号匹配。
 - 编排模式 `Supervisor`（主管指派）在 `agent/src/team.rs` 里**等同并行**，尚未真正分派。
-- Team 编排只是"多模型轮流发言"：角色没有工具调用、读不到工作区文件、产出不落盘成 diff。
-- Provider 只实现 OpenAI 兼容与 Anthropic；按模型名 `claude` 前缀硬编码切 Provider，新增厂商需改 `role_provider`。
+- Team 编排（多角色）仍是"多模型轮流发言"，不调用工具；带工具的是单 Agent 路径（用团队第一个角色的人格）。
+- Provider 只有 OpenAI 兼容与 Anthropic 两套协议；Gemini 原生尚未实现（选 Gemini 会走 OpenAI 兼容路径）。
 - 无 LSP / tree-sitter（`highlight.rs` 是自写词法扫描）/ 终端 / Git 集成 / 全局搜索；单文件读取上限 512KB，文件树节点上限 8000。
 
 <!-- proma:memory:start -->

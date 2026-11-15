@@ -21,7 +21,7 @@ use gpui::{
 };
 
 use neverwork_core::{
-    ConnectionKind, Config, FileNode, Message, MessageKind, Session, Workspace,
+    ConnectionKind, Config, FileNode, Message, MessageKind, Session, ToolRunStatus, Workspace,
 };
 use neverwork_ui::theme;
 
@@ -193,6 +193,10 @@ pub struct AppState {
     pub dirty: bool,
     pub line_cache: RefCell<LineCache>,
     pub editor_scroll: gpui::UniformListScrollHandle,
+    /// 对话区滚动句柄：新消息到来时自动滚到底部。
+    pub chat_scroll: gpui::ScrollHandle,
+    /// 对话内容有更新、需要滚到底部（渲染时消费）。
+    pub chat_scroll_dirty: std::cell::Cell<bool>,
 
     // ===== 设置 =====
     pub settings: neverwork_core::Settings,
@@ -218,6 +222,12 @@ pub struct AppState {
     pub model_highlight: usize,
     /// 导出配置时是否包含 API Key（默认不含）。
     pub export_with_secrets: bool,
+    /// 是否允许 Agent 调用工具（读写文件）。关掉就退化为纯对话。
+    pub tools_enabled: bool,
+    /// 等待用户批准的写操作。同一时刻最多一个。
+    pub pending: Option<PendingApproval>,
+    /// 自动批准写操作（仅供自动化验证，`NW_AUTO_APPROVE=1` 开启）。
+    pub auto_approve: bool,
     /// 最近一次操作的结果提示（设置页内显示）。
     pub action_msg: Option<String>,
     /// 升级检查结果。
@@ -267,6 +277,17 @@ fn initial_settings_tab() -> SettingsTab {
         "about" => SettingsTab::About,
         _ => SettingsTab::General,
     }
+}
+
+/// 等待用户批准的写操作。
+pub struct PendingApproval {
+    pub session_idx: usize,
+    /// 对应的会话消息下标（用于把按钮渲染到那张卡片上）。
+    pub msg_idx: usize,
+    pub tool: String,
+    pub summary: String,
+    /// 把用户决定送回 Agent 线程。
+    pub respond: flume::Sender<bool>,
 }
 
 fn resolve_root() -> PathBuf {
@@ -334,6 +355,8 @@ impl AppState {
             dirty: false,
             line_cache: RefCell::new(LineCache::new()),
             editor_scroll: gpui::UniformListScrollHandle::new(),
+            chat_scroll: gpui::ScrollHandle::new(),
+            chat_scroll_dirty: std::cell::Cell::new(false),
             settings,
             active_field: None,
             field_buf: TextBuffer::single_line(),
@@ -346,6 +369,9 @@ impl AppState {
             model_query: String::new(),
             model_highlight: 0,
             export_with_secrets: false,
+            tools_enabled: true,
+            pending: None,
+            auto_approve: false,
             action_msg: None,
             update_status: None,
             layout_w: std::rc::Rc::new(std::cell::Cell::new(1200.0)),
@@ -374,6 +400,8 @@ impl AppState {
         }
 
         start_watcher(me.root.clone(), cx);
+        // 自动化验证用：`NW_SEND=<文本>` 启动后自动发送一条消息。
+        let auto_send = std::env::var("NW_SEND").ok().filter(|t| !t.trim().is_empty());
         // 调试/截图用：启动即打开某个厂商的模型选择器。
         if let Ok(v) = std::env::var("NW_PICK_MODEL") {
             if let Ok(i) = v.parse::<usize>() {
@@ -383,11 +411,20 @@ impl AppState {
                 }
             }
         }
+        // 自动化验证用：`NW_AUTO_APPROVE=1` 时自动批准写操作（仅供本机验证，正常使用别开）。
+        if std::env::var("NW_AUTO_APPROVE").map(|v| v == "1").unwrap_or(false) {
+            me.auto_approve = true;
+        }
         // 用 NW_VIEW 直达同步页时也自动查一次版本。
         if me.settings_tab == SettingsTab::Sync && me.center == CenterView::Settings {
             me.check_update(cx);
         }
         cx.notify();
+        if let Some(t) = auto_send {
+            me.new_session(cx);
+            me.chat.reset(t);
+            me.send_message(cx);
+        }
         me
     }
 
@@ -939,7 +976,6 @@ impl AppState {
             cx.notify();
             return;
         };
-        let _ = provider_id;
 
         let team = self
             .config
@@ -949,6 +985,7 @@ impl AppState {
 
         self.chat.reset("");
         self.notice = None;
+        self.pending = None;
         self.center = CenterView::Chat;
 
         let session_idx = self.active_session.min(self.sessions.len().saturating_sub(1));
@@ -967,8 +1004,249 @@ impl AppState {
 
         self.streaming = true;
         self.cancel.store(false, Ordering::Relaxed);
+        self.chat_scroll_dirty.set(true);
         cx.notify();
 
+        // 开启工具 → 由团队的第一个角色带着工具干活（一次一个 Agent，改动才能被逐个批准）；
+        // 关闭工具 → 多角色团队按原编排轮流发言。
+        if self.tools_enabled {
+            // 用团队第一个角色的人格（提示词），但**模型与厂商一律以设置里的当前选择为准**。
+            // 不能用 role.model 反推厂商：团队里那些名字（Claude Opus / GPT-5）只是展示用的
+            // 标签，按名字切厂商会把 DeepSeek 的 Key 发到 Anthropic 去。
+            let role = team
+                .roles
+                .first()
+                .cloned()
+                .unwrap_or_else(|| neverwork_core::Role::new("agent", "Assistant", "A"));
+            self.spawn_agent(session_idx, text, role, provider_id, config, cx);
+        } else {
+            self.spawn_team(session_idx, text, team, provider_id, config, cx);
+        }
+    }
+
+    /// 带工具的 Agent：跑在后台线程，事件经 flume 回到 UI 线程。
+    fn spawn_agent(
+        &mut self,
+        session_idx: usize,
+        text: String,
+        role: neverwork_core::Role,
+        provider: String,
+        config: neverwork_agent::ProviderConfig,
+        cx: &mut Context<Self>,
+    ) {
+        let cancel = self.cancel.clone();
+        let root = self.root.clone();
+        let (tx, rx) = flume::unbounded::<neverwork_agent::AgentEvent>();
+
+        std::thread::spawn(move || {
+            let mut emit = |ev: neverwork_agent::AgentEvent| {
+                let _ = tx.send(ev);
+            };
+            neverwork_agent::run_agent(
+                &provider,
+                config,
+                &role.prompt,
+                Vec::new(),
+                &text,
+                root,
+                &mut emit,
+                cancel,
+            );
+        });
+
+        let participant = neverwork_core::Participant {
+            role_id: role.id.clone(),
+            role_name: role.name.clone(),
+            color_index: role.color_index,
+            initial: role.initial.clone(),
+        };
+
+        cx.spawn(async move |weak, async_cx| {
+            // 当前正在追加文本的 Agent 消息下标（第一条文本增量时创建）。
+            let mut agent_msg: Option<usize> = None;
+            // 当前正在进行的工具卡片下标。
+            let mut tool_msg: Option<usize> = None;
+
+            loop {
+                let ev = rx.recv_async().await;
+                let Ok(ev) = ev else { break };
+
+                match ev {
+                    neverwork_agent::AgentEvent::TextDelta(d) => {
+                        let p = participant.clone();
+                        let _ = weak.update(async_cx, |this, cx| {
+                            if agent_msg.is_none() {
+                                let idx = this.sessions[session_idx].messages.len();
+                                this.sessions[session_idx].messages.push(Message {
+                                    kind: MessageKind::Agent {
+                                        participant: p.clone(),
+                                    },
+                                    body: String::new(),
+                                    code: None,
+                                });
+                                agent_msg = Some(idx);
+                            }
+                            if let Some(idx) = agent_msg {
+                                if let Some(m) =
+                                    this.sessions[session_idx].messages.get_mut(idx)
+                                {
+                                    m.body.push_str(&d);
+                                }
+                            }
+                            this.chat_scroll_dirty.set(true);
+                            cx.notify();
+                        });
+                    }
+                    neverwork_agent::AgentEvent::ToolStarted {
+                        call,
+                        requires_approval,
+                        preview,
+                    } => {
+                        let _ = weak.update(async_cx, |this, cx| {
+                            let idx = this.sessions[session_idx].messages.len();
+                            this.sessions[session_idx].messages.push(Message {
+                                kind: MessageKind::ToolCall {
+                                    name: call.name.clone(),
+                                    summary: call.summary(),
+                                    status: if requires_approval {
+                                        ToolRunStatus::Awaiting
+                                    } else {
+                                        ToolRunStatus::Running
+                                    },
+                                    output: String::new(),
+                                    diff: preview
+                                        .iter()
+                                        .map(|d| neverwork_core::DiffLineView {
+                                            marker: d.marker().to_string(),
+                                            text: d.text.clone(),
+                                        })
+                                        .collect(),
+                                    added: 0,
+                                    removed: 0,
+                                },
+                                body: String::new(),
+                                code: None,
+                            });
+                            tool_msg = Some(idx);
+                            this.chat_scroll_dirty.set(true);
+                            cx.notify();
+                        });
+                    }
+                    neverwork_agent::AgentEvent::NeedApproval {
+                        call,
+                        preview: _,
+                        respond,
+                    } => {
+                        let tool = call.name.clone();
+                        let summary = call.summary();
+                        let _ = weak.update(async_cx, |this, cx| {
+                            if this.auto_approve {
+                                let _ = respond.send(true);
+                            } else {
+                                this.pending = Some(crate::state::PendingApproval {
+                                    session_idx,
+                                    msg_idx: tool_msg.unwrap_or(usize::MAX),
+                                    tool,
+                                    summary,
+                                    respond,
+                                });
+                            }
+                            this.chat_scroll_dirty.set(true);
+                            cx.notify();
+                        });
+                    }
+                    neverwork_agent::AgentEvent::ToolFinished { result } => {
+                        let _ = weak.update(async_cx, |this, cx| {
+                            if let Some(idx) = tool_msg {
+                                if let Some(m) = this.sessions[session_idx].messages.get_mut(idx) {
+                                    if let MessageKind::ToolCall {
+                                        status,
+                                        output,
+                                        diff,
+                                        added,
+                                        removed,
+                                        summary,
+                                        ..
+                                    } = &mut m.kind
+                                    {
+                                        *status = if result.ok {
+                                            ToolRunStatus::Ok
+                                        } else {
+                                            ToolRunStatus::Failed
+                                        };
+                                        *output = result.content.clone();
+                                        *added = result.added as u32;
+                                        *removed = result.removed as u32;
+                                        if !result.diff.is_empty() {
+                                            *diff = result
+                                                .diff
+                                                .iter()
+                                                .map(|d| neverwork_core::DiffLineView {
+                                                    marker: d.marker().to_string(),
+                                                    text: d.text.clone(),
+                                                })
+                                                .collect();
+                                        }
+                                        let _ = summary;
+                                    }
+                                }
+                            }
+                            this.pending = None;
+                            // 文件可能被改了，刷新文件树与最近改动。
+                            this.refresh_tree(cx);
+                            this.chat_scroll_dirty.set(true);
+                            cx.notify();
+                        });
+                    }
+                    neverwork_agent::AgentEvent::Denied { .. } => {
+                        let _ = weak.update(async_cx, |this, cx| {
+                            if let Some(idx) = tool_msg {
+                                if let Some(m) = this.sessions[session_idx].messages.get_mut(idx) {
+                                    if let MessageKind::ToolCall { status, .. } = &mut m.kind {
+                                        *status = ToolRunStatus::Denied;
+                                    }
+                                }
+                            }
+                            this.pending = None;
+                            cx.notify();
+                        });
+                    }
+                    neverwork_agent::AgentEvent::RoundLimit => {
+                        let _ = weak.update(async_cx, |this, cx| {
+                            this.notice =
+                                Some("已达到单轮工具调用上限（8 轮），先停下来等你的指示".into());
+                            cx.notify();
+                        });
+                    }
+                    neverwork_agent::AgentEvent::Error(e) => {
+                        let _ = weak.update(async_cx, |this, cx| {
+                            this.notice = Some(format!("Agent 错误：{e}"));
+                            cx.notify();
+                        });
+                    }
+                    neverwork_agent::AgentEvent::Done => break,
+                }
+            }
+
+            let _ = weak.update(async_cx, |this, cx| {
+                this.streaming = false;
+                this.pending = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 多角色团队：沿用原来的轮流发言实现。
+    fn spawn_team(
+        &mut self,
+        session_idx: usize,
+        text: String,
+        team: neverwork_core::Team,
+        _provider_id: String,
+        config: neverwork_agent::ProviderConfig,
+        cx: &mut Context<Self>,
+    ) {
         let cancel = self.cancel.clone();
         let (tx, rx) = flume::unbounded::<neverwork_agent::TeamEvent>();
 
@@ -980,7 +1258,8 @@ impl AppState {
         });
 
         cx.spawn(async move |weak, async_cx| {
-            let mut role_msg: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+            let mut role_msg: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::new();
             loop {
                 match rx.recv_async().await {
                     Ok(neverwork_agent::TeamEvent::RoleStart { role_index }) => {
@@ -1003,6 +1282,7 @@ impl AppState {
                                     role_msg.insert(role_index, idx);
                                 }
                             }
+                            this.chat_scroll_dirty.set(true);
                             cx.notify();
                         });
                     }
@@ -1014,6 +1294,7 @@ impl AppState {
                                     m.body.push_str(&text);
                                 }
                             }
+                            this.chat_scroll_dirty.set(true);
                             cx.notify();
                         });
                     }
@@ -1037,8 +1318,27 @@ impl AppState {
         .detach();
     }
 
+    /// 用户对写操作的决定。
+    pub(crate) fn answer_approval(&mut self, allow: bool, cx: &mut Context<Self>) {
+        if let Some(p) = self.pending.take() {
+            let _ = p.respond.send(allow);
+            if !allow {
+                if let Some(m) = self.sessions[p.session_idx].messages.get_mut(p.msg_idx) {
+                    if let MessageKind::ToolCall { status, .. } = &mut m.kind {
+                        *status = ToolRunStatus::Denied;
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
     pub(crate) fn stop_streaming(&mut self, cx: &mut Context<Self>) {
         self.cancel.store(true, Ordering::Relaxed);
+        // 解开可能挂起的审批，让 Agent 线程立刻退出而不是等到超时。
+        if let Some(p) = self.pending.take() {
+            let _ = p.respond.send(false);
+        }
         self.notice = Some("已停止生成".into());
         cx.notify();
     }

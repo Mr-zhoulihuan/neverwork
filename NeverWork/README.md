@@ -105,7 +105,59 @@ design/   设计稿（HTML/PNG）与设计规范 DESIGN-SPEC.md
 - **响应式 + 专注模式**：窗口较窄或高 DPI 时自动收起侧栏，
   标题栏「◧ 专注」可手动切换。
 
-测试：78 个（app 侧 text_buffer 11 / text_fit 5 / model_picker 10 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2，core 侧 settings 13 + config 5，其余在 agent 与 ui）。
+测试：113 个。app 侧 text_buffer 11 / text_fit 5 / model_picker 10 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2；agent 侧 tools 17 / diff 12 / team role_provider 5 / sse 2；core 侧 settings 13 + config 5；ui 3。另有 3 条打真实 DeepSeek API 的集成测试（需密钥，默认跳过）。
+
+### M6 — Agent 工具调用（真读、真写、真 diff）
+
+Agent 现在能直接操作工作区文件，而不是只会「说话」。
+
+**工具集**（`agent/src/tools.rs`）
+
+| 工具 | 作用 | 是否需批准 |
+|---|---|---|
+| `read_file` | 读文件，返回带行号内容（可 offset/limit） | 否 |
+| `list_dir` | 列目录 | 否 |
+| `search_files` | 按文本搜索，返回 `文件:行号: 内容` | 否 |
+| `write_file` | 整体写入（新建/覆盖），原子写 | **是** |
+| `apply_patch` | 把**唯一存在**的一段原文替换掉 | **是** |
+
+**安全模型**
+
+- 所有路径被限制在工作区内：`..` 逃逸、跨盘绝对路径、符号链接逃逸一律拒绝并报错。
+- 读操作直接执行；**写操作必须先展示 diff、经用户点「允许并写入」才落盘**。
+  拒绝后文件保持原样，且把「用户拒绝了」回填给模型，让它换方案而不是重试。
+- 不提供 shell 执行。跑命令的风险和收益不成正比，请用独立终端。
+- 单轮最多 8 次工具循环，避免模型陷入死循环烧 token。
+
+**交互**
+
+- 每次工具调用渲染成一张卡片：工具名、参数摘要、状态（执行中/待确认/完成/已拒绝/失败）、
+  `+n −m` 行数；写操作内嵌 diff（`+` 绿、`-` 红、上下文灰，超过 220px 可滚）。
+- 待确认卡片橙色描边 + 「拒绝 / 允许并写入」按钮；输入框上方同时有一条黄色横幅
+  写明「等待你确认：write_file xxx」。
+- 输入框有「⚒ 工具已开/已关」开关：关掉就退回纯对话。
+
+**协议层**（`agent/src/openai.rs`）
+
+- 请求带 `tools` + `tool_choice: auto`；流式解析 `delta.tool_calls[]`，
+  按 `index` 累积被切碎的 `function.arguments`，靠 `finish_reason` 或流结束收尾。
+- 兼容推理模型：`deepseek-flash` 会先返回 `reasoning_content`，直接忽略、不影响正文与工具调用。
+
+**顺带修掉的两个真问题**
+
+- 团队角色的 `model` 字段（`Claude Opus` / `GPT-5`）被当成真实模型 id 用于切厂商，
+  会把 DeepSeek 的 Key 发到 Anthropic 去。现在只有**全小写的真实 id**（`claude-sonnet-4-5`）
+  才覆盖模型名，展示标签一律忽略。
+- 新消息到达时对话没有自动滚到底，用户以为「没反应」。现在内容更新后在本帧布局完成后
+  请求滚动，而不是在旧布局上滚动。
+
+**验证**
+
+`agent/tests/deepseek_tools.rs` 打真实 DeepSeek API，跑三条端到端用例（需 `NW_DEEPSEEK_KEY`）：
+
+1. 读文件后回答问题 —— 断言确实调了 `read_file`，回答包含文件内容
+2. 批准后创建文件 —— 断言磁盘上真的出现了文件与内容
+3. 拒绝写操作 —— 断言文件字节完全未变
 
 ### M4 — 左侧栏重做（对齐 pic/ 参考稿）
 

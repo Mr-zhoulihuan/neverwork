@@ -38,6 +38,7 @@ fn openai_streaming_end_to_end() {
             StreamEvent::Delta(d) => text.push_str(&d),
             StreamEvent::Done => saw_done = true,
             StreamEvent::Error(e) => panic!("unexpected error: {e}"),
+            StreamEvent::ToolCalls(c) => panic!("unexpected tool calls: {c:?}"),
         })
         .unwrap();
 

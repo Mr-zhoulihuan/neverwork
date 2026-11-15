@@ -179,6 +179,60 @@ pub enum MessageKind {
     Tool { summary: String, files: Vec<String> },
     /// 并行执行状态。
     Parallel { items: Vec<ParallelItem> },
+    /// Agent 发起的一次工具调用（含写操作的 diff 与审批状态）。
+    ToolCall {
+        /// 工具名，如 `write_file`。
+        name: String,
+        /// 参数摘要，如 `src/main.rs（写入 12 行）`。
+        summary: String,
+        status: ToolRunStatus,
+        /// 执行输出 / 错误信息。
+        output: String,
+        /// 变化内容（写操作为 diff，读操作为空）。
+        diff: Vec<DiffLineView>,
+        added: u32,
+        removed: u32,
+    },
+}
+
+/// 工具调用的执行状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRunStatus {
+    /// 正在执行。
+    Running,
+    /// 等待用户批准（写操作）。
+    Awaiting,
+    /// 成功。
+    Ok,
+    /// 用户拒绝。
+    Denied,
+    /// 失败。
+    Failed,
+}
+
+impl ToolRunStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ToolRunStatus::Running => "执行中",
+            ToolRunStatus::Awaiting => "待确认",
+            ToolRunStatus::Ok => "完成",
+            ToolRunStatus::Denied => "已拒绝",
+            ToolRunStatus::Failed => "失败",
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, ToolRunStatus::Running | ToolRunStatus::Awaiting)
+    }
+}
+
+/// diff 的一行（界面展示用，与 agent 内部的 DiffLine 解耦）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffLineView {
+    /// `+` / `-` / ` `。
+    pub marker: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,18 +1,23 @@
-//! NeverWork Agent：LLM Provider 抽象与流式对话实现。
+//! NeverWork Agent：LLM Provider 抽象、流式对话与工具调用。
 //!
 //! 设计：统一内部消息模型 → 各 Provider 适配 → 通过回调逐块流式输出。
 //! 使用 `ureq`（阻塞 + 流式读取）在后台线程运行，避免与 GPUI 的异步执行器冲突。
 
+mod agent_loop;
+mod anthropic;
+pub mod diff;
 mod openai;
 mod sse;
-mod anthropic;
 mod team;
+pub mod tools;
 #[cfg(test)]
 mod tests;
 
+pub use agent_loop::{run_agent, AgentEvent};
 pub use openai::OpenAiProvider;
 pub use anthropic::AnthropicProvider;
 pub use team::{run_team, TeamEvent};
+pub use tools::{ToolCall, ToolResult, ToolSpec};
 
 use neverwork_core::AppResult;
 
@@ -22,6 +27,8 @@ pub enum Role {
     System,
     User,
     Assistant,
+    /// 工具执行结果（回填给模型）。
+    Tool,
 }
 
 /// 一条对话消息（内部统一格式）。
@@ -29,17 +36,44 @@ pub enum Role {
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
+    /// 助手发起的工具调用（仅 `Role::Assistant` 可能非空）。
+    pub tool_calls: Vec<ToolCall>,
+    /// 工具结果消息对应的调用 id（仅 `Role::Tool` 使用）。
+    pub tool_call_id: Option<String>,
 }
 
 impl ChatMessage {
+    fn base(role: Role, content: String) -> Self {
+        Self {
+            role,
+            content,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
     pub fn system(s: impl Into<String>) -> Self {
-        Self { role: Role::System, content: s.into() }
+        Self::base(Role::System, s.into())
     }
     pub fn user(s: impl Into<String>) -> Self {
-        Self { role: Role::User, content: s.into() }
+        Self::base(Role::User, s.into())
     }
     pub fn assistant(s: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: s.into() }
+        Self::base(Role::Assistant, s.into())
+    }
+
+    /// 带工具调用的助手消息。
+    pub fn assistant_with_tools(content: impl Into<String>, calls: Vec<ToolCall>) -> Self {
+        let mut m = Self::base(Role::Assistant, content.into());
+        m.tool_calls = calls;
+        m
+    }
+
+    /// 工具结果消息。
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        let mut m = Self::base(Role::Tool, content.into());
+        m.tool_call_id = Some(call_id.into());
+        m
     }
 }
 
@@ -48,7 +82,9 @@ impl ChatMessage {
 pub enum StreamEvent {
     /// 文本增量。
     Delta(String),
-    /// 结束（可带结束原因）。
+    /// 模型请求调用这些工具（本轮文本已结束）。
+    ToolCalls(Vec<ToolCall>),
+    /// 结束。
     Done,
     /// 错误信息（非 panic，用于 UI 友好展示）。
     Error(String),
@@ -79,12 +115,28 @@ impl Default for ProviderConfig {
 pub trait LlmProvider: Send + Sync {
     /// Provider 名称（"openai" / "anthropic"）。
     fn id(&self) -> &'static str;
-    /// 发起流式对话。`on_event` 会在每个增量时被调用（在调用线程上）。
+
+    /// 发起流式对话（不带工具）。`on_event` 会在每个增量时被调用（在调用线程上）。
     fn stream_chat(
         &self,
         messages: &[ChatMessage],
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> AppResult<()>;
+
+    /// 是否支持工具调用。
+    fn supports_tools(&self) -> bool {
+        false
+    }
+
+    /// 带工具的流式对话。不支持工具的 Provider 默认退化为普通对话。
+    fn stream_chat_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> AppResult<()> {
+        self.stream_chat(messages, on_event)
+    }
 }
 
 /// 从环境变量读取配置：
