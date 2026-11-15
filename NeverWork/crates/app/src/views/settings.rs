@@ -499,6 +499,34 @@ impl AppState {
         );
 
         if is_custom {
+            let editing_name = self.active_field == Some(FormField::ProviderName(i8));
+            let name_display = if editing_name {
+                self.field_buf.text().to_string()
+            } else {
+                p.name.clone()
+            };
+            head = head.child(
+                div()
+                    .id(SharedString::from(format!("rename-provider-{idx}")))
+                    .px_2()
+                    .py_1
+                    ()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::border()))
+                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+                        this.begin_field(FormField::ProviderName(i8), cx);
+                        window.focus(&this.editor_focus);
+                        cx.notify();
+                    }))
+                    .child(if editing_name {
+                        SharedString::from(fit_text(&name_display, 80.0, 12.0))
+                    } else {
+                        SharedString::from("改名")
+                    }),
+            );
             head = head.child(
                 div()
                     .id(SharedString::from(format!("del-provider-{idx}")))
@@ -569,69 +597,138 @@ impl AppState {
             p.model.clone()
         };
 
+        // ---- API 基址（整行） ----
         card = card.child(
             div()
                 .flex()
-                .gap_3()
+                .flex_col()
+                .gap_1()
+                .child(label("API 基址"))
+                .child(input_box(
+                    SharedString::from(format!("url-input-{idx}")),
+                    url_display,
+                    "https://…/v1",
+                    editing_url,
+                    self.editor_focus.clone(),
+                    cx,
+                    FormField::ProviderUrl(i8),
+                )),
+        );
+
+        // ---- 模型（整行 + 可搜索选择器） ----
+        let editing_m = self.active_field == Some(FormField::ProviderModel(i8));
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
                 .child(
                     div()
                         .flex()
-                        .flex_col()
-                        .gap_1()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(label("API 基址"))
+                        .items_center()
+                        .gap_2()
+                        .child(label("模型"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::dim())
+                                .child(SharedString::from(format!("{} 个可选", p.models.len()))),
+                        )
+                        .child(div().flex_1())
+                        // 手输：想用列表里没有的名字时直接打
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("manual-model-{idx}")))
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .text_xs()
+                                .text_color(theme::muted())
+                                .cursor_pointer()
+                                .hover(|d| d.bg(theme::raised()))
+                                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+                                    this.begin_field(FormField::ProviderModel(i8), cx);
+                                    window.focus(&this.editor_focus);
+                                    cx.notify();
+                                }))
+                                .child("手输"),
+                        ),
+                )
+                .child(if editing_m {
+                    // 手输态：直接给输入框
+                    div()
                         .child(input_box(
-                            SharedString::from(format!("url-input-{idx}")),
-                            url_display,
-                            "https://…/v1",
-                            editing_url,
+                            SharedString::from(format!("model-input-{idx}")),
+                            model_display.clone(),
+                            "模型名",
+                            true,
                             self.editor_focus.clone(),
                             cx,
-                            FormField::ProviderUrl(i8),
-                        )),
-                )
-                .child(
+                            FormField::ProviderModel(i8),
+                        ))
+                        .into_any_element()
+                } else {
+                    // 常态：一个占满整行的可点击选择器
                     div()
+                        .id(SharedString::from(format!("pick-model-{idx}")))
                         .flex()
-                        .flex_col()
-                        .gap_1()
-                        .w(px(200.0))
-                        .flex_shrink_0()
+                        .items_center()
+                        .gap_2()
+                        .h(px(32.0))
+                        .px_3()
+                        .rounded_md()
+                        .bg(theme::raised())
+                        .border_1()
+                        .border_color(theme::border())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::border()))
+                        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                            this.open_model_picker(idx, cx);
+                        }))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::accent())
+                                .child("◆"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_sm()
+                                .text_color(if p.model.is_empty() {
+                                    theme::dim()
+                                } else {
+                                    theme::fg()
+                                })
+                                .child(SharedString::from(if p.model.is_empty() {
+                                    "点这里选择模型（可搜索）".to_string()
+                                } else {
+                                    fit_text(&model_display, 400.0, 14.0)
+                                })),
+                        )
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_1()
-                                .child(label("模型"))
-                                .child(div().flex_1())
-                                .when(!p.models.is_empty(), |d| {
-                                    d.child(
-                                        div()
-                                            .id(SharedString::from(format!("cycle-model-{idx}")))
-                                            .px_1()
-                                            .rounded_sm()
-                                            .text_xs()
-                                            .text_color(theme::accent())
-                                            .cursor_pointer()
-                                            .hover(|d| d.bg(theme::border()))
-                                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
-                                                this.cycle_provider_model(idx, cx);
-                                            }))
-                                            .child("切换 ⇄"),
-                                    )
-                                }),
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(theme::panel())
+                                .text_xs()
+                                .text_color(theme::dim())
+                                .child("搜索选择")
+                                .child("▾"),
                         )
-                        .child(input_box(
-                            SharedString::from(format!("model-input-{idx}")),
-                            model_display,
-                            "模型名",
-                            editing_model,
-                            self.editor_focus.clone(),
-                            cx,
-                            FormField::ProviderModel(i8),
-                        )),
-                ),
+                        .into_any_element()
+                })
+                // 展开的选择面板就地嵌在这一行下面
+                .when(self.model_picker == Some(idx), |d| {
+                    d.child(self.model_picker_panel(cx))
+                }),
         );
 
         // ---- 温度 ----
@@ -836,11 +933,32 @@ impl AppState {
                     |this, cx| this.toggle_sync(cx),
                 ));
 
+                g = g.child(toggle_row(
+                    "导出包含 API Key",
+                    "默认关闭：导出的文件不含密钥，换机器后需重新填写。仅在需要完整迁移时打开。",
+                    self.export_with_secrets,
+                    cx,
+                    |this, cx| {
+                        let v = this.export_with_secrets;
+                        this.export_with_secrets = !v;
+                        this.action_msg = Some(if !v {
+                            "导出将包含明文 API Key，请勿把文件发给他人".into()
+                        } else {
+                            "导出将脱敏：文件里不含 API Key".into()
+                        });
+                        cx.notify();
+                    },
+                ));
+
                 g = g.child(setting_row(
                     "立即导出",
                     format!(
-                        "同步目录 {}　上次同步 {}",
-                        crate::settings_ops::sync_dir().display(),
+                        "{}　上次同步 {}",
+                        if self.export_with_secrets {
+                            "将包含明文密钥（谨慎分享）"
+                        } else {
+                            "已脱敏：不含 API Key"
+                        },
                         fmt_time(self.settings.last_sync_at)
                     ),
                     div()
@@ -1292,7 +1410,7 @@ fn input_box(
             if this.active_field != Some(field) {
                 return;
             }
-            if ev.keystroke.key == "enter" {
+            if ev.keystroke.key == "enter" || ev.keystroke.key == "escape" {
                 this.commit_field(cx);
                 return;
             }

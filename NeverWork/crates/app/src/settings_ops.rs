@@ -49,10 +49,13 @@ impl AppState {
     /// 保存设置到 `~/.neverwork/settings.json`。
     pub(crate) fn persist_settings(&mut self) -> AppResult<()> {
         config::save_settings(&self.settings)?;
-        // 开了同步就顺手留一份带时间戳的备份。
+        // 开了同步就顺手留一份带时间戳的备份（默认脱敏）。
         if self.settings.sync_enabled {
             self.settings.last_sync_at = config::now_secs();
-            if let Some(path) = write_sync_snapshot(&self.config, &self.settings).ok() {
+            let with_secrets = self.export_with_secrets;
+            if let Some(path) =
+                write_snapshot_with(&self.config, &self.settings, with_secrets).ok()
+            {
                 self.action_msg = Some(format!("已同步到 {}", short_path(&path)));
             }
         }
@@ -132,6 +135,7 @@ impl AppState {
             FormField::ProviderModel(i) => self.provider_at(i).map(|p| p.model.clone()).unwrap_or_default(),
             FormField::ProviderName(i) => self.provider_at(i).map(|p| p.name.clone()).unwrap_or_default(),
             FormField::ImportPath => self.import_path.clone(),
+            FormField::ModelSearch => self.model_query.clone(),
         }
     }
 
@@ -148,6 +152,12 @@ impl AppState {
             }
             FormField::ImportPath => {
                 self.import_path = value;
+                cx.notify();
+                return;
+            }
+            FormField::ModelSearch => {
+                self.model_query = value;
+                self.model_highlight = 0;
                 cx.notify();
                 return;
             }
@@ -194,17 +204,6 @@ impl AppState {
         self.update_settings(|_| {}, cx);
     }
 
-    /// 在厂商的候选模型里循环切换。
-    pub(crate) fn cycle_provider_model(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if let Some(p) = self.settings.providers.get_mut(idx) {
-            if p.models.is_empty() {
-                return;
-            }
-            let cur = p.models.iter().position(|m| m == &p.model).unwrap_or(0);
-            p.model = p.models[(cur + 1) % p.models.len()].clone();
-        }
-        self.update_settings(|_| {}, cx);
-    }
 
     /// 加一个自定义厂商。
     pub(crate) fn add_custom_provider(&mut self, cx: &mut Context<Self>) {
@@ -419,11 +418,16 @@ impl AppState {
     }
 
     pub(crate) fn sync_now(&mut self, cx: &mut Context<Self>) {
-        match write_sync_snapshot(&self.config, &self.settings) {
+        let with_secrets = self.export_with_secrets;
+        match write_snapshot_with(&self.config, &self.settings, with_secrets) {
             Ok(path) => {
                 self.settings.last_sync_at = config::now_secs();
                 let _ = self.persist_settings();
-                self.action_msg = Some(format!("已导出到 {}", short_path(&path)));
+                self.action_msg = Some(if with_secrets {
+                    format!("已导出（含密钥）到 {}", short_path(&path))
+                } else {
+                    format!("已导出（已脱敏）到 {}", short_path(&path))
+                });
             }
             Err(e) => self.action_msg = Some(format!("导出失败：{e}")),
         }
@@ -447,20 +451,49 @@ impl AppState {
             }
         };
         match config::import_all(&text) {
-            Ok((cfg, st)) => {
+            Ok((cfg, mut st, includes_secrets)) => {
+                // 脱敏导出里 Key 是空的：用本地已有的 Key 补齐，
+                // 否则用户点一次导入就把自己填好的密钥全清了。
+                let mut kept = 0usize;
+                if !includes_secrets {
+                    let before: Vec<String> = st
+                        .providers
+                        .iter()
+                        .filter(|p| !p.api_key.trim().is_empty())
+                        .map(|p| p.id.clone())
+                        .collect();
+                    config::merge_keeping_local_keys(&mut st, &self.settings);
+                    kept = st
+                        .providers
+                        .iter()
+                        .filter(|p| {
+                            !p.api_key.trim().is_empty() && !before.contains(&p.id)
+                        })
+                        .count();
+                }
                 self.config = cfg;
                 neverwork_ui::theme::set_theme_mode(st.theme);
-                let old_skills = self.settings.skills.len();
                 self.settings = st;
                 let _ = config::save(&self.config);
                 let _ = config::save_settings(&self.settings);
                 self.ai_ready = self.settings.usable_provider_count() > 0;
-                self.action_msg = Some(format!(
-                    "已导入：{} 个团队、{} 个厂商、{} 个技能",
-                    self.config.teams.len(),
-                    self.settings.providers.len(),
-                    self.settings.skills.len().max(old_skills.min(0))
-                ));
+                let skills = self.settings.skills.len();
+                self.action_msg = Some(if includes_secrets {
+                    format!(
+                        "已导入：{} 个团队、{} 个厂商（含密钥）、{} 个技能",
+                        self.config.teams.len(),
+                        self.settings.providers.len(),
+                        skills
+                    )
+                } else {
+                    format!(
+                        "已导入：{} 个团队、{} 个厂商、{} 个技能；文件不含密钥，已保留本地 {} 个 Key",
+                        self.config.teams.len(),
+                        self.settings.providers.len(),
+                        skills,
+                        kept
+                    )
+                });
             }
             Err(e) => self.action_msg = Some(format!("格式不对：{e}")),
         }
@@ -511,15 +544,23 @@ pub(crate) fn sync_dir() -> PathBuf {
 }
 
 /// 写一份带时间戳的快照。
-fn write_sync_snapshot(
+
+/// 写快照；`include_secrets` 决定是否把 API Key 一起写进去。
+pub(crate) fn write_snapshot_with(
     cfg: &neverwork_core::Config,
     st: &neverwork_core::Settings,
+    include_secrets: bool,
 ) -> AppResult<PathBuf> {
     let dir = sync_dir();
     std::fs::create_dir_all(&dir)?;
     let stamp = format_timestamp(config::now_secs());
     let path = dir.join(format!("neverwork-{stamp}.json"));
-    let text = config::export_all(cfg, st)?;
+    let opts = if include_secrets {
+        config::ExportOptions::with_secrets()
+    } else {
+        config::ExportOptions::default()
+    };
+    let text = config::export_all(cfg, st, opts)?;
     std::fs::write(&path, text)?;
     Ok(path)
 }

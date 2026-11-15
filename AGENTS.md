@@ -9,11 +9,11 @@
 
 ```bash
 cargo run -p neverwork          # 主界面
-cargo test --workspace          # 全部测试（61 个）
+cargo test --workspace          # 全部测试（78 个）
 cargo build -p neverwork        # 只编应用（增量约 6s）
 ```
 
-运行期环境变量：`NW_ROOT`（工作区根）、`NW_API_KEY` / `NW_PROVIDER=openai|anthropic` / `NW_BASE_URL` / `NW_MODEL`（AI 配置）、`NW_VIEW=chat|team|skills|settings`、`NW_SETTINGS_TAB=general|models|skills|sync|about`、`NW_OPEN=<path>`（启动即开文件）、`NW_WIN_W` / `NW_WIN_H`（覆盖窗口逻辑尺寸）、`NW_CONFIG_DIR`（覆盖 `~/.neverwork`）。
+运行期环境变量：`NW_ROOT`（工作区根）、`NW_API_KEY` / `NW_PROVIDER=openai|anthropic` / `NW_BASE_URL` / `NW_MODEL`（AI 配置）、`NW_VIEW=chat|team|skills|settings`、`NW_SETTINGS_TAB=general|models|skills|sync|about`、`NW_PICK_MODEL=<下标>`、`NW_OPEN=<path>`（启动即开文件）、`NW_WIN_W` / `NW_WIN_H`（覆盖窗口逻辑尺寸）、`NW_CONFIG_DIR`（覆盖 `~/.neverwork`）。
 
 ## 红线
 
@@ -22,6 +22,7 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - **`NeverWork/target` 约 9.4G**。增量构建只需几秒，但 `target/debug/deps` 被删过，首次全量要重编约 700 个 crate；不要执行 `cargo clean`，也不要把慢构建当故障。
 - 团队配置持久化在 `~/.neverwork/config.json`（临时文件+rename 原子写），偏好设置在同目录 `settings.json`（含 API Key 明文，别提交、别外传）。不要删除或手改用户配置，测试请用 `NW_CONFIG_DIR` 指向临时目录。
 - **主题必须走 `theme::set_theme_mode()`**，不要在视图里直接写死颜色代码——深浅两套色板由全局原子量切换，直接写 `rgb(0x…)` 的元素在浅色主题下会不可读。
+- **API Key 一律脱敏**：导出/同步必须走 `config::export_all(..., ExportOptions::default())`（不含密钥）；界面只显示 `masked_key()`（末尾 4 位）；不要给 `ProviderEntry` 加回 `derive(Debug)`，它手写的 Debug 会打码。新增任何把 Settings 序列化到文件或日志的路径，先确认 Key 不会跟着走。
 - `design/`、`pic/` 是设计交付与运行截图，`message.md` 是历史交付汇报，都不要当作待改代码。
 - 顶层三份计划文档是历史演进：`rust-ide-plan.md` → `gpui-ide-plan.md` → `gpui-ide-plan-v2.md`（最新口径）。冲突时以 v2 和 README 为准。
 

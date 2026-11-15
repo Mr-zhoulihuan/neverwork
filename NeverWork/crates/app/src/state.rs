@@ -107,6 +107,8 @@ pub enum FormField {
     ProviderName(u8),
     /// 导入配置的路径。
     ImportPath,
+    /// 模型选择器里的搜索框。
+    ModelSearch,
 }
 
 impl FormField {
@@ -208,6 +210,14 @@ pub struct AppState {
     pub skill_search: String,
     /// 导入配置的路径。
     pub import_path: String,
+    /// 打开中的模型选择器（厂商下标）；None 表示未打开。
+    pub model_picker: Option<usize>,
+    /// 模型选择器的搜索词。
+    pub model_query: String,
+    /// 模型选择器里键盘高亮的下标。
+    pub model_highlight: usize,
+    /// 导出配置时是否包含 API Key（默认不含）。
+    pub export_with_secrets: bool,
     /// 最近一次操作的结果提示（设置页内显示）。
     pub action_msg: Option<String>,
     /// 升级检查结果。
@@ -332,6 +342,10 @@ impl AppState {
             skills_tab: 0,
             skill_search: String::new(),
             import_path: String::new(),
+            model_picker: None,
+            model_query: String::new(),
+            model_highlight: 0,
+            export_with_secrets: false,
             action_msg: None,
             update_status: None,
             layout_w: std::rc::Rc::new(std::cell::Cell::new(1200.0)),
@@ -360,6 +374,15 @@ impl AppState {
         }
 
         start_watcher(me.root.clone(), cx);
+        // 调试/截图用：启动即打开某个厂商的模型选择器。
+        if let Ok(v) = std::env::var("NW_PICK_MODEL") {
+            if let Ok(i) = v.parse::<usize>() {
+                if i < me.settings.providers.len() {
+                    me.model_picker = Some(i);
+                    me.active_field = Some(FormField::ModelSearch);
+                }
+            }
+        }
         // 用 NW_VIEW 直达同步页时也自动查一次版本。
         if me.settings_tab == SettingsTab::Sync && me.center == CenterView::Settings {
             me.check_update(cx);
@@ -887,7 +910,9 @@ impl AppState {
                 }
             }
             KeyAction::Escape => {
-                if self.ws_prompt_open {
+                if self.model_picker.is_some() {
+                    self.close_model_picker(cx);
+                } else if self.ws_prompt_open {
                     self.ws_prompt_open = false;
                     self.palette_open = false;
                 } else if self.palette_open {

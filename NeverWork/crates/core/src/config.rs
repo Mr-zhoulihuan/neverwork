@@ -100,35 +100,94 @@ pub fn save_settings(settings: &Settings) -> AppResult<()> {
     Ok(())
 }
 
+/// 导出选项。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportOptions {
+    /// 是否把 API Key 一起导出。
+    ///
+    /// 默认 **false**：导出的文件常被放进云盘、发给同事、贴进聊天，
+    /// 密钥一旦跟着走就收不回来了。需要连同密钥迁移时，用户必须显式勾选。
+    pub include_secrets: bool,
+}
+
+impl Default for ExportOptions {
+    fn default() -> Self {
+        Self {
+            include_secrets: false,
+        }
+    }
+}
+
+impl ExportOptions {
+    pub fn with_secrets() -> Self {
+        Self {
+            include_secrets: true,
+        }
+    }
+}
+
 /// 导出全部配置（团队 + 设置）为一段 JSON，用于同步/备份。
-pub fn export_all(config: &Config, settings: &Settings) -> AppResult<String> {
+///
+/// 默认走脱敏：`settings.providers[].api_key` 全部清空。
+pub fn export_all(config: &Config, settings: &Settings, opts: ExportOptions) -> AppResult<String> {
     #[derive(serde::Serialize)]
     struct Bundle<'a> {
         version: &'a str,
         exported_at: u64,
+        /// 导出时是否包含密钥，导入侧据此判断要不要覆盖本地 Key。
+        includes_secrets: bool,
         config: &'a Config,
-        settings: &'a Settings,
+        settings: Settings,
     }
+    let settings = if opts.include_secrets {
+        settings.clone()
+    } else {
+        settings.redacted()
+    };
     serde_json::to_string_pretty(&Bundle {
         version: crate::APP_VERSION,
         exported_at: now_secs(),
+        includes_secrets: opts.include_secrets,
         config,
         settings,
     })
     .map_err(|e| AppError::Config(e.to_string()))
 }
 
-/// 从导出的 JSON 恢复；返回 (config, settings)。
-pub fn import_all(text: &str) -> AppResult<(Config, Settings)> {
+/// 从导出的 JSON 恢复；返回 (config, settings, 文件里是否带密钥)。
+///
+/// 脱敏导出（`includes_secrets=false`）里的 Key 是空的，
+/// 调用方应当用本地已有的 Key 补齐，而不是把用户已填的 Key 清掉。
+pub fn import_all(text: &str) -> AppResult<(Config, Settings, bool)> {
     #[derive(serde::Deserialize)]
     struct Bundle {
+        #[serde(default)]
+        includes_secrets: bool,
         #[serde(default)]
         config: Option<Config>,
         #[serde(default)]
         settings: Option<Settings>,
     }
     let b: Bundle = serde_json::from_str(text).map_err(|e| AppError::Config(e.to_string()))?;
-    Ok((b.config.unwrap_or_default(), b.settings.unwrap_or_default()))
+    Ok((
+        b.config.unwrap_or_default(),
+        b.settings.unwrap_or_default(),
+        b.includes_secrets,
+    ))
+}
+
+/// 把导入的设置与本地设置合并：按厂商 id 保留本地 Key（导入文件没带 Key 时）。
+pub fn merge_keeping_local_keys(imported: &mut Settings, local: &Settings) {
+    for p in &mut imported.providers {
+        if !p.api_key.trim().is_empty() {
+            continue;
+        }
+        if let Some(local_p) = local.providers.iter().find(|x| x.id == p.id) {
+            if !local_p.api_key.trim().is_empty() {
+                p.api_key = local_p.api_key.clone();
+            }
+        }
+    }
 }
 
 pub fn now_secs() -> u64 {

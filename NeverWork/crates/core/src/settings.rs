@@ -195,7 +195,10 @@ impl Protocol {
 }
 
 /// 一条厂商配置。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// 注意：`api_key` 是唯一会明文落盘的敏感字段，因此**不 derive Debug**，
+/// 改用下面手写的实现，保证任何 `{:?}` 打印都不会泄露密钥。
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderEntry {
     /// 唯一 id（自定义厂商用 `custom-<n>`）。
     pub id: String,
@@ -258,19 +261,47 @@ impl ProviderEntry {
         !self.api_key.trim().is_empty() && !self.model.trim().is_empty()
     }
 
-    /// Key 打码显示（只留前 4 后 4）。
+    /// Key 打码显示：**只留末尾 4 位**，其余一律遮掉。
+    ///
+    /// 不显示前缀是有意的——不少厂商的 Key 前缀含账号/项目标识，
+    /// 截图、录屏、共享屏幕时都可能被看到。
     pub fn masked_key(&self) -> String {
         let k = self.api_key.trim();
         if k.is_empty() {
             return String::new();
         }
         let n = k.chars().count();
-        if n <= 10 {
-            return "•".repeat(n.max(4));
+        if n <= 4 {
+            return "•".repeat(8);
         }
-        let head: String = k.chars().take(4).collect();
         let tail: String = k.chars().skip(n - 4).collect();
-        format!("{head}••••••{tail}")
+        format!("{}{tail}", "•".repeat(8))
+    }
+
+    /// 供「复制 Key」使用：只有用户显式点击才拿到明文。
+    pub fn plain_key(&self) -> &str {
+        &self.api_key
+    }
+
+    /// 脱敏副本：把所有密钥清空，用于导出/分享配置。
+    pub fn redacted(&self) -> Self {
+        let mut p = self.clone();
+        p.api_key.clear();
+        p
+    }
+}
+
+impl std::fmt::Debug for ProviderEntry {
+    /// 手写 Debug：密钥只显示脱敏形式，避免日志意外泄露。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderEntry")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.masked_key())
+            .field("model", &self.model)
+            .field("enabled", &self.enabled)
+            .finish()
     }
 }
 
@@ -532,6 +563,25 @@ impl Settings {
         self.providers.iter_mut().find(|p| p.id == id)
     }
 
+    /// 脱敏副本：清空所有厂商的 API Key。
+    /// 导出、同步、截图分享都应走这个，绝不能直接序列化带密钥的 Settings。
+    pub fn redacted(&self) -> Self {
+        let mut s = self.clone();
+        for p in &mut s.providers {
+            p.api_key.clear();
+        }
+        s
+    }
+
+    /// 已填 Key 的厂商列表（只返回名字，不含密钥）。
+    pub fn keyed_provider_names(&self) -> Vec<String> {
+        self.providers
+            .iter()
+            .filter(|p| !p.api_key.trim().is_empty())
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
     /// 下一个自定义厂商 id。
     pub fn next_custom_id(&self) -> String {
         let mut n = 1;
@@ -590,14 +640,53 @@ mod tests {
     }
 
     #[test]
-    fn masked_key_hides_middle() {
+    fn masked_key_only_keeps_tail() {
         let mut p = ProviderEntry::from_preset(ProviderPreset::OpenAi);
         assert_eq!(p.masked_key(), "");
         p.api_key = "sk-1234567890abcdef".into();
         let m = p.masked_key();
-        assert!(m.starts_with("sk-1"));
+        // 只保留末尾 4 位；前缀也不该出现（截图泄露风险）。
+        assert!(m.ends_with("cdef"), "应保留末尾 4 位: {m}");
+        assert!(!m.contains("sk-"), "不应泄露前缀: {m}");
+        assert!(!m.contains("1234"), "不应泄露中段: {m}");
         assert!(m.contains('•'));
-        assert!(!m.contains("6789"), "中间部分不应出现");
+    }
+
+    #[test]
+    fn masked_key_short_is_fully_hidden() {
+        let mut p = ProviderEntry::from_preset(ProviderPreset::OpenAi);
+        p.api_key = "abc".into();
+        assert_eq!(p.masked_key(), "••••••••", "过短的 Key 应整体遮掉");
+    }
+
+    #[test]
+    fn debug_output_never_leaks_key() {
+        let mut p = ProviderEntry::from_preset(ProviderPreset::OpenAi);
+        p.api_key = "sk-super-secret-value".into();
+        let dbg = format!("{p:?}");
+        assert!(!dbg.contains("super-secret"), "Debug 输出泄露了密钥: {dbg}");
+        assert!(dbg.contains("ProviderEntry"));
+    }
+
+    #[test]
+    fn redacted_clears_all_keys() {
+        let mut s = Settings::default();
+        for p in &mut s.providers {
+            p.api_key = "sk-test".into();
+        }
+        let r = s.redacted();
+        assert!(r.providers.iter().all(|p| p.api_key.is_empty()));
+        // 原对象不受影响
+        assert!(s.providers.iter().any(|p| !p.api_key.is_empty()));
+    }
+
+    #[test]
+    fn keyed_provider_names_excludes_keys() {
+        let mut s = Settings::default();
+        s.providers[0].api_key = "sk-abc".into();
+        let names = s.keyed_provider_names();
+        assert_eq!(names.len(), 1);
+        assert!(!names[0].contains("sk-"), "名单里不能带密钥");
     }
 
     #[test]

@@ -105,7 +105,7 @@ design/   设计稿（HTML/PNG）与设计规范 DESIGN-SPEC.md
 - **响应式 + 专注模式**：窗口较窄或高 DPI 时自动收起侧栏，
   标题栏「◧ 专注」可手动切换。
 
-测试：61 个（app 侧 text_buffer 11 / text_fit 5 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2，core 侧 settings 9，其余在 agent 与 ui）。
+测试：78 个（app 侧 text_buffer 11 / text_fit 5 / model_picker 10 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2，core 侧 settings 13 + config 5，其余在 agent 与 ui）。
 
 ### M4 — 左侧栏重做（对齐 pic/ 参考稿）
 
@@ -134,11 +134,20 @@ design/   设计稿（HTML/PNG）与设计规范 DESIGN-SPEC.md
     缩进宽度、行号显示、自动保存（停止输入 800ms 落盘）、配置目录、恢复默认。
   - **模型与厂商**：内置 10 家主流厂商（OpenAI / Anthropic / Gemini / DeepSeek / 通义千问 /
     智谱 GLM / Moonshot / 豆包 / 百川 / Ollama 本地），每家预填基址与模型列表；
-    填 API Key 即可用，可设当前厂商、启用停用、切换模型、调温度；支持添加自定义厂商
+    填 API Key 即可用，可设当前厂商、启用停用、调温度；支持添加自定义厂商
     （任意 OpenAI 兼容端点，如公司中转）。
+    **模型选择是可搜索的内联面板**（不是逐个循环点击）：点模型行原地展开，
+    输入即按分段模糊匹配过滤（`4o mini` 命中 `gpt-4o-mini`），↑↓ 选择、Enter 确认；
+    搜索词不在列表里时回车直接当自定义模型名。模型再多也一两次按键到位。
   - **技能**：已安装技能列表，可卸载，一键跳到市场。
   - **同步与升级**：对比远端仓库新提交（`git rev-list HEAD..origin/main`）、一键
     `git pull --ff-only`；配置导出成带时间戳的 JSON 快照、按路径导入恢复。
+- **密钥脱敏**（安全）：
+  - 导出/同步默认**不含** API Key（`ExportOptions::default()`），需要完整迁移时
+    必须在界面上显式打开「导出包含 API Key」，并给出明文风险提示。
+  - 导入脱敏文件时按厂商 id 保留本地已填的 Key，不会因为点一次导入就把密钥清空。
+  - 界面只显示 `••••••••` + 末尾 4 位，前缀也不显示（避免截图/录屏泄露）。
+  - `ProviderEntry` 手写 `Debug`，任何 `{:?}` 日志都只输出打码后的 Key。
   - **关于**：版本、依赖、仓库、统计。
 - **技能市场**（图标栏 ✦ 或 ⌘K）：
   - 顶部「技能 / Agent 模板」两个 Tab；搜索框按名称、id、简介、作者过滤。
@@ -176,6 +185,8 @@ set NW_OPEN=path\to\file.rs && cargo run -p neverwork
 set NW_WIN_W=1200 && set NW_WIN_H=740 && cargo run -p neverwork
 # 启动直达某页：chat|team|skills|settings（配合 NW_SETTINGS_TAB=general|models|skills|sync|about）
 set NW_VIEW=settings && set NW_SETTINGS_TAB=models && cargo run -p neverwork
+# 调试：启动即展开某个厂商的模型选择面板（下标从 0 开始）
+set NW_PICK_MODEL=0 && cargo run -p neverwork
 ```
 
 ## 技术说明

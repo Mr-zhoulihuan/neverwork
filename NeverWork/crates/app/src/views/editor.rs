@@ -22,6 +22,7 @@ use crate::line_cache::EditorLines;
 use crate::state::{AppState, InputTarget};
 
 /// 默认行高（会被设置里的字号覆盖）。
+#[allow(dead_code)]
 pub(crate) const LINE_H: f32 = 20.0;
 const GUTTER_W: f32 = 46.0;
 /// 选区底色。
