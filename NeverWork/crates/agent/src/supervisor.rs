@@ -104,9 +104,11 @@ pub fn decision_prompt(team: &Team, user_text: &str, progress: &[(String, String
 /// 跑 supervisor 编排。
 ///
 /// `lead_idx` 是负责决策的角色下标；通常就是第一个角色。
+/// `history` 是同一会话的历史正文，决策与执行都带着它。
 #[allow(clippy::too_many_arguments)]
 pub fn run_supervisor(
     team: &Team,
+    history: &[ChatMessage],
     user_text: &str,
     base_config: ProviderConfig,
     provider_id: &str,
@@ -141,7 +143,9 @@ pub fn run_supervisor(
 
         let mut reply = String::new();
         {
-            let msgs = vec![ChatMessage::user(prompt)];
+            // 带上会话历史：Lead 才看得到用户前面已经问过什么
+            let mut msgs = history.to_vec();
+            msgs.push(ChatMessage::user(prompt));
             let mut on = |ev: StreamEvent| {
                 if let StreamEvent::Delta(d) = ev {
                     reply.push_str(&d);
@@ -208,6 +212,7 @@ pub fn run_supervisor(
 
         let role = &team.roles[target];
         let mut msgs = vec![ChatMessage::system(crate::team::role_system_prompt(role))];
+        msgs.extend(history.iter().cloned());
         msgs.push(ChatMessage::user(user_text.to_string()));
         for (name, body) in &progress {
             msgs.push(ChatMessage::assistant(format!("[{name}] {body}")));
@@ -238,6 +243,7 @@ pub fn run_supervisor(
                     error: e,
                 }),
                 StreamEvent::ToolCalls(_) => {}
+                StreamEvent::Usage(_) => {}
                 StreamEvent::Done => {}
             };
             let _ = provider.stream_chat(&msgs, &mut on);

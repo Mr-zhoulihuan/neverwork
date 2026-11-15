@@ -12,7 +12,9 @@ use serde_json::Value;
 
 use neverwork_core::AppResult;
 
-use crate::{ChatMessage, LlmProvider, ProviderConfig, Role, StreamEvent, ToolCall, ToolSpec};
+use crate::{
+    ChatMessage, LlmProvider, ProviderConfig, Role, StreamEvent, TokenUsage, ToolCall, ToolSpec,
+};
 
 pub struct OpenAiProvider {
     config: ProviderConfig,
@@ -51,6 +53,11 @@ struct WireMessage {
 }
 
 #[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+#[derive(Serialize)]
 struct WireRequest<'a> {
     model: &'a str,
     messages: Vec<WireMessage>,
@@ -60,6 +67,9 @@ struct WireRequest<'a> {
     tools: Vec<WireTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'static str>,
+    /// 不加这个，大多数网关不会在流里返回 token 用量。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
 }
 
 #[derive(Serialize)]
@@ -71,8 +81,8 @@ struct WireTool {
 
 #[derive(Serialize)]
 struct WireToolDef {
-    name: &'static str,
-    description: &'static str,
+    name: String,
+    description: String,
     parameters: Value,
 }
 
@@ -164,7 +174,7 @@ impl OpenAiProvider {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let body = WireRequest {
+        let mut body = WireRequest {
             model: &self.config.model,
             messages: messages.iter().map(to_wire).collect(),
             stream: true,
@@ -174,21 +184,43 @@ impl OpenAiProvider {
                 .map(|t| WireTool {
                     kind: "function",
                     function: WireToolDef {
-                        name: t.name,
-                        description: t.description,
+                        name: t.name.clone(),
+                        description: t.description.clone(),
                         parameters: t.parameters.clone(),
                     },
                 })
                 .collect(),
             tool_choice: if tools.is_empty() { None } else { Some("auto") },
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
         };
 
-        let resp = match ureq::post(&url)
-            .header("Authorization", &format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .send_json(&body)
-        {
+        let send = |body: &WireRequest| {
+            ureq::post(&url)
+                .header("Authorization", &format!("Bearer {}", self.config.api_key))
+                .header("Content-Type", "application/json")
+                .send_json(body)
+        };
+
+        let resp = match send(&body) {
             Ok(r) => r,
+            // 个别老网关/自建代理不认 `stream_options`，会直接回 400。
+            // 不要为了一个用量字段把整轮对话搞挂：去掉再发一次。
+            Err(ureq::Error::StatusCode(400)) => {
+                body.stream_options = None;
+                match send(&body) {
+                    Ok(r) => r,
+                    Err(ureq::Error::StatusCode(code)) => {
+                        on_event(StreamEvent::Error(format!("HTTP {code}")));
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        on_event(StreamEvent::Error(format!("请求失败：{e}")));
+                        return Ok(());
+                    }
+                }
+            }
             Err(ureq::Error::StatusCode(code)) => {
                 // 尽力把服务端的错误正文带出来，否则用户只会看到 HTTP 401 不知道原因
                 on_event(StreamEvent::Error(format!("HTTP {code}")));
@@ -203,6 +235,8 @@ impl OpenAiProvider {
         // 按 index 累积工具调用碎片
         let mut calls: BTreeMap<usize, PartialCall> = BTreeMap::new();
         let mut saw_tool_calls = false;
+        // 用量在流末尾单独一个 chunk 里，且那时 choices 是空数组
+        let mut round_usage: Option<TokenUsage> = None;
 
         let reader = resp.into_body().into_reader();
         crate::sse::for_each_data(reader, |data| {
@@ -221,6 +255,11 @@ impl OpenAiProvider {
                     .unwrap_or("未知错误");
                 on_event(StreamEvent::Error(msg.to_string()));
                 return;
+            }
+
+            // 用量：必须在取 choices 之前读 —— 带 usage 的那个 chunk 里 choices 为空。
+            if let Some(u) = parse_usage_frame(data) {
+                round_usage = Some(u);
             }
 
             let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
@@ -306,6 +345,9 @@ impl OpenAiProvider {
             }
         }
 
+        if let Some(u) = round_usage {
+            on_event(StreamEvent::Usage(u));
+        }
         on_event(StreamEvent::Done);
         Ok(())
     }
@@ -338,7 +380,31 @@ impl LlmProvider for OpenAiProvider {
     }
 }
 
+/// 从一帧 SSE 数据里取真实用量。
+///
+/// OpenAI 把 usage 放在流的最后一个 chunk，而那个 chunk 的 `choices` 是空数组：
+/// 先取 choices 再处理 usage 的写法会把它整条丢掉，用量永远是 0。
+pub(crate) fn parse_usage_frame(data: &str) -> Option<TokenUsage> {
+    let v: Value = serde_json::from_str(data).ok()?;
+    let u = v.get("usage").filter(|u| u.is_object())?;
+    let input = u
+        .get("prompt_tokens")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let output = u
+        .get("completion_tokens")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    if input == 0 && output == 0 {
+        return None;
+    }
+    Some(TokenUsage::new(input, output))
+}
+
 /// 给测试用：把内部消息转成请求体，便于断言字段。
+///
+/// 与实际请求保持一致（包括 `stream_options`）：形状对不上，就只会测出一个
+/// 线上根本不存在的请求。
 #[cfg(test)]
 pub(crate) fn debug_request_body(model: &str, messages: &[ChatMessage], tools: &[ToolSpec]) -> Value {
     use serde_json::json;
@@ -352,15 +418,50 @@ pub(crate) fn debug_request_body(model: &str, messages: &[ChatMessage], tools: &
             .map(|t| WireTool {
                 kind: "function",
                 function: WireToolDef {
-                    name: t.name,
-                    description: t.description,
+                    name: t.name.clone(),
+                    description: t.description.clone(),
                     parameters: t.parameters.clone(),
                 },
             })
             .collect(),
         tool_choice: if tools.is_empty() { None } else { Some("auto") },
+        stream_options: Some(StreamOptions {
+            include_usage: true,
+        }),
     };
     serde_json::to_value(&body).unwrap_or(json!({}))
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::{debug_request_body, parse_usage_frame};
+    use crate::{ChatMessage, TokenUsage};
+
+    #[test]
+    fn request_asks_for_stream_usage() {
+        // 不带 `stream_options.include_usage`，大多数网关不在流里回 usage，
+        // token 预算与用量记账就全是 0。
+        let body = debug_request_body("gpt-4o", &[ChatMessage::user("hi")], &[]);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn usage_with_empty_choices_is_parsed() {
+        // 真实形状：最后一个 chunk 的 choices 是空数组
+        let frame = r#"{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":34}}"#;
+        assert_eq!(parse_usage_frame(frame), Some(TokenUsage::new(12, 34)));
+    }
+
+    #[test]
+    fn missing_or_zero_usage_is_none() {
+        assert_eq!(parse_usage_frame(r#"{"choices":[{"delta":{}}]}"#), None);
+        assert_eq!(
+            parse_usage_frame(r#"{"usage":{"prompt_tokens":0,"completion_tokens":0}}"#),
+            None,
+            "全 0 的用量当作没报，避免把预算记成 0"
+        );
+        assert_eq!(parse_usage_frame("[DONE]"), None);
+    }
 }
 
 #[cfg(test)]

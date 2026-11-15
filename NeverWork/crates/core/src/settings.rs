@@ -194,6 +194,70 @@ impl Protocol {
     }
 }
 
+/// 一个 MCP（Model Context Protocol）服务器：由本机 stdio 启动的外部工具进程。
+///
+/// 安全边界：MCP server 是**用户自己配置的本地进程**，信任级别等同用户自己
+/// 开的终端——它能做任何事。所以它提供的工具一律当作写操作（`requires_approval
+/// = true`），且不走 `ToolContext` 的路径限制（限制不了别的进程）。
+///
+/// **不 derive Debug**：`args` 里可能带 `--api-key xxx`，`env` 里常放
+/// `GITHUB_TOKEN`。手写实现只输出数量与 key 名。
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// 服务名，用作工具名前缀（`mcp__<name>__<tool>`），只用 ASCII 字母数字下划线。
+    pub name: String,
+    /// 可执行文件（`npx` / `node` / `python`…），按 PATH 解析。
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 额外环境变量。值不打印、不导出。
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("args_len", &self.args.len())
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+impl McpServerConfig {
+    /// 名字消毒：只留 `[a-z0-9_]`，因为要拼进工具名发给模型。
+    pub fn sanitized(&self) -> String {
+        let mut out = String::new();
+        for c in self.name.chars() {
+            if c.is_ascii_alphanumeric() {
+                out.push(c.to_ascii_lowercase());
+            } else if !out.ends_with('_') {
+                out.push('_');
+            }
+        }
+        let out = out.trim_matches('_').to_string();
+        if out.is_empty() {
+            "mcp".into()
+        } else {
+            out
+        }
+    }
+
+    /// 能否启动（命令非空且启用）。
+    pub fn usable(&self) -> bool {
+        self.enabled && !self.command.trim().is_empty()
+    }
+}
+
 /// 一条厂商配置。
 ///
 /// 注意：`api_key` 是唯一会明文落盘的敏感字段，因此**不 derive Debug**，
@@ -464,6 +528,13 @@ pub struct Settings {
     /// 当前使用的厂商 id。
     #[serde(default)]
     pub active_provider_id: String,
+    /// 单次运行（一条提问触发的全部轮次）的 token 预算，`0` 表示不限。
+    ///
+    /// 成本口径用 token 而不是货币：单价随模型与折扣变化，硬编码汇率
+    /// 只会算出一个看起来很专业但错得离谱的数字。用量由各 Provider
+    /// 从协议自带的 usage 字段解析，拿不到时按 0 计。
+    #[serde(default = "default_agent_token_budget")]
+    pub max_tokens_per_run: u64,
 
     // ---- 技能 ----
     #[serde(default)]
@@ -484,6 +555,11 @@ pub struct Settings {
     /// 上次检查更新的时间。
     #[serde(default)]
     pub last_update_check: u64,
+
+    // ---- 扩展 ----
+    /// MCP 服务器（stdio）。空 = 不使用 MCP。
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 fn default_ui_scale() -> f32 {
@@ -496,6 +572,12 @@ fn default_editor_font() -> f32 {
 
 fn default_tab_width() -> u8 {
     4
+}
+
+/// 默认单次运行 token 预算。20 万足够一次正常的「读几个文件 + 改几处」，
+/// 又能拦住失控循环；用户可在设置里改，`0` 表示不限。
+fn default_agent_token_budget() -> u64 {
+    200_000
 }
 
 fn default_providers() -> Vec<ProviderEntry> {
@@ -525,11 +607,13 @@ impl Default for Settings {
             word_wrap: false,
             providers,
             active_provider_id: active,
+            max_tokens_per_run: default_agent_token_budget(),
             skills: Vec::new(),
             last_workspace: String::new(),
             sync_enabled: false,
             last_sync_at: 0,
             last_update_check: 0,
+            mcp_servers: Vec::new(),
         }
     }
 }
@@ -575,6 +659,10 @@ impl Settings {
         let mut s = self.clone();
         for p in &mut s.providers {
             p.api_key.clear();
+        }
+        // MCP 的 env 里常放 token（GITHUB_TOKEN 等），导出时必须清掉
+        for m in &mut s.mcp_servers {
+            m.env.clear();
         }
         s
     }

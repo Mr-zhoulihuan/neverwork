@@ -721,7 +721,10 @@ impl AppState {
         self.center = CenterView::Chat;
         match action {
             SessionAction::Resume => {
-                self.notice = Some("已切到该会话，可继续输入指令".into());
+                // 圆圈是「可续跑」：真的接着跑，而不是只给个提示。
+                // 内部会重新校 stage（已跑完 / 还在生成就只提示不动手）。
+                self.resume_session(idx, cx);
+                return;
             }
             SessionAction::Replay => {
                 self.notice = Some("这是一条历史任务，输入新指令即可重新执行".into());

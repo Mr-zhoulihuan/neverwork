@@ -37,6 +37,9 @@ struct Trace {
     errors: Vec<String>,
     denied: usize,
     rounds_limited: bool,
+    /// Provider 报的真实用量（全轮累加），拿不到时为 (0, 0)。
+    input_tokens: u64,
+    output_tokens: u64,
 }
 
 fn run(
@@ -88,6 +91,18 @@ fn run(
             eprintln!("[已拒绝] {}", call.name);
         }
         AgentEvent::RoundLimit => trace.rounds_limited = true,
+        AgentEvent::TimeLimit => trace.rounds_limited = true,
+        AgentEvent::CostLimit { .. } => trace.rounds_limited = true,
+        AgentEvent::Compacting => eprintln!("[上下文] 正在压缩更早的对话…"),
+        AgentEvent::Usage {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            trace.input_tokens = input_tokens;
+            trace.output_tokens = output_tokens;
+            eprintln!("[用量] 输入 {input_tokens} / 输出 {output_tokens} tokens");
+        }
         AgentEvent::Error(e) => trace.errors.push(e.clone()),
         AgentEvent::Done => {}
     };
@@ -100,6 +115,7 @@ fn run(
         prompt,
         dir.clone(),
         true,
+        0, // 测试里不限预算；成本上限由 agent_loop 的单元测试覆盖
         &mut emit,
         cancel,
     );

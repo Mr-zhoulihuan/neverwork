@@ -183,6 +183,15 @@ pub enum MessageKind {
     ToolCall {
         /// 工具名，如 `write_file`。
         name: String,
+        /// 模型给的调用 id。回放历史时要用它与 tool 消息严格配对，
+        /// 少一条配对 provider 就整轮 400。旧配置没有这个字段（空串），
+        /// 这类老记录只能退化成摘要。
+        #[serde(default)]
+        call_id: String,
+        /// 模型给的原始参数 JSON。回放历史时一并带上，模型才看得到
+        /// 当时用的 offset / query / pattern 等细节。
+        #[serde(default)]
+        arguments: String,
         /// 目标文件（相对工作区），只读工具也可能为空。
         #[serde(default)]
         path: String,
@@ -260,6 +269,15 @@ pub struct Message {
     /// 这一轮生成耗时（毫秒）。0 表示还没结束或未记录。
     #[serde(default)]
     pub elapsed_ms: u64,
+    /// 这一轮的真实输入 token（Provider 报的值，0 = 未报）。
+    ///
+    /// 成本口径用 token 不用货币：单价随模型/折扣变，存下来的美元数字
+    /// 第二天就可能全是错的。
+    #[serde(default)]
+    pub tokens_in: u64,
+    /// 这一轮的真实输出 token。
+    #[serde(default)]
+    pub tokens_out: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +301,79 @@ pub enum SessionStatus {
     Done,
     /// 已废弃。
     Dropped,
+}
+
+/// 任务阶段：机器可读的细状态，决定崩溃后能不能续跑。
+///
+/// 与 `SessionStatus` 刻意分开：`SessionStatus` 关心「卡片胶囊显示什么」
+/// （Working / Done / Dropped），这里关心「磁盘上留下 Running 意味着进程
+/// 被杀了」——后者才是断点续跑需要的信号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStage {
+    /// 没在跑任务。
+    #[default]
+    Idle,
+    /// 正在生成（模型产 token / 调工具）。
+    Running,
+    /// 等用户批准写操作。
+    AwaitingApproval,
+    /// 正常跑完。
+    Done,
+    /// 出错停下。
+    Failed,
+    /// 用户主动停止。
+    Cancelled,
+    /// 进程在任务途中被杀，重启后由用户决定要不要续跑。
+    Interrupted,
+}
+
+impl TaskStage {
+    /// 是否「有任务没走完」。
+    ///
+    /// 这两个状态出现在磁盘上就是崩溃证据：正常收尾一定会写成
+    /// `Done` / `Failed` / `Cancelled`。
+    pub fn is_active(&self) -> bool {
+        matches!(self, TaskStage::Running | TaskStage::AwaitingApproval)
+    }
+
+    /// 是否可以从这里续跑。
+    pub fn can_resume(&self) -> bool {
+        matches!(
+            self,
+            TaskStage::Interrupted | TaskStage::Failed | TaskStage::Cancelled
+        )
+    }
+
+    /// 映射成会话卡片右上角的圆圈。
+    ///
+    /// 单一来源：`action` 只做显示投影，权威状态永远是 `stage`。
+    pub fn action(&self) -> SessionAction {
+        match self {
+            TaskStage::Interrupted | TaskStage::Failed | TaskStage::Cancelled => {
+                SessionAction::Resume
+            }
+            TaskStage::Done => SessionAction::Done,
+            TaskStage::Idle | TaskStage::Running | TaskStage::AwaitingApproval => {
+                SessionAction::None
+            }
+        }
+    }
+}
+
+/// 续跑提示：告诉模型「接着做，别重做已经落盘的部分」。
+///
+/// 为什么不重发原始指令：会话历史里已经有一条同样的 user 消息，再发一遍
+/// 等于让模型以为用户又说了一次。续跑只需额外告诉它「上一轮断了」。
+pub fn resume_instruction(original: &str) -> String {
+    let original = original.trim();
+    if original.is_empty() {
+        "上一轮被中断了。请先看当前对话与文件现状，再从断点继续未完成的部分；已经完成并落盘的步骤不要重做。".into()
+    } else {
+        format!(
+            "上一轮被中断了。最初的任务是：{original}\n\n请先确认当前进度（需要时用 read_file 看文件现状），再从断点继续未完成的部分；已经完成并落盘的步骤不要重做。"
+        )
+    }
 }
 
 /// 会话分类标记。用于在列表里区分工作类型，并支持按类筛选。
@@ -396,9 +487,22 @@ pub struct Session {
     /// 是否置顶。置顶的会话永远排在最前，不参与按时间排序。
     #[serde(default)]
     pub pinned: bool,
+
+    // ===== 断点续跑（旧配置反序列化时为空/默认） =====
+    /// 机器可读的任务阶段。崩溃恢复的依据。
+    #[serde(default)]
+    pub stage: TaskStage,
+    /// 中断那一轮的原始指令；续跑时告诉模型「原来要做的是这件事」。
+    #[serde(default)]
+    pub resume_prompt: String,
 }
 
 impl Session {
+    /// 把 `action` 对齐到 `stage`（单一来源，避免两套状态打架）。
+    pub fn sync_action(&mut self) {
+        self.action = self.stage.action();
+    }
+
     /// 记录一次活跃：刷新时间戳与相对标签。
     pub fn touch(&mut self) {
         let now = std::time::SystemTime::now()
@@ -541,6 +645,8 @@ mod aggregate_tests {
         Message {
             kind: MessageKind::ToolCall {
                 name: "write_file".into(),
+                call_id: String::new(),
+                arguments: String::new(),
                 path: path.into(),
                 summary: String::new(),
                 status,
@@ -552,6 +658,8 @@ mod aggregate_tests {
             body: String::new(),
             code: None,
             elapsed_ms: 0,
+            tokens_in: 0,
+            tokens_out: 0,
         }
     }
 
@@ -590,6 +698,8 @@ mod aggregate_tests {
                 body: "hi".into(),
                 code: None,
                 elapsed_ms: 0,
+                tokens_in: 0,
+                tokens_out: 0,
             },
         ];
         assert!(aggregate_changes(&msgs).is_empty());

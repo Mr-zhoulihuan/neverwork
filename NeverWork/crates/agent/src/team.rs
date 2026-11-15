@@ -36,14 +36,31 @@ pub fn run_team(
     emit: &mut dyn FnMut(TeamEvent),
     cancel: Arc<AtomicBool>,
 ) {
+    run_team_with_history(team, Vec::new(), user_text, base_config, emit, cancel);
+}
+
+/// 带会话历史的团队编排。
+///
+/// `history` 是同一会话里之前聊过的正文：不传就退化成只看得见本次提问，
+/// 用户在同一个会话里追问上一轮的事必然答不出。
+#[allow(clippy::too_many_arguments)]
+pub fn run_team_with_history(
+    team: &Team,
+    history: Vec<ChatMessage>,
+    user_text: &str,
+    base_config: ProviderConfig,
+    emit: &mut dyn FnMut(TeamEvent),
+    cancel: Arc<AtomicBool>,
+) {
     let provider_id = std::env::var("NW_PROVIDER").unwrap_or_else(|_| "openai".into());
     match team.flow {
-        FlowMode::Pipeline => run_pipeline(team, user_text, base_config, emit, cancel),
-        FlowMode::Parallel => run_parallel(team, user_text, base_config, emit, cancel),
+        FlowMode::Pipeline => run_pipeline(team, &history, user_text, base_config, emit, cancel),
+        FlowMode::Parallel => run_parallel(team, &history, user_text, base_config, emit, cancel),
         // 主管指派：由 Lead 逐轮决定下一个角色，而不是当成并行
         FlowMode::Supervisor => {
             crate::supervisor::run_supervisor(
                 team,
+                &history,
                 user_text,
                 base_config,
                 &provider_id,
@@ -84,14 +101,16 @@ pub(crate) fn role_provider(base_provider: &str, base: &ProviderConfig, role: &R
 /// 流水线：顺序执行，累积上下文。
 fn run_pipeline(
     team: &Team,
+    history: &[ChatMessage],
     user_text: &str,
     base_config: ProviderConfig,
     emit: &mut dyn FnMut(TeamEvent),
     cancel: Arc<AtomicBool>,
 ) {
     let provider_id = std::env::var("NW_PROVIDER").unwrap_or_else(|_| "openai".into());
-    // 累积的对话上下文（每个角色的最终产出会加进来）。
-    let mut conversation: Vec<ChatMessage> = vec![ChatMessage::user(user_text.to_string())];
+    // 累积的对话上下文：起手是同一会话的历史，再加上本次提问。
+    let mut conversation: Vec<ChatMessage> = history.to_vec();
+    conversation.push(ChatMessage::user(user_text.to_string()));
 
     for (idx, role) in team.roles.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
@@ -117,6 +136,8 @@ fn run_pipeline(
             StreamEvent::Error(e) => emit(TeamEvent::RoleError { role_index: idx, error: e }),
             // 团队编排暂不使用工具调用（角色是「轮流发言」模型），忽略即可。
             StreamEvent::ToolCalls(_) => {}
+            // 用量也不汇总到团队层（成员各自计费，走 trace 看）
+            StreamEvent::Usage(_) => {}
             StreamEvent::Done => {}
         };
         let _ = provider.stream_chat(&msgs, &mut on);
@@ -132,6 +153,7 @@ fn run_pipeline(
 /// 并行：同时向所有角色发起请求。
 fn run_parallel(
     team: &Team,
+    history: &[ChatMessage],
     user_text: &str,
     base_config: ProviderConfig,
     emit: &mut dyn FnMut(TeamEvent),
@@ -150,16 +172,17 @@ fn run_parallel(
         let tx = tx.clone();
         let cancel = cancel.clone();
         let user_text = user_text.to_string();
+        // 每个角色都要一份历史（线程内部拥有）
+        let history: Vec<ChatMessage> = history.to_vec();
         handles.push(std::thread::spawn(move || {
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
             let (prov, cfg) = role_provider(&pid, &base, &role);
             let provider = crate::build_provider(&prov, cfg);
-            let msgs = vec![
-                ChatMessage::system(role_system_prompt(&role)),
-                ChatMessage::user(user_text),
-            ];
+            let mut msgs = vec![ChatMessage::system(role_system_prompt(&role))];
+            msgs.extend(history);
+            msgs.push(ChatMessage::user(user_text));
             let mut on = |ev: StreamEvent| {
                 let _ = tx.send((idx, ev));
             };
@@ -183,6 +206,7 @@ fn run_parallel(
                 }
                 StreamEvent::Error(e) => emit(TeamEvent::RoleError { role_index: idx, error: e }),
                 StreamEvent::ToolCalls(_) => {}
+                StreamEvent::Usage(_) => {}
                 StreamEvent::Done => {
                     emit(TeamEvent::RoleDone { role_index: idx });
                     done_count += 1;

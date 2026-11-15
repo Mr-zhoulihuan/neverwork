@@ -25,7 +25,6 @@ use neverwork_core::{
 };
 use neverwork_ui::theme;
 
-use crate::data;
 use crate::filesystem;
 use crate::keymap::{self, KeyAction, Motion};
 use crate::line_cache::LineCache;
@@ -224,6 +223,11 @@ pub struct AppState {
     // ===== 会话 =====
     pub sessions: Vec<Session>,
     pub active_session: usize,
+    /// 上次会话落盘时间（流式期间节流用，避免每个 delta 都写盘）。
+    sessions_saved_at: std::time::Instant,
+    /// 验证用：本轮答完后自动追问的第二条（`NW_SEND2`）。
+    /// 无人值守时用它确认模型真的看得到上一轮对话，而不是每次都重新开始。
+    follow_up: Option<String>,
 
     // ===== 编辑 / 输入 =====
     pub open_path: Option<PathBuf>,
@@ -423,6 +427,59 @@ fn resolve_root(saved: &str) -> PathBuf {
     }
 }
 
+/// 造一个空白会话。
+///
+/// id 带时间戳：只用 `s{len+1}` 的话，删掉一个再新建就会撞号，
+/// 而 id 是会话在磁盘上的唯一标识（`active_id` 靠它恢复）。
+fn blank_session(seq: usize, config: &Config) -> Session {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Session {
+        id: format!("s{now}-{seq}"),
+        title: "新会话".into(),
+        subtitle: "空白会话".into(),
+        team_name: config
+            .active_team()
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "默认协作团队".into()),
+        messages: Vec::new(),
+        updated_label: "刚刚".into(),
+        preview: "空白会话，输入第一条指令开始".into(),
+        status: neverwork_core::SessionStatus::Idle,
+        meta: String::new(),
+        accent: seq % 6,
+        icon: "＋".into(),
+        badge: String::new(),
+        action: neverwork_core::SessionAction::None,
+        tag: neverwork_core::SessionTag::None,
+        updated_at: now,
+        pinned: false,
+        stage: neverwork_core::TaskStage::Idle,
+        resume_prompt: String::new(),
+    }
+}
+
+/// 会话卡片第二行：把最后一条有内容的消息压成一行。
+///
+/// 工具卡片优先用「工具名 + 路径」，比正文更说明「刚才在干什么」。
+fn last_preview(session: &Session) -> String {
+    for m in session.messages.iter().rev() {
+        if let MessageKind::ToolCall { name, path, .. } = &m.kind {
+            return if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{name} {path}")
+            };
+        }
+        if let Some(line) = m.body.lines().find(|l| !l.trim().is_empty()) {
+            return line.trim().chars().take(28).collect();
+        }
+    }
+    String::new()
+}
+
 impl AppState {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = neverwork_core::config::load_settings();
@@ -442,9 +499,31 @@ impl AppState {
         let config = neverwork_core::config::load();
         // 主题立即生效，首次渲染就是用户上次选的颜色。
         neverwork_ui::theme::set_theme_mode(settings.theme);
+        // MCP 工具在启动时配置一次。连接是惰性的（第一次真要用工具才起进程），
+        // 没配 MCP 的用户零开销；改完配置需重启生效。
+        let mcp_servers = neverwork_agent::mcp::servers_from_env()
+            .unwrap_or_else(|| settings.mcp_servers.clone());
+        neverwork_agent::mcp::configure(mcp_servers);
         let ai_ready = settings.usable_provider_count() > 0
             || neverwork_agent::config_from_env().is_some();
-        let sessions = data::demo_sessions();
+        // 会话来自磁盘，不再是演示数据：重启后要能看到上次聊到哪。
+        // `load_with_recovery` 会把崩溃残留的 Running/AwaitingApproval 降级成
+        // `Interrupted`，并告诉这里降级了几条、丢弃了几条。
+        let (store, report) = neverwork_core::sessions::load_with_recovery(&root);
+        let mut sessions = store.sessions;
+        if sessions.is_empty() {
+            sessions.push(blank_session(0, &config));
+        }
+        // 文件里存的「3分钟前」是写盘那一刻的快照，按真实时间戳重算：
+        // 否则隔一周打开，列表还写着「3分钟前」。
+        for s in &mut sessions {
+            s.updated_label = neverwork_core::relative_label(s.updated_at);
+        }
+        // 恢复到上次激活的那个会话，而不是永远跳到第一条。
+        let active_session = sessions
+            .iter()
+            .position(|s| s.id == store.active_id)
+            .unwrap_or(0);
 
         let mut me = Self {
             workspace: ws,
@@ -467,7 +546,13 @@ impl AppState {
             palette_open: false,
             focus_mode: false,
             sessions,
-            active_session: 0,
+            active_session,
+            // 减 5 秒：保证启动后第一次保存不会被节流档住
+            sessions_saved_at: std::time::Instant::now()
+                - std::time::Duration::from_secs(5),
+            follow_up: std::env::var("NW_SEND2")
+                .ok()
+                .filter(|t| !t.trim().is_empty()),
             open_path: None,
             editor: TextBuffer::multi_line(),
             chat: TextBuffer::single_line(),
@@ -646,11 +731,36 @@ impl AppState {
         if me.settings_tab == SettingsTab::Sync && me.center == CenterView::Settings {
             me.check_update(cx);
         }
+        // 上次退出时还在跑的任务：告诉用户可以续跑，
+        // 否则只会觉得「任务凭空消失了」。
+        if report.recovered > 0 {
+            me.notice = Some(format!(
+                "{} 个任务在退出时被中断，点会话卡片右上角的 ▶ 可从中断处继续",
+                report.recovered
+            ));
+        }
+        // 有记录解析不了（旧版本/新版本字段、手改坏了）：不让它们拖垮
+        // 整个库，但要让用户知道丢过东西，而不是以为历史自己蒸发了。
+        if report.dropped > 0 {
+            me.notice = Some(format!(
+                "{} 条会话记录已损坏被跳过，其余历史不受影响",
+                report.dropped
+            ));
+        }
         cx.notify();
         if let Some(t) = auto_send {
             me.new_session(cx);
             me.chat.reset(t);
             me.send_message(cx);
+        } else if std::env::var("NW_RESUME").is_ok() {
+            // 验证用：启动后直接续跑第一条可续跑的会话（等同点击卡片右上角的 ▶）
+            if let Some(i) = me
+                .sessions
+                .iter()
+                .position(|s| s.stage.can_resume() && !s.resume_prompt.is_empty())
+            {
+                me.resume_session(i, cx);
+            }
         }
         me
     }
@@ -661,38 +771,43 @@ impl AppState {
         &self.sessions[self.active_session.min(self.sessions.len().saturating_sub(1))]
     }
 
+    /// 把会话写回磁盘。失败不中断对话，只提示一次。
+    fn save_sessions(&mut self) {
+        // `action` 只是 `stage` 的显示投影：每次落盘顺手对齐，
+        // 避免两套状态各写各的（圆圈说「已完成」、实际还停在审批上）。
+        for s in &mut self.sessions {
+            s.sync_action();
+        }
+        let store = neverwork_core::SessionStore {
+            active_id: self
+                .sessions
+                .get(self.active_session)
+                .map(|s| s.id.clone())
+                .unwrap_or_default(),
+            sessions: self.sessions.clone(),
+        };
+        if let Err(e) = neverwork_core::sessions::save(&self.root, &store) {
+            self.notice = Some(format!("会话保存失败：{e}"));
+        }
+        self.sessions_saved_at = std::time::Instant::now();
+    }
+
+    /// 流式输出时每个 delta 都写盘太重，这里节流 2 秒；
+    /// 关键节点（发消息、工具结束、本轮结束、切会话）仍走 `save_sessions` 立即落盘。
+    fn autosave_sessions(&mut self) {
+        if self.sessions_saved_at.elapsed() < std::time::Duration::from_secs(2) {
+            return;
+        }
+        self.save_sessions();
+    }
 
     pub(crate) fn new_session(&mut self, cx: &mut Context<Self>) {
-        let id = format!("s{}", self.sessions.len() + 1);
-        self.sessions.push(Session {
-            id,
-            title: "新会话".into(),
-            subtitle: "空白会话".into(),
-            team_name: self
-                .config
-                .active_team()
-                .map(|t| t.name.clone())
-                .unwrap_or_else(|| "默认协作团队".into()),
-            messages: Vec::new(),
-            updated_label: "刚刚".into(),
-            preview: "空白会话，输入第一条指令开始".into(),
-            status: neverwork_core::SessionStatus::Idle,
-            meta: String::new(),
-            accent: self.sessions.len() % 6,
-            icon: "＋".into(),
-            badge: String::new(),
-            action: neverwork_core::SessionAction::None,
-            tag: neverwork_core::SessionTag::None,
-            updated_at: 0,
-            pinned: false,
-        });
-        // 新会话的活跃时间设为当前，列表按它倒序时会自动排到最前
-        if let Some(last) = self.sessions.last_mut() {
-            last.touch();
-        }
+        let s = blank_session(self.sessions.len(), &self.config);
+        self.sessions.push(s);
         self.active_session = self.sessions.len() - 1;
         self.center = CenterView::Chat;
         self.palette_open = false;
+        self.save_sessions();
         cx.notify();
     }
 
@@ -703,6 +818,8 @@ impl AppState {
             // 注意：这里**不** touch。
             // 单纯「点开看一眼」不该把会话顶到最前，否则列表会随着浏览乱跳；
             // 只有真正发消息（send_message）才算活跃。
+            // 但要记住「上次看的是哪个」，重启后回到这里。
+            self.save_sessions();
             cx.notify();
         }
     }
@@ -749,6 +866,7 @@ impl AppState {
             } else {
                 format!("已取消置顶「{short}」")
             });
+            self.save_sessions();
             cx.notify();
         }
     }
@@ -1497,6 +1615,17 @@ impl AppState {
 
     pub(crate) fn send_message(&mut self, cx: &mut Context<Self>) {
         let text = self.chat.text().trim().to_string();
+        self.send_text(text, None, cx);
+    }
+
+    /// 真正发一条指令。
+    ///
+    /// `send_message` 从输入框取文本，续跑（`resume_session`）直接调这里：
+    /// 两条路径共用同一套记账、落盘与状态机迁移，不会一边有 stage 一边没有。
+    ///
+    /// `keep_prompt`：续跑时传原始任务，避免 `resume_prompt` 被「接着做」
+    /// 提示覆盖——否则第二次中断就再也想不起原来要做什么了。
+    fn send_text(&mut self, text: String, keep_prompt: Option<String>, cx: &mut Context<Self>) {
         if text.is_empty() || self.streaming {
             return;
         }
@@ -1527,14 +1656,30 @@ impl AppState {
                 body: text.clone(),
                 code: None,
                 elapsed_ms: 0,
+                tokens_in: 0,
+                tokens_out: 0,
             });
             session.team_name = team.name.clone();
             if session.title.is_empty() || session.title == "新会话" {
                 session.title = text.chars().take(16).collect();
+                // 图标跟标题一起换成首字：列表里比「＋」好认
+                session.icon = text
+                    .chars()
+                    .next()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "◈".into());
             }
+            session.preview = text.chars().take(24).collect();
+            session.status = neverwork_core::SessionStatus::Working;
+            // 状态机：这一轮开始了。磁盘上留着 Running 就是崩溃过的证据。
+            session.stage = neverwork_core::TaskStage::Running;
+            session.resume_prompt = keep_prompt.unwrap_or_else(|| text.clone());
+            session.sync_action();
             // 真正产生内容才算活跃：刷新时间戳让它在列表里上浮
             session.touch();
         }
+        // 用户提问立刻落盘：即便下一秒崩了，已发出的指令也不会丢。
+        self.save_sessions();
 
         self.streaming = true;
         self.turn_started = Some(std::time::Instant::now());
@@ -1568,6 +1713,35 @@ impl AppState {
         }
     }
 
+    /// 续跑一条被中断 / 失败 / 已停止的会话。
+    ///
+    /// 不重发原始指令：历史里已经有一条同样的 user 消息，重发等于让模型
+    /// 以为用户又说了一遍。改为发一条「接着做」的提示；已经写过的文件
+    /// 靠工具层的幂等键（内容相同 → ok）保证重做不破坏。
+    pub(crate) fn resume_session(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx >= self.sessions.len() {
+            return;
+        }
+        if self.streaming {
+            self.notice = Some("还在生成中，等这一轮结束再继续".into());
+            cx.notify();
+            return;
+        }
+        let stage = self.sessions[idx].stage;
+        if !stage.can_resume() {
+            self.notice = Some("这条会话没有需要续跑的进度".into());
+            cx.notify();
+            return;
+        }
+        let original = self.sessions[idx].resume_prompt.clone();
+        self.active_session = idx;
+        self.center = CenterView::Chat;
+        self.notice = Some("正在从中断处继续…".into());
+        let hint = neverwork_core::resume_instruction(&original);
+        // 传 `Some(original)`：续跑期间再被中断，`resume_prompt` 仍是原始任务
+        self.send_text(hint, Some(original), cx);
+    }
+
     /// 带工具的 Agent 链：按角色顺序串行执行，事件经 flume 回到 UI 线程。
     ///
     /// 每个角色一次完整的「模型 → 工具 → 回填」循环；某个角色的产出会作为下一个角色的
@@ -1583,16 +1757,21 @@ impl AppState {
     ) {
         // 关工具时把 false 传下去，模型连工具清单都看不到。
         let with_tools = self.tools_enabled;
+        // 单次运行的 token 预算（0 = 不限），随设置走。
+        let max_tokens = self.settings.max_tokens_per_run;
         let cancel = self.cancel.clone();
         let root = self.root.clone();
         // 线程里用一份，UI 侧留一份（角色名/颜色要用来渲染气泡）
+        // 本会话之前聊过的内容。不喂给模型它就「失忆」：第二轮问
+        // 「刚才让你读的是哪个文件」必然答不出，也看不出用户在追问。
+        let seeded = history_for_model(&self.sessions[session_idx].messages, &text);
         let roles_for_ui = roles.clone();
         // (角色下标, 事件)
         let (tx, rx) = flume::unbounded::<(usize, neverwork_agent::AgentEvent)>();
 
         std::thread::spawn(move || {
-            // 跨角色累积的对话上下文
-            let mut history: Vec<neverwork_agent::ChatMessage> = Vec::new();
+            // 跨角色累积的对话上下文，起手带上会话历史
+            let mut history: Vec<neverwork_agent::ChatMessage> = seeded;
             for (ri, role) in roles.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
                     break;
@@ -1613,6 +1792,7 @@ impl AppState {
                         &text,
                         root.clone(),
                         with_tools,
+                        max_tokens,
                         &mut emit,
                         cancel.clone(),
                     );
@@ -1637,6 +1817,8 @@ impl AppState {
             // 前面的永远停在「执行中」转圈。
             let mut tool_msg: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
+            // 本轮真实用量（Provider 报的输入/输出 token），收尾时记到消息上。
+            let mut turn_usage = (0u64, 0u64);
 
             loop {
                 let ev = rx.recv_async().await;
@@ -1661,6 +1843,8 @@ impl AppState {
                                     body: String::new(),
                                     code: None,
                                     elapsed_ms: 0,
+                                    tokens_in: 0,
+                                    tokens_out: 0,
                                 });
                                 i
                             });
@@ -1668,6 +1852,8 @@ impl AppState {
                                 m.body.push_str(&d);
                             }
                             this.chat_scroll_dirty.set(true);
+                            // 流式期间节流保存（2 秒），别每个 token 都写盘
+                            this.autosave_sessions();
                             cx.notify();
                         });
                     }
@@ -1683,6 +1869,10 @@ impl AppState {
                             this.sessions[session_idx].messages.push(Message {
                                 kind: MessageKind::ToolCall {
                                     name: call.name.clone(),
+                                    // 存 id 与参数：下一轮追问时要把这次调用
+                                    // 连结果一起回放给模型，否则它只能重读
+                                    call_id: call.id.clone(),
+                                    arguments: history_arguments(&call),
                                     path: call.path_arg(),
                                     summary: call.summary(),
                                     status: if requires_approval {
@@ -1704,9 +1894,13 @@ impl AppState {
                                 body: String::new(),
                                 code: None,
                                 elapsed_ms: 0,
+                                tokens_in: 0,
+                                tokens_out: 0,
                             });
                             tool_msg.insert(call.id.clone(), idx);
                             this.chat_scroll_dirty.set(true);
+                            // 工具节点是明确的阶段边界，立即落盘
+                            this.save_sessions();
                             cx.notify();
                         });
                     }
@@ -1729,6 +1923,13 @@ impl AppState {
                                     summary,
                                     respond,
                                 });
+                                // 卡在等人：磁盘上留 `AwaitingApproval`，
+                                // 下次启动才会提示「这个任务被打断了」。
+                                if let Some(s) = this.sessions.get_mut(session_idx) {
+                                    s.stage = neverwork_core::TaskStage::AwaitingApproval;
+                                    s.sync_action();
+                                }
+                                this.save_sessions();
                             }
                             this.chat_scroll_dirty.set(true);
                             cx.notify();
@@ -1772,7 +1973,15 @@ impl AppState {
                             }
                             this.pending = None;
                             this.refresh_tree(cx);
+                            // 审批/执行结束后继续跑：离开「等人」状态
+                            if let Some(s) = this.sessions.get_mut(session_idx) {
+                                if s.stage == neverwork_core::TaskStage::AwaitingApproval {
+                                    s.stage = neverwork_core::TaskStage::Running;
+                                    s.sync_action();
+                                }
+                            }
                             this.chat_scroll_dirty.set(true);
+                            this.save_sessions();
                             cx.notify();
                         });
                     }
@@ -1787,6 +1996,14 @@ impl AppState {
                                 }
                             }
                             this.pending = None;
+                            // 拒绝后 agent 会换个办法继续，不能停在「等人」
+                            if let Some(s) = this.sessions.get_mut(session_idx) {
+                                if s.stage == neverwork_core::TaskStage::AwaitingApproval {
+                                    s.stage = neverwork_core::TaskStage::Running;
+                                    s.sync_action();
+                                }
+                            }
+                            this.save_sessions();
                             cx.notify();
                         });
                     }
@@ -1798,6 +2015,44 @@ impl AppState {
                                 "已达到本轮工具调用上限，不再继续读取，正在基于已有信息作答…"
                                     .into(),
                             );
+                            cx.notify();
+                        });
+                    }
+                    neverwork_agent::AgentEvent::TimeLimit => {
+                        let _ = weak.update(async_cx, |this, cx| {
+                            // 同样是「停下并收尾」，不是失败。
+                            this.notice = Some(
+                                "这次运行已到时间上限，不再继续调用工具，正在基于已读内容作答…"
+                                    .into(),
+                            );
+                            cx.notify();
+                        });
+                    }
+                    // 用量已由 agent 写进 trace（~/.neverwork/traces/）；
+                    // 这里把它记到本轮回答上，页脚才看得到花了多少。
+                    neverwork_agent::AgentEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                        ..
+                    } => {
+                        turn_usage = (input_tokens, output_tokens);
+                    }
+                    // 上下文超预算，多一次轻量摘要调用；给用户一个提示，
+                    // 否则看起来就是卡住了。
+                    neverwork_agent::AgentEvent::Compacting => {
+                        let _ = weak.update(async_cx, |this, cx| {
+                            this.notice =
+                                Some("上下文已超预算，正在把更早的对话压成摘要…".into());
+                            cx.notify();
+                        });
+                    }
+                    neverwork_agent::AgentEvent::CostLimit { used, limit } => {
+                        let _ = weak.update(async_cx, |this, cx| {
+                            // 和轮数/时间上限同性质：停下来收尾，不是报错。
+                            // 带上真实数字，用户才知道是预算设小了还是任务真失控了。
+                            this.notice = Some(format!(
+                                "这次运行已用完 token 预算（{used} / {limit}），不再继续调用工具，正在基于已读内容作答…"
+                            ));
                             cx.notify();
                         });
                     }
@@ -1825,6 +2080,12 @@ impl AppState {
                         };
                         let _ = weak.update(async_cx, |this, cx| {
                             this.notice = Some(msg);
+                            // 真错误：记成 `Failed`，卡片给「可续跑」的圆圈。
+                            // 收尾逻辑会避开 Failed，不会被后面的 Done 盖掉。
+                            if let Some(s) = this.sessions.get_mut(session_idx) {
+                                s.stage = neverwork_core::TaskStage::Failed;
+                                s.sync_action();
+                            }
                             cx.notify();
                         });
                     }
@@ -1835,6 +2096,8 @@ impl AppState {
             let _ = weak.update(async_cx, |this, cx| {
                 this.streaming = false;
                 this.pending = None;
+                // 先把取消标志取出来，后面要可变借用 sessions
+                let cancelled = this.cancel.load(Ordering::Relaxed);
                 // 把本轮耗时写到最后一条回答上，渲染成 OpenCode 那样的页脚。
                 if let Some(started) = this.turn_started.take() {
                     let ms = started.elapsed().as_millis() as u64;
@@ -1846,8 +2109,32 @@ impl AppState {
                             .find(|m| matches!(m.kind, MessageKind::Agent { .. }))
                         {
                             m.elapsed_ms = ms;
+                            m.tokens_in = turn_usage.0;
+                            m.tokens_out = turn_usage.1;
                         }
+                        // 本轮收尾：状态与摘要归位，左侧卡片才反映真实进度
+                        session.status = neverwork_core::SessionStatus::Done;
+                        // `Failed` 是真实失败，不能被「正常收尾」覆盖；
+                        // 用户点过停止则是 `Cancelled`（可续跑），其余算跑完。
+                        if session.stage != neverwork_core::TaskStage::Failed {
+                            session.stage = if cancelled {
+                                neverwork_core::TaskStage::Cancelled
+                            } else {
+                                neverwork_core::TaskStage::Done
+                            };
+                        }
+                        session.sync_action();
+                        let preview = last_preview(session);
+                        session.preview = preview;
+                        session.touch();
                     }
+                }
+                // 本轮结束强制落盘：下次启动打开就是这个瞬间的内容
+                this.save_sessions();
+                // 验证用：本轮答完自动追问下一条（`NW_SEND2`）
+                if let Some(q) = this.follow_up.take() {
+                    this.chat.reset(q);
+                    this.send_message(cx);
                 }
                 cx.notify();
             });
@@ -1866,13 +2153,15 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let cancel = self.cancel.clone();
+        // 纯文本多角色也一样会「失忆」：同一会话的前文要带上
+        let seeded = history_for_model(&self.sessions[session_idx].messages, &text);
         let (tx, rx) = flume::unbounded::<neverwork_agent::TeamEvent>();
 
         std::thread::spawn(move || {
             let mut emit = |ev: neverwork_agent::TeamEvent| {
                 let _ = tx.send(ev);
             };
-            neverwork_agent::run_team(&team, &text, config, &mut emit, cancel);
+            neverwork_agent::run_team_with_history(&team, seeded, &text, config, &mut emit, cancel);
         });
 
         cx.spawn(async move |weak, async_cx| {
@@ -1897,6 +2186,8 @@ impl AppState {
                                         body: String::new(),
                                         code: None,
                                         elapsed_ms: 0,
+                                        tokens_in: 0,
+                                        tokens_out: 0,
                                     });
                                     role_msg.insert(role_index, idx);
                                 }
@@ -1914,12 +2205,18 @@ impl AppState {
                                 }
                             }
                             this.chat_scroll_dirty.set(true);
+                            this.autosave_sessions();
                             cx.notify();
                         });
                     }
                     Ok(neverwork_agent::TeamEvent::RoleError { error, .. }) => {
                         let _ = weak.update(async_cx, |this, cx| {
                             this.notice = Some(format!("Agent 错误：{error}"));
+                            if let Some(s) = this.sessions.get_mut(session_idx) {
+                                s.stage = neverwork_core::TaskStage::Failed;
+                                s.sync_action();
+                            }
+                            this.save_sessions();
                             cx.notify();
                         });
                     }
@@ -1927,6 +2224,22 @@ impl AppState {
                     Ok(neverwork_agent::TeamEvent::AllDone) | Err(_) => {
                         let _ = weak.update(async_cx, |this, cx| {
                             this.streaming = false;
+                            let cancelled = this.cancel.load(Ordering::Relaxed);
+                            if let Some(session) = this.sessions.get_mut(session_idx) {
+                                session.status = neverwork_core::SessionStatus::Done;
+                                if session.stage != neverwork_core::TaskStage::Failed {
+                                    session.stage = if cancelled {
+                                        neverwork_core::TaskStage::Cancelled
+                                    } else {
+                                        neverwork_core::TaskStage::Done
+                                    };
+                                }
+                                session.sync_action();
+                                let preview = last_preview(session);
+                                session.preview = preview;
+                                session.touch();
+                            }
+                            this.save_sessions();
                             cx.notify();
                         });
                         break;
@@ -2230,6 +2543,14 @@ impl AppState {
             // 保持展开：`awaiting` 是强制展开的条件，状态一回 `Running` 卡片就会
             // 收起，用户看不到随后的写入结果和 diff。
             self.expanded_steps.insert(p.msg_idx);
+            // 决定已下：离开「等人」，回到执行中（下一次落盘才不会被当成崩溃）
+            if let Some(s) = self.sessions.get_mut(p.session_idx) {
+                if s.stage == neverwork_core::TaskStage::AwaitingApproval {
+                    s.stage = neverwork_core::TaskStage::Running;
+                    s.sync_action();
+                }
+            }
+            self.save_sessions();
         }
         cx.notify();
     }
@@ -2254,6 +2575,9 @@ impl AppState {
                     }
                 }
             }
+            // 用户主动停止：可续跑，但不是失败也不是完成
+            session.stage = neverwork_core::TaskStage::Cancelled;
+            session.sync_action();
         }
         self.notice = Some("已停止生成".into());
         cx.notify();
@@ -2480,6 +2804,383 @@ fn start_watcher(root: PathBuf, cx: &mut Context<AppState>) {
     .detach();
 }
 
+/// 单个会话送进模型的历史条数上限。
+///
+/// 一条工具对（`assistant.tool_calls` + `tool`）至少占 2 条，
+/// 「介绍这个项目」动辄读几十个文件，上限太小会在第一轮结束时就
+/// 把观察全挤掉，模型在追问时只能把项目重读一遍。
+const HISTORY_MAX_MSGS: usize = 90;
+/// 历史正文的总字符预算。
+///
+/// 故意留得比 `agent::CONTEXT_BUDGET_CHARS`（160k）小：agent 侧还要加
+/// system prompt 与本轮新产生的工具结果，历史把窗口吃满就等于逼它截新内容。
+const HISTORY_BUDGET_CHARS: usize = 120_000;
+/// 历史里单条工具结果保留的开头长度。
+///
+/// 超预算时先截到这里而不是整条丢：保住「哪个文件 + 它怎么开头」
+/// 才能让模型判断要不要重读，否则它对上一轮的观察一无所知。
+const HISTORY_TOOL_HEAD: usize = 3_000;
+/// 截断后补在最前面的占位，告诉模型「上文不完整」。
+const HISTORY_OMITTED: &str = "（更早的对话已省略）";
+/// 存进历史的参数上限。超过就退化成只有 path：`write_file` 的参数
+/// 含整份文件内容，原样存一遍会让会话文件翻倍，而那些内容已经在磁盘上。
+const ARGS_KEEP_CHARS: usize = 4_000;
+
+/// 回放历史时记进 `assistant.tool_calls` 的参数。
+fn history_arguments(call: &neverwork_agent::ToolCall) -> String {
+    let raw = call.arguments.trim();
+    if raw.chars().count() <= ARGS_KEEP_CHARS {
+        return raw.to_string();
+    }
+    let path = call.path_arg();
+    if path.is_empty() {
+        "{}".into()
+    } else {
+        let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+        format!(r#"{{"path":"{escaped}"}}"#)
+    }
+}
+
+/// 工具结果为空时的占位。
+///
+/// `tool` 消息不能是空内容（部分 provider 直接报错），更不能让模型
+/// 以为自己拿到了结果——拒绝、失败、中断各自要说清楚。
+fn tool_placeholder(status: neverwork_core::ToolRunStatus) -> &'static str {
+    use neverwork_core::ToolRunStatus as S;
+    match status {
+        S::Denied => "[用户拒绝了这次调用，没有执行]",
+        S::Failed => "[调用失败，没有输出]",
+        S::Cancelled => "[用户中断了生成，这次调用没有结果]",
+        _ => "[没有输出]",
+    }
+}
+
+/// 把连续的工具卡片压成一条摘要。
+///
+/// 只给**旧记录**用：本功能上线前写下的卡片没有 `call_id`，配不成
+/// `assistant.tool_calls` + `tool` 对，硬凑就是伪造协议结构（整轮 400）。
+/// 新记录走 `emit_tool_block`，带真实输出回放。
+///
+/// 文案写成「会话记录」而不是第一人称：这条以 assistant 承载只是为了协议上安全
+/// （工具消息必须有 `call_id` 配对），模型不该把它当成自己说过的话去引用。
+fn tool_digest(cards: &[&neverwork_core::Message]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    // cards 是倒序攒的，反向走才是实际发生顺序
+    for m in cards.iter().rev() {
+        let MessageKind::ToolCall {
+            name,
+            path,
+            status,
+            output,
+            ..
+        } = &m.kind
+        else {
+            continue;
+        };
+        let verdict = match status {
+            ToolRunStatus::Ok => format!("成功，返回 {} 字符", output.chars().count()),
+            ToolRunStatus::Denied => "被用户拒绝".to_string(),
+            ToolRunStatus::Failed => "失败".to_string(),
+            // 没跑完的调用不构成「做过的事」
+            _ => continue,
+        };
+        let target = if path.is_empty() {
+            String::new()
+        } else {
+            format!(" {path}")
+        };
+        parts.push(format!("{name}{target} → {verdict}"));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("（会话记录 · 上一轮调用过工具：{}）", parts.join("；")))
+}
+
+/// 历史里的一块。
+///
+/// 工具卡片必须成块处理：`assistant.tool_calls` 与它的 `tool` 结果
+/// 同生同死——少一条配对，OpenAI 协议下整轮 400。
+enum HistoryBlock<'a> {
+    /// 一条正文（用户提问 / 助手回答）。不截断：截了就是伪造。
+    Text(&'a neverwork_core::Message),
+    /// 一段连续的工具卡片。
+    Tools {
+        cards: Vec<&'a neverwork_core::Message>,
+        /// 预算不够时只回放每条结果的开头，而不是整块丢掉。
+        head_only: bool,
+    },
+}
+
+impl HistoryBlock<'_> {
+    /// 全文成本（字符）。
+    fn chars(&self) -> usize {
+        match self {
+            Self::Text(m) => m.body.trim().chars().count(),
+            Self::Tools { cards, head_only } => tool_block_chars(cards, *head_only),
+        }
+    }
+
+    /// 占用的模型消息条数（一块工具是 1 条 `assistant.tool_calls` + N 条结果）。
+    fn msgs(&self) -> usize {
+        match self {
+            Self::Text(_) => 1,
+            Self::Tools { cards, .. } => 1 + cards.len(),
+        }
+    }
+}
+
+/// 一块工具卡片在历史里的字符成本。
+fn tool_block_chars(cards: &[&neverwork_core::Message], head_only: bool) -> usize {
+    cards
+        .iter()
+        .map(|m| match &m.kind {
+            MessageKind::ToolCall { output, .. } => {
+                let body = output.trim();
+                if head_only {
+                    keep_head(body, HISTORY_TOOL_HEAD).chars().count()
+                } else {
+                    body.chars().count()
+                }
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+/// 把一块工具结果截到开头，返回省下的字符数。
+fn trim_tool_block(b: &mut HistoryBlock) -> usize {
+    let HistoryBlock::Tools { cards, head_only } = b else {
+        return 0;
+    };
+    if *head_only {
+        return 0;
+    }
+    let before = tool_block_chars(cards, false);
+    *head_only = true;
+    before.saturating_sub(tool_block_chars(cards, true))
+}
+
+/// 一段连续工具卡片 → `assistant.tool_calls` + 若干 `tool` 结果。
+///
+/// 这是「第二轮不再重读项目」的关键：把上一轮真实读到的内容带回去，
+/// 模型只需要看摘要里没有的细节，而不是把整个项目重新读一遍。
+fn emit_tool_block(
+    seg: &[&neverwork_core::Message],
+    head_only: bool,
+    out: &mut Vec<neverwork_agent::ChatMessage>,
+) {
+    /// 把攒下的调用一次性发出去，保持与 tool 结果的顺序一致
+    fn flush(
+        calls: &mut Vec<neverwork_agent::ToolCall>,
+        results: &mut Vec<neverwork_agent::ChatMessage>,
+        out: &mut Vec<neverwork_agent::ChatMessage>,
+    ) {
+        if calls.is_empty() {
+            return;
+        }
+        out.push(neverwork_agent::ChatMessage::assistant_with_tools(
+            "",
+            std::mem::take(calls),
+        ));
+        out.append(results);
+        results.clear();
+    }
+
+    let mut calls: Vec<neverwork_agent::ToolCall> = Vec::new();
+    let mut results: Vec<neverwork_agent::ChatMessage> = Vec::new();
+    // 本功能上线前写的记录没有 call_id，配不成对，只能退化成摘要
+    let mut legacy: Vec<&neverwork_core::Message> = Vec::new();
+    for m in seg {
+        let MessageKind::ToolCall {
+            name,
+            call_id,
+            arguments,
+            status,
+            output,
+            ..
+        } = &m.kind
+        else {
+            continue;
+        };
+        // 没跑完的调用不构成观察（中断留下的 Running、等审批的 Awaiting）：
+        // 回放成「已执行」就是伪造，模型会拿它当既成事实往下推。
+        if status.is_pending() {
+            continue;
+        }
+        if call_id.is_empty() {
+            flush(&mut calls, &mut results, out);
+            legacy.push(m);
+            continue;
+        }
+        if !legacy.is_empty() {
+            if let Some(d) = tool_digest(&legacy) {
+                out.push(neverwork_agent::ChatMessage::assistant(d));
+            }
+            legacy.clear();
+        }
+        calls.push(neverwork_agent::ToolCall {
+            id: call_id.clone(),
+            name: name.clone(),
+            arguments: arguments.clone(),
+        });
+        let body = output.trim();
+        let text = if body.is_empty() {
+            tool_placeholder(*status).to_string()
+        } else if head_only && body.chars().count() > HISTORY_TOOL_HEAD {
+            format!(
+                "{}\n…（已截断，原文 {} 字符；需要细节请重新读取）",
+                keep_head(body, HISTORY_TOOL_HEAD),
+                body.chars().count()
+            )
+        } else {
+            output.clone()
+        };
+        results.push(neverwork_agent::ChatMessage::tool_result(
+            call_id.clone(),
+            text,
+        ));
+    }
+    if !legacy.is_empty() {
+        if let Some(d) = tool_digest(&legacy) {
+            out.push(neverwork_agent::ChatMessage::assistant(d));
+        }
+    }
+    flush(&mut calls, &mut results, out);
+}
+
+/// 取前 `max` 个字符（按 UTF-8 边界切，不会 panic）。
+fn keep_head(s: &str, max: usize) -> &str {
+    if s.chars().count() <= max {
+        return s;
+    }
+    let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
+    &s[..end]
+}
+
+/// 把会话里已经聊过的内容整理成喂给模型的历史。
+///
+/// 正文（用户 / 助手）原样取用；工具卡片**连同真实输出一起回放**成
+/// `assistant.tool_calls` + `tool` 消息对——模型追问时能直接看到上一轮
+/// 读到了什么，不必把整个项目重读一遍。真实踩过：先让它介绍 `E:\go\nas-os`，
+/// 再问 btrfs，它手里只剩「读过哪些文件」的目录，于是又从零读了一遍。
+///
+/// 工具卡片必须整块进、整块出：`assistant.tool_calls` 与它的 `tool`
+/// 结果少一条配对，OpenAI 协议下整轮 400。
+///
+/// `current` 是本次提问：`send_message` 已经把它 push 进列表，但它会作为
+/// `input` 单独传给 `run_agent`，这里要跳过，否则模型看到同一句话两遍。
+fn history_for_model(
+    messages: &[neverwork_core::Message],
+    current: &str,
+) -> Vec<neverwork_agent::ChatMessage> {
+    // ---- 1. 正序分组：正文各成一块，连续工具卡片合成一块 ----
+    let mut blocks: Vec<HistoryBlock> = Vec::new();
+    for m in messages {
+        match &m.kind {
+            MessageKind::ToolCall { status, .. } if !status.is_pending() => {
+                match blocks.last_mut() {
+                    Some(HistoryBlock::Tools { cards, .. }) => cards.push(m),
+                    _ => blocks.push(HistoryBlock::Tools {
+                        cards: vec![m],
+                        head_only: false,
+                    }),
+                }
+            }
+            MessageKind::User | MessageKind::Agent { .. } if !m.body.trim().is_empty() => {
+                blocks.push(HistoryBlock::Text(m));
+            }
+            _ => {}
+        }
+    }
+
+    // ---- 2. 末尾那条就是本次提问才跳过（body 对不上就当普通历史） ----
+    if let Some(HistoryBlock::Text(m)) = blocks.last() {
+        if matches!(&m.kind, MessageKind::User) && m.body.trim() == current.trim() {
+            blocks.pop();
+        }
+    }
+
+    // ---- 3. 从最近往回挑，先用条数框住 ----
+    // 这里不判字符预算：一次 read_file 就能返回几十万字符，按字符挑会把
+    // 「读完这个项目」整块丢掉，而那正是追问时最需要的东西。字符交给第 4 步。
+    let mut picked: Vec<HistoryBlock> = Vec::new();
+    let mut count = 0usize;
+    let mut truncated = false;
+    for b in blocks.into_iter().rev() {
+        let n = b.msgs();
+        // 一块自身就超上限（一轮读了几十个文件）也收：它是「读过什么」的
+        // 唯一线索，丢了这个块模型就只剩重读一条路。
+        if !picked.is_empty() && n <= HISTORY_MAX_MSGS && count + n > HISTORY_MAX_MSGS {
+            truncated = true;
+            break;
+        }
+        count += n;
+        picked.push(b);
+    }
+    picked.reverse();
+
+    // ---- 4. 压字符预算 ----
+    let mut used: usize = picked.iter().map(|b| b.chars()).sum();
+    if used > HISTORY_BUDGET_CHARS {
+        truncated = true;
+        // 4a. 先截工具结果的开头，最新的那块保持原样（当前推理正靠它）
+        let tool_idxs: Vec<usize> = picked
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| matches!(b, HistoryBlock::Tools { head_only: false, .. }))
+            .map(|(i, _)| i)
+            .collect();
+        for &i in tool_idxs.iter().rev().skip(1) {
+            if used <= HISTORY_BUDGET_CHARS {
+                break;
+            }
+            used -= trim_tool_block(&mut picked[i]);
+        }
+        // 4b. 还不够：最新的也截
+        for &i in tool_idxs.iter().rev() {
+            if used <= HISTORY_BUDGET_CHARS {
+                break;
+            }
+            used -= trim_tool_block(&mut picked[i]);
+        }
+        // 4c. 正文本身太长截不了：先丢更早的工具块（内容已被后面的回答消化），
+        //     工具块丢完还超才丢更早的正文，且至少留最后一条。
+        let mut i = 0;
+        while used > HISTORY_BUDGET_CHARS && i < picked.len() {
+            if matches!(picked[i], HistoryBlock::Tools { .. }) {
+                used = used.saturating_sub(picked.remove(i).chars());
+            } else {
+                i += 1;
+            }
+        }
+        while used > HISTORY_BUDGET_CHARS && picked.len() > 1 {
+            used = used.saturating_sub(picked.remove(0).chars());
+        }
+    }
+
+    // ---- 5. 正序发出 ----
+    let mut out: Vec<neverwork_agent::ChatMessage> = Vec::with_capacity(count + 1);
+    for b in &picked {
+        match b {
+            HistoryBlock::Text(m) => {
+                let body = m.body.trim();
+                out.push(match &m.kind {
+                    MessageKind::User => neverwork_agent::ChatMessage::user(body),
+                    _ => neverwork_agent::ChatMessage::assistant(body),
+                });
+            }
+            HistoryBlock::Tools { cards, head_only } => {
+                emit_tool_block(cards, *head_only, &mut out)
+            }
+        }
+    }
+    if truncated {
+        out.insert(0, neverwork_agent::ChatMessage::assistant(HISTORY_OMITTED));
+    }
+    out
+}
+
 #[cfg(test)]
 mod round_bubble_tests {
     use super::RoundBubbles;
@@ -2516,5 +3217,202 @@ mod round_bubble_tests {
         bubbles.end_round(0);
         assert_eq!(bubbles.bubble(1, &mut alloc), 1);
         assert_eq!(bubbles.bubble(0, &mut alloc), 2);
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::{history_for_model, HISTORY_BUDGET_CHARS, HISTORY_MAX_MSGS};
+    use neverwork_core::{Message, MessageKind, Participant};
+
+    fn user(body: &str) -> Message {
+        Message {
+            kind: MessageKind::User,
+            body: body.into(),
+            code: None,
+            elapsed_ms: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+        }
+    }
+
+    fn agent(body: &str) -> Message {
+        Message {
+            kind: MessageKind::Agent {
+                participant: Participant {
+                    role_id: "agent".into(),
+                    role_name: "Assistant".into(),
+                    color_index: 0,
+                    initial: "A".into(),
+                },
+            },
+            body: body.into(),
+            code: None,
+            elapsed_ms: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+        }
+    }
+
+    fn tool_card_with(status: neverwork_core::ToolRunStatus) -> Message {
+        Message {
+            kind: MessageKind::ToolCall {
+                name: "read_file".into(),
+                call_id: "call_1".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+                path: "a.rs".into(),
+                summary: "读取 a.rs".into(),
+                status,
+                output: "SECRET_OUTPUT".into(),
+                diff: vec![],
+                added: 0,
+                removed: 0,
+            },
+            body: String::new(),
+            code: None,
+            elapsed_ms: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+        }
+    }
+
+    fn tool_card() -> Message {
+        tool_card_with(neverwork_core::ToolRunStatus::Ok)
+    }
+
+    #[test]
+    fn current_question_is_not_duplicated() {
+        let msgs = vec![user("第一个问题"), agent("第一个回答"), user("第二个问题")];
+        let h = history_for_model(&msgs, "第二个问题");
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].content, "第一个问题");
+        assert_eq!(h[1].content, "第一个回答");
+    }
+
+    #[test]
+    fn tool_cards_replay_with_real_output() {
+        let msgs = vec![user("读一下"), tool_card(), agent("读完了")];
+        let h = history_for_model(&msgs, "读一下");
+        // user → assistant(tool_calls) → tool → assistant
+        assert_eq!(h.len(), 4);
+        assert_eq!(h[1].tool_calls.len(), 1);
+        assert_eq!(h[1].tool_calls[0].id, "call_1");
+        assert_eq!(h[1].tool_calls[0].arguments, r#"{"path":"a.rs"}"#);
+        assert_eq!(h[2].tool_call_id.as_deref(), Some("call_1"));
+        // 追问时必须看得到上一轮真实读到的内容，否则它只会把项目重读一遍
+        assert!(h[2].content.contains("SECRET_OUTPUT"));
+        assert_eq!(h[3].content, "读完了");
+    }
+
+    #[test]
+    fn legacy_cards_without_call_id_fall_back_to_digest() {
+        let mut card = tool_card();
+        if let MessageKind::ToolCall { call_id, .. } = &mut card.kind {
+            call_id.clear();
+        }
+        let msgs = vec![user("读一下"), card, agent("读完了")];
+        let h = history_for_model(&msgs, "读一下");
+        // 配不成对的旧记录只能退化摘要，绝不能伪造成 tool_calls
+        assert_eq!(h.len(), 3);
+        assert!(h.iter().all(|m| m.tool_calls.is_empty()));
+        let digest = &h[1].content;
+        assert!(digest.contains("read_file"), "{digest}");
+        assert!(digest.contains("a.rs"), "{digest}");
+        assert!(!digest.contains("SECRET_OUTPUT"), "{digest}");
+        assert_eq!(h[2].content, "读完了");
+    }
+
+    #[test]
+    fn oversized_tool_output_keeps_its_head() {
+        // 一次 read_file 就能返回几十万字符。整块丢会让模型对上一轮的观察
+        // 一无所知（只能重读），所以要截到开头并说明可重读。
+        let mut card = tool_card();
+        if let MessageKind::ToolCall { output, .. } = &mut card.kind {
+            *output = "中".repeat(150_000);
+        }
+        let msgs = vec![user("读一下"), card, agent("读完了")];
+        let h = history_for_model(&msgs, "读一下");
+        let total: usize = h.iter().map(|m| m.content.chars().count()).sum();
+        assert!(total <= HISTORY_BUDGET_CHARS + 200, "total={total}");
+        let tool = h.iter().find(|m| m.tool_call_id.is_some()).expect("工具结果");
+        assert!(tool.content.starts_with('中'));
+        assert!(tool.content.contains("已截断"));
+        assert!(tool.content.contains("重新读取"));
+    }
+
+    #[test]
+    fn tool_pairs_are_never_split() {
+        // 截断只能发生在块的边界上：tool 结果不能失去它的
+        // `assistant.tool_calls`，否则 OpenAI 协议下整轮 400。
+        let mut msgs = Vec::new();
+        for i in 0..40 {
+            msgs.push(user(&format!("u{i}")));
+            let mut c = tool_card();
+            if let MessageKind::ToolCall { call_id, .. } = &mut c.kind {
+                *call_id = format!("call_{i}");
+            }
+            msgs.push(c);
+            msgs.push(agent(&format!("a{i}")));
+        }
+        msgs.push(user("现在"));
+        let h = history_for_model(&msgs, "现在");
+        for (i, m) in h.iter().enumerate() {
+            if let Some(id) = &m.tool_call_id {
+                assert!(i > 0, "tool 结果出现在历史开头：{id}");
+                let prev = &h[i - 1];
+                assert!(
+                    prev.tool_calls.iter().any(|c| &c.id == id),
+                    "tool {id} 前面缺少配对的 assistant.tool_calls"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unfinished_tools_are_not_claimed() {
+        let msgs = vec![
+            user("读一下"),
+            tool_card_with(neverwork_core::ToolRunStatus::Running),
+            agent("还在读"),
+        ];
+        let h = history_for_model(&msgs, "读一下");
+        // 没跑完的调用不构成「做过的事」
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].content, "读一下");
+        assert_eq!(h[1].content, "还在读");
+    }
+
+    #[test]
+    fn keeps_chronological_order() {
+        let msgs = vec![user("a"), agent("b"), user("c"), agent("d"), user("e")];
+        let h = history_for_model(&msgs, "e");
+        let bodies: Vec<&str> = h.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(bodies, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn oldest_turns_are_dropped_on_overflow() {
+        let mut msgs = Vec::new();
+        for i in 0..60 {
+            msgs.push(user(&format!("u{i}")));
+            msgs.push(agent(&format!("a{i}")));
+        }
+        msgs.push(user("现在"));
+        let h = history_for_model(&msgs, "现在");
+        // 90 条正文 + 1 条「已省略」占位
+        assert_eq!(h.len(), HISTORY_MAX_MSGS + 1);
+        assert!(h[0].content.contains("省略"));
+        assert_eq!(h.last().unwrap().content, "a59");
+    }
+
+    #[test]
+    fn char_budget_is_respected() {
+        let half = "字".repeat(HISTORY_BUDGET_CHARS / 2 + 1);
+        let msgs = vec![user(&half), agent(&half), user("现在")];
+        let h = history_for_model(&msgs, "现在");
+        // 最近一条吃得起一半预算，更早那条放不下
+        assert_eq!(h.len(), 2);
+        assert!(h[0].content.contains("省略"));
+        assert_eq!(h[1].content.chars().count(), HISTORY_BUDGET_CHARS / 2 + 1);
     }
 }

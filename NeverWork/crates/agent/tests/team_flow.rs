@@ -25,6 +25,16 @@ fn spawn_mock_server(reply: &'static str, requests: usize) -> (u16, std::thread:
             );
             let _ = stream.write_all(resp.as_bytes());
             let _ = stream.flush();
+            // 写完半关闭并读走残余请求体，否则 Windows 发 RST，
+            // 客户端偶发 "os error 10053"，第二个角色的 Delta 就丢了。
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+            let mut sink = [0u8; 1024];
+            while let Ok(n) = stream.read(&mut sink) {
+                if n == 0 {
+                    break;
+                }
+            }
         }
     });
     (port, handle)
@@ -103,4 +113,96 @@ fn pipeline_cancel_stops_early() {
     }, cancel);
     drop(server); // 不 join，服务端线程会被进程退出回收
     assert_eq!(starts, 0, "cancel=true 时不应启动任何角色");
+}
+
+/// 把一次 HTTP 请求读完整。
+///
+/// 本地回环下 header 与 body 可能分两段到达，只 `read` 一次常常只拿到 header，
+/// 断言就会看起来像「历史没发出去」。
+fn read_full_request(stream: &mut std::net::TcpStream) -> String {
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+    let mut raw: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        raw.extend_from_slice(&buf[..n]);
+        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&raw[..pos]).to_lowercase();
+            let want = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if raw.len() >= pos + 4 + want {
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&raw).to_string()
+}
+
+/// 收到请求后把请求体回传给测试，再回一条最小流式响应。
+fn spawn_capturing_server() -> (
+    u16,
+    std::sync::mpsc::Receiver<String>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = tx.send(read_full_request(&mut stream));
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.flush();
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+        let mut sink = [0u8; 1024];
+        while let Ok(n) = stream.read(&mut sink) {
+            if n == 0 {
+                break;
+            }
+        }
+    });
+    (port, rx, handle)
+}
+
+#[test]
+fn session_history_reaches_the_model() {
+    let (port, rx, server) = spawn_capturing_server();
+    let team = team_with_roles(FlowMode::Pipeline, &[("P", "P")]);
+    let cfg = ProviderConfig {
+        api_key: "k".into(),
+        base_url: format!("http://127.0.0.1:{port}"),
+        model: "gpt-4o".into(),
+        temperature: 0.7,
+    };
+    let history = vec![
+        neverwork_agent::ChatMessage::user("上一轮的问题：读一下 a.rs"),
+        neverwork_agent::ChatMessage::assistant("上一轮的回答：a.rs 导出 foo"),
+    ];
+    let cancel = Arc::new(AtomicBool::new(false));
+    neverwork_agent::run_team_with_history(&team, history, "那 bar 呢？", cfg, &mut |_| {}, cancel);
+    server.join().unwrap();
+
+    let req = rx.recv().unwrap();
+    assert!(
+        req.contains("上一轮的问题：读一下 a.rs"),
+        "请求里没带上会话历史：{req}"
+    );
+    assert!(
+        req.contains("上一轮的回答：a.rs 导出 foo"),
+        "请求里没带上上一轮回答：{req}"
+    );
+    assert!(req.contains("那 bar 呢？"), "请求里没带本次提问：{req}");
 }

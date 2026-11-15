@@ -24,6 +24,8 @@ fn sp(id: &str, updated_at: u64, tag: SessionTag, pinned: bool) -> Session {
         tag,
         updated_at,
         pinned,
+        stage: neverwork_core::TaskStage::Idle,
+        resume_prompt: String::new(),
     }
 }
 
@@ -201,4 +203,64 @@ fn cancelled_tool_status_is_not_pending() {
     assert_eq!(ToolRunStatus::Cancelled.label(), "已中断");
     assert!(ToolRunStatus::Running.is_pending());
     assert!(ToolRunStatus::Awaiting.is_pending());
+}
+
+// ===== 任务阶段（断点续跑） =====
+
+#[test]
+fn stage_maps_to_card_action() {
+    use neverwork_core::{SessionAction, TaskStage};
+    for st in [
+        TaskStage::Interrupted,
+        TaskStage::Failed,
+        TaskStage::Cancelled,
+    ] {
+        assert_eq!(st.action(), SessionAction::Resume, "{st:?} 应可续跑");
+        assert!(st.can_resume());
+        assert!(!st.is_active(), "{st:?} 不是进行中");
+    }
+    assert_eq!(TaskStage::Done.action(), SessionAction::Done);
+    assert_eq!(TaskStage::Idle.action(), SessionAction::None);
+    assert_eq!(TaskStage::Running.action(), SessionAction::None);
+    assert_eq!(TaskStage::AwaitingApproval.action(), SessionAction::None);
+    assert!(TaskStage::Running.is_active());
+    assert!(TaskStage::AwaitingApproval.is_active());
+    assert!(!TaskStage::Done.can_resume(), "已完成的不该提示续跑");
+    assert!(!TaskStage::Idle.can_resume());
+}
+
+#[test]
+fn sync_action_is_idempotent() {
+    let mut x = sp("x", 1, SessionTag::None, false);
+    x.stage = neverwork_core::TaskStage::Interrupted;
+    x.sync_action();
+    assert_eq!(x.action, neverwork_core::SessionAction::Resume);
+    x.sync_action();
+    assert_eq!(x.action, neverwork_core::SessionAction::Resume);
+    // 手改 action 也会被下一次 sync 拉回
+    x.action = neverwork_core::SessionAction::Done;
+    x.sync_action();
+    assert_eq!(x.action, neverwork_core::SessionAction::Resume);
+}
+
+#[test]
+fn resume_instruction_quotes_original_task() {
+    let hint = neverwork_core::resume_instruction("  把 logger 换成 tracing  ");
+    assert!(hint.contains("把 logger 换成 tracing"), "{hint}");
+    assert!(hint.contains("中断"), "要让模型知道上一轮断了：{hint}");
+    assert!(hint.contains("不要重做"), "要明确禁止重做：{hint}");
+    // 空白任务不能拼出「最初的任务是：」这种空壳
+    let empty = neverwork_core::resume_instruction("   ");
+    assert!(!empty.contains("最初的任务是"), "{empty}");
+    assert!(empty.contains("断点"));
+}
+
+#[test]
+fn old_config_defaults_to_idle_stage() {
+    let json = r#"{"id":"s","title":"t","subtitle":"","team_name":"",
+        "messages":[],"updated_label":""}"#;
+    let x: Session = serde_json::from_str(json).unwrap();
+    assert_eq!(x.stage, neverwork_core::TaskStage::Idle);
+    assert!(x.resume_prompt.is_empty());
+    assert!(!x.stage.is_active(), "缺 stage 的旧会话不能被当成崩溃残留");
 }

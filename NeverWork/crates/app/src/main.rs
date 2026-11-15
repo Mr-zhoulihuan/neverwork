@@ -1,6 +1,5 @@
 //! NeverWork 应用入口。
 
-mod data;
 mod filesystem;
 mod brackets;
 mod find;

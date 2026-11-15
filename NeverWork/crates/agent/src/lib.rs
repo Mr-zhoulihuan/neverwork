@@ -4,7 +4,9 @@
 //! 使用 `ureq`（阻塞 + 流式读取）在后台线程运行，避免与 GPUI 的异步执行器冲突。
 
 mod agent_loop;
+pub mod mcp;
 pub mod multi_patch;
+pub mod rag;
 mod anthropic;
 mod gemini;
 pub mod diff;
@@ -13,6 +15,7 @@ mod sse;
 mod supervisor;
 mod team;
 pub mod tools;
+pub mod trace;
 #[cfg(test)]
 mod tests;
 
@@ -21,7 +24,7 @@ pub use openai::OpenAiProvider;
 pub use anthropic::AnthropicProvider;
 pub use gemini::GeminiProvider;
 pub use supervisor::{parse_decision, Decision};
-pub use team::{run_team, TeamEvent};
+pub use team::{run_team, run_team_with_history, TeamEvent};
 pub use tools::{ToolCall, ToolResult, ToolSpec};
 
 use neverwork_core::AppResult;
@@ -82,6 +85,32 @@ impl ChatMessage {
     }
 }
 
+/// 一次请求的真实 token 用量。
+///
+/// 由各 Provider 从协议自带的 usage 字段解析：没有这个，成本就只能靠
+/// `字符数 / 2` 猜，预算与计费都没有依据。拿不到时为 0。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub output: u64,
+}
+
+impl TokenUsage {
+    pub fn new(input: u64, output: u64) -> Self {
+        Self { input, output }
+    }
+
+    pub fn total(&self) -> u64 {
+        self.input + self.output
+    }
+
+    /// 累加另一份用量（多轮对话用）。
+    pub fn add(&mut self, other: TokenUsage) {
+        self.input += other.input;
+        self.output += other.output;
+    }
+}
+
 /// 流式响应的一个增量事件。
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -89,6 +118,8 @@ pub enum StreamEvent {
     Delta(String),
     /// 模型请求调用这些工具（本轮文本已结束）。
     ToolCalls(Vec<ToolCall>),
+    /// 本次请求的真实用量（流末尾，服务端没报就没有）。
+    Usage(TokenUsage),
     /// 结束。
     Done,
     /// 错误信息（非 panic，用于 UI 友好展示）。

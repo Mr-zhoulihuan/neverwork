@@ -592,6 +592,7 @@ impl AppState {
                     &m.body,
                     m.code.as_ref(),
                     m.elapsed_ms,
+                    (m.tokens_in, m.tokens_out),
                     &model,
                     &provider,
                     avail,
@@ -963,6 +964,8 @@ pub(crate) fn agent_bubble(
     text: &str,
     code: Option<&neverwork_core::CodeBlock>,
     elapsed_ms: u64,
+    // 本轮真实用量 `(输入, 输出)`；Provider 没报就是 `(0, 0)`，不显示。
+    tokens: (u64, u64),
     model_label: &str,
     provider_label: &str,
     avail: f32,
@@ -1008,6 +1011,11 @@ pub(crate) fn agent_bubble(
     if elapsed_ms > 0 {
         parts.push(format_elapsed(elapsed_ms));
     }
+    // 用量记到页脚：没有这个，用户只能拍脑袋判断「这次贵不贵」，
+    // token 预算超了也不知道超在哪里。
+    if tokens.0 > 0 || tokens.1 > 0 {
+        parts.push(format!("↑{} ↓{}", fmt_tokens(tokens.0), fmt_tokens(tokens.1)));
+    }
     // 页脚文字统一走弱化色令牌：之前多角色用「白色 45% 透明」，
     // 浅色主题下白底白字几乎看不见；主题令牌两套底色都安全。
     // 角色区分交给前面的 ▣（用 role_color 着色）。
@@ -1046,6 +1054,19 @@ pub(crate) fn format_elapsed(ms: u64) -> String {
     } else {
         let total = ms / 1000;
         format!("{}m {:02}s", total / 60, total % 60)
+    }
+}
+
+/// token 数 → `340` / `1.2k` / `1.3M`。
+///
+/// 页脚宽度寸土寸金，精确到个位没人看；量级到了就缩写。
+fn fmt_tokens(n: u64) -> String {
+    if n < 1000 {
+        format!("{n}")
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
     }
 }
 

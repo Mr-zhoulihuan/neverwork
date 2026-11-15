@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use neverwork_core::AppResult;
 
-use crate::{ChatMessage, LlmProvider, ProviderConfig, Role, StreamEvent};
+use crate::{ChatMessage, LlmProvider, ProviderConfig, Role, StreamEvent, TokenUsage};
 
 pub struct AnthropicProvider {
     config: ProviderConfig,
@@ -90,6 +90,9 @@ impl LlmProvider for AnthropicProvider {
         };
 
         let reader = resp.into_body().into_reader();
+        // Anthropic 把用量拆在两个事件里：`message_start` 给输入（含缓存字段），
+        // `message_delta` 给最终输出。两边都取，最后合成一份。
+        let mut usage = TokenUsage::default();
         crate::sse::for_each_data(reader, |data| {
             if data == "[DONE]" {
                 on_event(StreamEvent::Done);
@@ -107,12 +110,44 @@ impl LlmProvider for AnthropicProvider {
                             on_event(StreamEvent::Delta(text.to_string()));
                         }
                     }
+                } else if ty == "message_start" {
+                    if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
+                        usage.input = u
+                            .get("input_tokens")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                        // 缓存命中/写入另算，能把真实成本还原得更准
+                        let cache_read = u
+                            .get("cache_read_input_tokens")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                        let cache_write = u
+                            .get("cache_creation_input_tokens")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                        usage.input += cache_read + cache_write;
+                        usage.output = u
+                            .get("output_tokens")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                    }
+                } else if ty == "message_delta" {
+                    if let Some(n) = v
+                        .get("usage")
+                        .and_then(|u| u.get("output_tokens"))
+                        .and_then(|x| x.as_u64())
+                    {
+                        usage.output = n;
+                    }
                 } else if ty == "message_stop" {
                     on_event(StreamEvent::Done);
                 }
             }
         });
 
+        if usage.total() > 0 {
+            on_event(StreamEvent::Usage(usage));
+        }
         on_event(StreamEvent::Done);
         Ok(())
     }

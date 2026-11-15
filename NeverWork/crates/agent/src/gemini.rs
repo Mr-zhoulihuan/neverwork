@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use neverwork_core::AppResult;
 
-use crate::{ChatMessage, LlmProvider, ProviderConfig, Role, StreamEvent, ToolSpec};
+use crate::{ChatMessage, LlmProvider, ProviderConfig, Role, StreamEvent, TokenUsage, ToolSpec};
 
 pub struct GeminiProvider {
     config: ProviderConfig,
@@ -143,6 +143,27 @@ pub fn extract_text(data: &str) -> Option<String> {
     }
 }
 
+/// 从流帧里取用量。
+///
+/// `usageMetadata` 是累计值（每帧可能都带，取最后一次即可），
+/// 字段名是 camelCase：`promptTokenCount` / `candidatesTokenCount`。
+pub fn extract_usage(data: &str) -> Option<TokenUsage> {
+    let v: Value = serde_json::from_str(data).ok()?;
+    let u = v.get("usageMetadata")?;
+    let input = u
+        .get("promptTokenCount")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let output = u
+        .get("candidatesTokenCount")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    if input == 0 && output == 0 {
+        return None;
+    }
+    Some(TokenUsage::new(input, output))
+}
+
 /// 从流帧里识别错误对象。
 pub fn extract_error(data: &str) -> Option<String> {
     let v: Value = serde_json::from_str(data).ok()?;
@@ -224,6 +245,7 @@ impl GeminiProvider {
         };
 
         let reader = resp.into_body().into_reader();
+        let mut usage: Option<TokenUsage> = None;
         crate::sse::for_each_data(reader, |data| {
             if data == "[DONE]" {
                 return;
@@ -232,11 +254,17 @@ impl GeminiProvider {
                 on_event(StreamEvent::Error(err));
                 return;
             }
+            if let Some(u) = extract_usage(data) {
+                usage = Some(u);
+            }
             if let Some(text) = extract_text(data) {
                 on_event(StreamEvent::Delta(text));
             }
         });
 
+        if let Some(u) = usage {
+            on_event(StreamEvent::Usage(u));
+        }
         on_event(StreamEvent::Done);
         Ok(())
     }
@@ -369,5 +397,21 @@ mod tests {
         let data = r#"{"error":{"code":400,"message":"API key not valid"}}"#;
         assert_eq!(extract_error(data).as_deref(), Some("API key not valid"));
         assert_eq!(extract_error(r#"{"candidates":[]}"#), None);
+    }
+
+    #[test]
+    fn extracts_usage_metadata() {
+        let data = r#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":34,"totalTokenCount":154}}"#;
+        let u = extract_usage(data).expect("应能解析出用量");
+        assert_eq!(u.input, 120);
+        assert_eq!(u.output, 34);
+        assert_eq!(u.total(), 154);
+    }
+
+    #[test]
+    fn zero_usage_is_none() {
+        let data = r#"{"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0}}"#;
+        assert_eq!(extract_usage(data), None);
+        assert_eq!(extract_usage(r#"{"candidates":[]}"#), None);
     }
 }

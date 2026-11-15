@@ -130,7 +130,8 @@ fn plan(
 ) -> Result<Vec<PlannedEdit>, String> {
     let mut planned = Vec::new();
     for e in edits {
-        let path = ctx.resolve(&e.path)?;
+        // 写路径：除了越界，还要拦下 `.git` 元数据目录（hooks 等于持久后门）
+        let path = ctx.resolve_write(&e.path)?;
         let old = std::fs::read_to_string(&path).unwrap_or_default();
 
         let new = if let Some(content) = &e.content {
@@ -219,32 +220,14 @@ fn combined_diff(planned: &[PlannedEdit]) -> Vec<DiffLine> {
 pub fn execute(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
     let edits = match parse_edits(&call.args()) {
         Ok(e) => e,
-        Err(msg) => {
-            return ToolResult {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                ok: false,
-                content: format!("错误：{msg}"),
-                diff: Vec::new(),
-                added: 0,
-                removed: 0,
-            }
-        }
+        Err(msg) => return ToolResult::err_code(call, "BAD_ARGS", msg, false),
     };
 
     // ---- 第一阶段：校验（任何一项失败 → 整批不动） ----
     let planned = match plan(&edits, ctx) {
         Ok(p) => p,
         Err(msg) => {
-            return ToolResult {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                ok: false,
-                content: format!("错误（整批未改动）：{msg}"),
-                diff: Vec::new(),
-                added: 0,
-                removed: 0,
-            }
+            return ToolResult::err_code(call, "PATCH_INVALID", format!("整批未改动：{msg}"), false)
         }
     };
 
@@ -261,19 +244,16 @@ pub fn execute(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
                 for w in &written {
                     let _ = tools::write_atomic(&w.path, &w.old);
                 }
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    ok: false,
-                    content: format!(
+                return ToolResult::err_code(
+                    call,
+                    "IO_ERROR",
+                    format!(
                         "写入 {} 失败：{e}。已回滚 {} 个文件，全部保持原样",
                         p.display,
                         written.len()
                     ),
-                    diff: Vec::new(),
-                    added: 0,
-                    removed: 0,
-                };
+                    true,
+                );
             }
         }
     }
@@ -289,21 +269,19 @@ pub fn execute(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
         lines.push(format!("  {} +{} −{}", p.display, st.added, st.removed));
     }
 
-    ToolResult {
-        call_id: call.id.clone(),
-        name: call.name.clone(),
-        ok: true,
-        content: format!(
+    ToolResult::ok_with_diff(
+        call,
+        format!(
             "已一次性修改 {} 个文件：+{} −{}\n{}",
             planned.len(),
             added,
             removed,
             lines.join("\n")
         ),
-        diff: combined_diff(&planned),
+        combined_diff(&planned),
         added,
         removed,
-    }
+    )
 }
 
 #[cfg(test)]
