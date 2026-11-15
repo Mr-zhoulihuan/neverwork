@@ -11,12 +11,17 @@ use gpui::{div, px, Context, SharedString};
 use neverwork_ui::theme;
 
 use crate::state::{AppState, RightTab};
+use crate::views::text_fit::fit_text;
 
 impl AppState {
-    pub(crate) fn right_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn right_panel(
+        &self,
+        force_collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         // 收起态：只留一条窄边，点一下重新展开。
         // 这样在窄窗口里也能腾出宽度给中栏，而不是只能靠「专注模式」全收起。
-        if self.right_collapsed {
+        if self.right_collapsed || force_collapsed {
             return div()
                 .flex()
                 .flex_col()
@@ -70,7 +75,7 @@ impl AppState {
                 .border_b_1()
                 .border_color(theme::border())
                 .child(self.tab_button("文件", RightTab::Files, cx))
-                .child(self.tab_button("改动", RightTab::Changes, cx))
+                .child(self.tab_button("Git", RightTab::Git, cx))
                 .child(self.tab_button("预览", RightTab::Preview, cx))
                 .child(div().flex_1())
                 .child(
@@ -94,7 +99,7 @@ impl AppState {
 
         col = col.child(match self.right_tab {
             RightTab::Files => self.files_panel(cx).into_any_element(),
-            RightTab::Changes => self.changes_panel(cx).into_any_element(),
+            RightTab::Git => self.git_panel(cx).into_any_element(),
             RightTab::Preview => self.preview_panel(cx).into_any_element(),
         });
 
@@ -269,209 +274,371 @@ impl AppState {
         col.child(tree)
     }
 
-    fn changes_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Git 面板：分支 + 改动文件 + diff + 提交历史。
+    fn git_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let st = &self.git;
+
         let mut col = div().flex().flex_col().flex_1().min_h(px(0.0));
 
+        // ---- 头部：分支 + 领先/落后 + 刷新 ----
+        let mut head = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(34.0))
+            .px_3()
+            .border_b_1()
+            .border_color(theme::border())
+            .child(div().text_xs().text_color(theme::accent()).child("⎇"));
+
+        head = head.child(
+            div()
+                .text_xs()
+                .text_color(theme::fg())
+                .child(SharedString::from(if st.branch.is_empty() {
+                    "—".to_string()
+                } else {
+                    fit_text(&st.branch, 110.0, 12.0)
+                })),
+        );
+
+        if st.ahead > 0 {
+            head = head.child(
+                div()
+                    .text_xs()
+                    .text_color(theme::green())
+                    .child(SharedString::from(format!("↑{}", st.ahead))),
+            );
+        }
+        if st.behind > 0 {
+            head = head.child(
+                div()
+                    .text_xs()
+                    .text_color(theme::yellow())
+                    .child(SharedString::from(format!("↓{}", st.behind))),
+            );
+        }
+
+        head = head
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("git-refresh")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(22.0))
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                        this.refresh_git(cx);
+                    }))
+                    .child("⟳"),
+            );
+
+        col = col.child(head);
+
+        // ---- 不是仓库：给出明确提示 ----
+        if !self.git_is_repo {
+            let children = crate::git::child_repos(&self.root);
+            let mut wrap = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .text_xs()
+                .text_color(theme::dim())
+                .child("当前工作区不是 git 仓库");
+
+            if children.is_empty() {
+                wrap = wrap.child(
+                    div()
+                        .text_color(theme::muted())
+                        .child("这里也没有子仓库。可以用 git init 初始化后再刷新。"),
+                );
+            } else {
+                wrap = wrap.child(
+                    div()
+                        .text_color(theme::muted())
+                        .child(format!("下面这些子目录是仓库（{} 个）", children.len())),
+                );
+                for name in children {
+                    let path = self.root.join(&name);
+                    let label = name.clone();
+                    wrap = wrap.child(
+                        div()
+                            .id(SharedString::from(format!("subrepo-{name}")))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .h(px(26.0))
+                            .px_2()
+                            .rounded_sm()
+                            .text_xs()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme::raised()))
+                            .child(div().text_color(theme::accent()).child("⎇"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_color(theme::fg())
+                                    .child(SharedString::from(fit_text(&label, 180.0, 12.0))),
+                            )
+                            .child(
+                                div()
+                                    .text_color(theme::dim())
+                                    .child("作为工作区 →"),
+                            )
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                                this.switch_workspace(path.clone(), cx);
+                            })),
+                    );
+                }
+            }
+            return col.child(wrap).into_any_element();
+        }
+
+        // ---- 改动摘要 ----
         col = col.child(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .h(px(34.0))
                 .px_3()
-                .border_b_1()
-                .border_color(theme::border())
-                .child(div().text_xs().text_color(theme::dim()).child("最近修改"))
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .id("refresh-changes")
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(px(24.0))
-                        .rounded_md()
-                        .text_sm()
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .hover(|d| d.bg(theme::raised()))
-                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
-                            this.refresh_recent(cx);
-                        }))
-                        .child("⟳"),
-                ),
+                .py_2()
+                .text_xs()
+                .text_color(theme::dim())
+                .child(SharedString::from(crate::git::summary_line(st)))
+                .when(st.has_conflicts(), |d| {
+                    d.child(
+                        div()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(theme::with_alpha(0xef4444, 0.18))
+                            .text_color(theme::red())
+                            .child("有冲突"),
+                    )
+                }),
         );
 
+        // ---- 改动文件列表 ----
         let mut list = div()
-            .id("changes-list")
+            .id("git-changes")
             .flex()
             .flex_col()
             .gap_0p5()
-            .p_2()
-            .flex_1()
+            .px_2()
+            .max_h(px(220.0))
             .overflow_scroll();
 
-        // ===== Agent 在本次会话里的改动（补丁清单） =====
-        let changes = self.session_changes();
-        if !changes.is_empty() {
-            let total_add: u32 = changes.iter().map(|c| c.added).sum();
-            let total_del: u32 = changes.iter().map(|c| c.removed).sum();
+        if st.changes.is_empty() {
             list = list.child(
                 div()
+                    .px_2()
+                    .py_2()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .child("工作区干净，没有未提交改动"),
+            );
+        }
+
+        for (i, c) in st.changes.iter().enumerate() {
+            let selected = self.git_selected.as_deref() == Some(c.path.as_str());
+            let path = c.path.clone();
+            let color = match c.kind {
+                crate::git::ChangeKind::Added => theme::green(),
+                crate::git::ChangeKind::Modified => theme::yellow(),
+                crate::git::ChangeKind::Deleted => theme::red(),
+                crate::git::ChangeKind::Renamed => theme::cyan(),
+                crate::git::ChangeKind::Conflicted => theme::red(),
+            };
+            let marker = c.kind.marker();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("gitchg-{i}")))
                     .flex()
                     .items_center()
                     .gap_2()
-                    .px_1()
-                    .pb_1()
+                    .h(px(24.0))
+                    .px_2()
+                    .rounded_sm()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(theme::raised()))
+                    .when(!selected, |d| d.hover(|d| d.bg(theme::with_alpha(0xffffff, 0.04))))
+                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                        this.select_git_file(path.clone(), cx);
+                    }))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme::fg())
-                            .child(SharedString::from(format!(
-                                "Agent 改动 · {} 个文件",
-                                changes.len()
-                            ))),
+                            .w(px(12.0))
+                            .flex_shrink_0()
+                            .text_color(color)
+                            .child(SharedString::from(marker)),
                     )
-                    .child(div().flex_1())
+                    .when(c.staged, |d| {
+                        d.child(
+                            div()
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .flex_shrink_0()
+                                .rounded_full()
+                                .bg(theme::green()),
+                        )
+                    })
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme::green())
-                            .child(SharedString::from(format!("+{total_add}"))),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::red())
-                            .child(SharedString::from(format!("−{total_del}"))),
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_color(if selected { theme::fg() } else { theme::muted() })
+                            .child(SharedString::from(fit_text(&c.path, 190.0, 12.0))),
                     ),
             );
+        }
+        col = col.child(list);
 
-            for c in &changes {
-                let abs = self.root.join(&c.path);
-                let is_open = self.open_path.as_deref() == Some(abs.as_path());
-                list = list.child(
+        // ---- 选中文件的 diff ----
+        if let Some(sel) = &self.git_selected {
+            let diff = crate::git::file_diff(&self.root, sel);
+            let mut boxel = div()
+                .id("git-diff")
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .flex_1()
+                .min_h(px(0.0))
+                .px_2()
+                .py_1()
+                .border_t_1()
+                .border_color(theme::border())
+                .overflow_scroll()
+                .text_xs();
+
+            if diff.is_empty() {
+                boxel = boxel.child(
                     div()
-                        .id(SharedString::from(format!("chg-agent-{}", c.path)))
+                        .px_1()
+                        .py_2()
+                        .text_color(theme::dim())
+                        .child("没有可显示的差异（可能是空文件或仅权限变化）"),
+                );
+            }
+            for line in diff.iter().take(400) {
+                let (fg, bg) = match line.marker.as_str() {
+                    "+" => (theme::green(), theme::with_alpha(0x22c55e, 0.10)),
+                    "-" => (theme::red(), theme::with_alpha(0xef4444, 0.10)),
+                    "@" => (theme::accent(), theme::with_alpha(0x3b82f6, 0.10)),
+                    _ => (theme::dim(), theme::with_alpha(0x000000, 0.0)),
+                };
+                boxel = boxel.child(
+                    div()
                         .flex()
-                        .items_center()
-                        .gap_2()
-                        .h(px(26.0))
-                        .px_2()
+                        .gap_1()
                         .rounded_sm()
-                        .text_sm()
-                        .cursor_pointer()
-                        .hover(|d| d.bg(theme::raised()))
-                        .when(is_open, |d| d.bg(theme::raised()).text_color(theme::fg()))
-                        .when(!is_open, |d| d.text_color(theme::muted()))
-                        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
-                            if abs.is_file() {
-                                this.open_file(abs.clone(), cx);
-                            } else {
-                                this.notice =
-                                    Some(format!("文件不存在：{}", abs.display()));
-                                cx.notify();
-                            }
-                        }))
+                        .bg(bg)
+                        .whitespace_nowrap()
                         .child(
                             div()
+                                .w(px(8.0))
                                 .flex_shrink_0()
-                                .text_xs()
-                                .text_color(if c.denied { theme::dim() } else { theme::orange() })
-                                .child(if c.denied { "⊘" } else { "±" }),
+                                .text_color(fg)
+                                .child(SharedString::from(line.marker.clone())),
                         )
                         .child(
                             div()
                                 .flex_1()
                                 .min_w(px(0.0))
                                 .overflow_hidden()
-                                .whitespace_nowrap()
-                                .child(SharedString::from(crate::views::text_fit::fit_text(
-                                    &c.path, 150.0, 12.0,
-                                ))),
-                        )
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_xs()
-                                .text_color(if c.denied { theme::dim() } else { theme::green() })
-                                .child(SharedString::from(format!("+{}", c.added))),
-                        )
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_xs()
-                                .text_color(if c.denied { theme::dim() } else { theme::red() })
-                                .child(SharedString::from(format!("−{}", c.removed))),
-                        )
-                        .when(c.denied, |d| {
-                            d.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_xs()
-                                    .text_color(theme::dim())
-                                    .child("已拒绝"),
-                            )
-                        }),
+                                .text_color(if line.marker == " " { theme::muted() } else { fg })
+                                .child(SharedString::from(fit_text(&line.text, 300.0, 11.0))),
+                        ),
                 );
             }
+            col = col.child(boxel);
+        }
 
-            list = list.child(
-                div()
-                    .h(px(1.0))
-                    .my_1()
-                    .bg(theme::border()),
-            );
-            list = list.child(
+        col.child(self.git_commits(cx)).into_any_element()
+    }
+
+    /// 最近提交历史（放在 Git 面板底部）。
+    fn git_commits(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut col = div()
+            .id("git-commits")
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .px_2()
+            .py_1()
+            .border_t_1()
+            .border_color(theme::border())
+            .max_h(px(150.0))
+            .overflow_scroll()
+            .text_xs();
+
+        col = col.child(
+            div()
+                .px_1()
+                .pb_1()
+                .text_color(theme::dim())
+                .child("最近提交"),
+        );
+
+        if self.git.commits.is_empty() {
+            col = col.child(
                 div()
                     .px_1()
-                    .pb_1()
-                    .text_xs()
                     .text_color(theme::dim())
-                    .child("最近修改"),
+                    .child("还没有提交"),
             );
+            return col;
         }
 
-        if self.recent.is_empty() {
-            list = list.child(
+        for (i, c) in self.git.commits.iter().take(12).enumerate() {
+            col = col.child(
                 div()
-                    .p_3()
-                    .text_xs()
-                    .text_color(theme::dim())
-                    .child("点右上角 ⟳ 扫描最近修改的文件"),
-            );
-        }
-        for (rel, when) in &self.recent {
-            let abs = self.root.join(rel);
-            let is_open = self.open_path.as_deref() == Some(abs.as_path());
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("chg-{rel}")))
+                    .id(SharedString::from(format!("gitcommit-{i}")))
                     .flex()
                     .items_center()
                     .gap_2()
-                    .h(px(28.0))
-                    .px_2()
+                    .h(px(22.0))
+                    .px_1()
                     .rounded_sm()
-                    .text_sm()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(theme::raised()))
-                    .when(is_open, |d| d.bg(theme::raised()).text_color(theme::fg()))
-                    .when(!is_open, |d| d.text_color(theme::muted()))
-                    .child(div().text_xs().text_color(theme::orange()).child("◆"))
-                    .child(div().flex_1().child(SharedString::from(rel.clone())))
+                    .hover(|d| d.bg(theme::with_alpha(0xffffff, 0.04)))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme::dim())
-                            .child(SharedString::from(human_time(*when))),
+                            .w(px(52.0))
+                            .flex_shrink_0()
+                            .text_color(theme::accent())
+                            .child(SharedString::from(c.hash.clone())),
                     )
-                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
-                        this.open_file(abs.clone(), cx);
-                    })),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_color(theme::muted())
+                            .child(SharedString::from(fit_text(&c.summary, 150.0, 11.0))),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(theme::dim())
+                            .child(SharedString::from(fit_text(&c.when, 60.0, 11.0))),
+                    ),
             );
         }
-        col.child(list)
+        let _ = cx;
+        col
     }
 
     fn preview_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -558,16 +725,3 @@ impl AppState {
     }
 }
 
-fn human_time(t: std::time::SystemTime) -> String {
-    let Ok(d) = std::time::SystemTime::now().duration_since(t) else {
-        return "刚刚".into();
-    };
-    let secs = d.as_secs();
-    match secs {
-        0..=59 => "刚刚".into(),
-        60..=3599 => format!("{} 分钟前", secs / 60),
-        3600..=86399 => format!("{} 小时前", secs / 3600),
-        86400..=2_592_000 => format!("{} 天前", secs / 86400),
-        _ => format!("{} 个月前", secs / 2_592_000),
-    }
-}

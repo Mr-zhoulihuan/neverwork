@@ -22,4 +22,4 @@ pub mod model;
 pub mod settings;
 pub use config::{Config, ExportOptions};
 pub use model::*;
-pub use settings::{Settings, ThemeMode, ProviderPreset, ProviderEntry, Protocol, Skill, SkillCategory, APP_VERSION};
+pub use settings::{Settings, ThemeMode, ProviderPreset, ProviderEntry, Protocol, Skill, SkillCategory, APP_VERSION, DEFAULT_WORKSPACE};

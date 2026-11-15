@@ -2,8 +2,10 @@
 
 mod data;
 mod filesystem;
+mod brackets;
 mod find;
 mod folding;
+mod git;
 mod highlight;
 mod input_handler;
 mod keymap;
@@ -100,7 +102,17 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            move |_window, cx| {
+            move |window, cx| {
+                // 高 DPI 下窗口按 1:1 物理像素创建却按 scale 倍渲染，
+                // 常规尺寸装不下内容（只显示左上角）。最大化能让物理宽度接近屏幕宽度。
+                // NW_MAXIMIZE=0 可关闭。
+                let auto_max = window.scale_factor() > 1.0;
+                if std::env::var("NW_MAXIMIZE")
+                    .map(|v| v != "0")
+                    .unwrap_or(auto_max)
+                {
+                    window.zoom_window();
+                }
                 if start_team {
                     std::env::set_var("NW_VIEW", "team");
                 }

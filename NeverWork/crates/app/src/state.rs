@@ -130,7 +130,8 @@ impl FormField {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RightTab {
     Files,
-    Changes,
+    /// Git 面板：分支、改动文件、提交历史。
+    Git,
     Preview,
 }
 
@@ -157,7 +158,7 @@ impl Command {
             (Command::Save, "保存当前文件", "Ctrl+S"),
             (Command::RefreshTree, "刷新文件树", ""),
             (Command::NewSession, "新建会话", ""),
-            (Command::Changes, "查看最近改动", ""),
+            (Command::Changes, "查看 Git 改动", ""),
             (Command::Preview, "预览当前文件", ""),
             (Command::SwitchWorkspace, "切换工作区…", ""),
             (Command::FocusMode, "专注模式（隐藏侧栏）", ""),
@@ -173,7 +174,12 @@ pub struct AppState {
     pub root: PathBuf,
     pub files: Vec<FileNode>,
     pub expanded: HashSet<PathBuf>,
-    pub recent: Vec<(String, std::time::SystemTime)>,
+    /// Git 仓库状态（进入 Git 面板或手动刷新时更新）。
+    pub git: crate::git::RepoStatus,
+    /// Git 面板里当前选中的文件（用于显示 diff）。
+    pub git_selected: Option<String>,
+    /// 当前目录是否是一个 git 仓库（false 时显示提示而不是空列表）。
+    pub git_is_repo: bool,
 
     // ===== 视图 =====
     pub center: CenterView,
@@ -307,12 +313,29 @@ pub struct PendingApproval {
     pub respond: flume::Sender<bool>,
 }
 
-fn resolve_root() -> PathBuf {
+/// 决定启动时打开哪个工作区。
+///
+/// 优先级：`NW_ROOT` → 上次用过的（`settings.last_workspace`）→ 内置默认 `E:\go`
+/// → 从当前目录向上找 `Cargo.toml` → 当前目录。
+///
+/// 内置默认是**别人机器上可能不存在**的绝对路径，所以每一步都要校验存在性再采用，
+/// 否则会出现「打开一个空目录还以为 IDE 坏了」。
+fn resolve_root(saved: &str) -> PathBuf {
     if let Ok(p) = std::env::var("NW_ROOT") {
         let path = PathBuf::from(p);
-        if path.exists() {
+        if path.is_dir() {
             return path;
         }
+    }
+    if !saved.trim().is_empty() {
+        let path = PathBuf::from(saved.trim());
+        if path.is_dir() {
+            return path;
+        }
+    }
+    let default = PathBuf::from(neverwork_core::DEFAULT_WORKSPACE);
+    if default.is_dir() {
+        return default;
     }
     let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let start = dir.clone();
@@ -328,7 +351,8 @@ fn resolve_root() -> PathBuf {
 
 impl AppState {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let root = resolve_root();
+        let settings = neverwork_core::config::load_settings();
+        let root = resolve_root(&settings.last_workspace);
         let expanded = filesystem::default_expanded(&root);
         let files = filesystem::build_tree(&root, &expanded).unwrap_or_default();
         let ws = Workspace {
@@ -342,7 +366,6 @@ impl AppState {
             online: true,
         };
         let config = neverwork_core::config::load();
-        let settings = neverwork_core::config::load_settings();
         // 主题立即生效，首次渲染就是用户上次选的颜色。
         neverwork_ui::theme::set_theme_mode(settings.theme);
         let ai_ready = settings.usable_provider_count() > 0
@@ -354,7 +377,9 @@ impl AppState {
             root,
             files,
             expanded,
-            recent: Vec::new(),
+            git: crate::git::RepoStatus::default(),
+            git_selected: None,
+            git_is_repo: false,
             center: initial_view(),
             settings_tab: initial_settings_tab(),
             right_tab: RightTab::Files,
@@ -493,6 +518,15 @@ impl AppState {
         if std::env::var("NW_AUTO_APPROVE").map(|v| v == "1").unwrap_or(false) {
             me.auto_approve = true;
         }
+        // 验证用：直接打开右侧某个 Tab（files|git|preview）。
+        if let Ok(t) = std::env::var("NW_RIGHT_TAB") {
+            match t.to_lowercase().as_str() {
+                "git" => me.set_right_tab(RightTab::Git, cx),
+                "preview" => me.set_right_tab(RightTab::Preview, cx),
+                "files" => me.set_right_tab(RightTab::Files, cx),
+                _ => {}
+            }
+        }
         // 用 NW_VIEW 直达同步页时也自动查一次版本。
         if me.settings_tab == SettingsTab::Sync && me.center == CenterView::Settings {
             me.check_update(cx);
@@ -575,15 +609,43 @@ impl AppState {
         self.refresh_tree(cx);
     }
 
-    pub(crate) fn refresh_recent(&mut self, cx: &mut Context<Self>) {
-        self.recent = filesystem::recent_files(&self.root, 40);
+    /// 刷新 Git 状态。
+    pub(crate) fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        match crate::git::status(&self.root) {
+            crate::git::RepoQuery::Ok(st) => {
+                self.git_is_repo = true;
+                self.git = st;
+                // 选中的文件若已不在改动列表里，清掉选择
+                if let Some(sel) = &self.git_selected {
+                    if !self.git.changes.iter().any(|c| &c.path == sel) {
+                        self.git_selected = None;
+                    }
+                }
+                if self.git_selected.is_none() {
+                    self.git_selected = self.git.changes.first().map(|c| c.path.clone());
+                }
+            }
+            crate::git::RepoQuery::NotARepo(msg) => {
+                self.git_is_repo = false;
+                self.git = crate::git::RepoStatus::default();
+                self.git_selected = None;
+                self.notice = Some(msg);
+            }
+        }
         cx.notify();
     }
 
+    /// 选中 Git 面板里的某个文件。
+    pub(crate) fn select_git_file(&mut self, path: String, cx: &mut Context<Self>) {
+        self.git_selected = Some(path);
+        cx.notify();
+    }
+
+
     pub(crate) fn set_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         self.right_tab = tab;
-        if tab == RightTab::Changes {
-            self.recent = filesystem::recent_files(&self.root, 40);
+        if tab == RightTab::Git {
+            self.refresh_git(cx);
         }
         cx.notify();
     }
@@ -678,18 +740,16 @@ impl AppState {
         cx.notify();
     }
 
-    pub(crate) fn apply_workspace_input(&mut self, cx: &mut Context<Self>) {
-        let raw = self.ws_input.text().trim().to_string();
-        if raw.is_empty() {
-            return;
-        }
-        let path = PathBuf::from(&raw);
+    /// 切换到一个已知存在的目录作为工作区（子仓库入口用）。
+    pub(crate) fn switch_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !path.is_dir() {
-            self.notice = Some(format!("不是一个目录：{raw}"));
+            self.notice = Some(format!("目录不存在：{}", path.display()));
             cx.notify();
             return;
         }
         self.root = path;
+        self.settings.last_workspace = self.root.to_string_lossy().to_string();
+        let _ = neverwork_core::config::save_settings(&self.settings);
         self.expanded = filesystem::default_expanded(&self.root);
         self.files = filesystem::build_tree(&self.root, &self.expanded).unwrap_or_default();
         self.workspace = Workspace {
@@ -706,7 +766,42 @@ impl AppState {
         self.open_path = None;
         self.editor.reset("");
         self.dirty = false;
-        self.recent.clear();
+        self.folds.clear();
+        self.center = CenterView::Chat;
+        self.notice = Some(format!("已切换到 {}", self.root.display()));
+        self.refresh_git(cx);
+    }
+
+    pub(crate) fn apply_workspace_input(&mut self, cx: &mut Context<Self>) {
+        let raw = self.ws_input.text().trim().to_string();
+        if raw.is_empty() {
+            return;
+        }
+        let path = PathBuf::from(&raw);
+        if !path.is_dir() {
+            self.notice = Some(format!("不是一个目录：{raw}"));
+            cx.notify();
+            return;
+        }
+        self.root = path;
+        self.settings.last_workspace = self.root.to_string_lossy().to_string();
+        let _ = neverwork_core::config::save_settings(&self.settings);
+        self.expanded = filesystem::default_expanded(&self.root);
+        self.files = filesystem::build_tree(&self.root, &self.expanded).unwrap_or_default();
+        self.workspace = Workspace {
+            name: self
+                .root
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "workspace".into()),
+            path: self.root.to_string_lossy().to_string(),
+            kind: ConnectionKind::Local,
+            remote_url: None,
+            online: true,
+        };
+        self.open_path = None;
+        self.editor.reset("");
+        self.dirty = false;
         self.center = CenterView::Chat;
         self.ws_prompt_open = false;
         self.palette_open = false;
@@ -738,7 +833,7 @@ impl AppState {
             Command::Save => self.save_file(cx),
             Command::RefreshTree => self.refresh_tree(cx),
             Command::NewSession => self.new_session(cx),
-            Command::Changes => self.set_right_tab(RightTab::Changes, cx),
+            Command::Changes => self.set_right_tab(RightTab::Git, cx),
             Command::Preview => self.set_right_tab(RightTab::Preview, cx),
             Command::SwitchWorkspace => self.open_workspace_prompt(cx),
             Command::FocusMode => {
@@ -1445,13 +1540,6 @@ impl AppState {
         .detach();
     }
 
-    /// 本次会话里 Agent 改动过的文件汇总（按路径合并）。
-    pub(crate) fn session_changes(&self) -> Vec<neverwork_core::FileChange> {
-        match self.sessions.get(self.active_session) {
-            Some(session) => neverwork_core::aggregate_changes(&session.messages),
-            None => Vec::new(),
-        }
-    }
 
     /// 展开 / 收起一个工具步骤组。
     pub(crate) fn toggle_steps(&mut self, key: usize, cx: &mut Context<Self>) {
@@ -1760,11 +1848,34 @@ impl Render for AppState {
         // 响应式布局：`bounds()` 已是逻辑像素（GPUI 内部做过 physical / scale），不要再除一次。
         // 布局优先级：中栏 > 左侧会话栏 > 右侧文件栏，窄窗口先牺牲右栏，
         // 极窄时才隐藏会话列表（图标栏始终保留，否则没有任何全局入口）。
-        let visible_w: f32 = window.bounds().size.width.into();
+        // ---- 可见尺寸 ----
+        // 坑：某些环境（远程桌面 / 特殊 DPI 缩放）下窗口按 1:1 物理像素创建，
+        // 但 `bounds()` 返回的是物理像素，渲染却按 scale 放大 —— 于是内容被放大
+        // 一倍，右侧和底部整块跑到窗口外。
+        //
+        // 判据：**窗口不可能比屏幕还宽**。当 `bounds().width > display.width` 时，
+        // 说明两者单位不一致，`bounds()` 是物理值，需要除以 scale 才是逻辑尺寸。
+        // 正常的 200% 缩放机器上 bounds 已是逻辑值（小于屏幕），不会触发这条分支。
+        let scale = window.scale_factor().max(1.0);
+        let raw_w: f32 = window.bounds().size.width.into();
+        let raw_h: f32 = window.bounds().size.height.into();
+        let screen_w: f32 = window
+            .display(cx)
+            .map(|d| d.bounds().size.width.into())
+            .unwrap_or(raw_w);
+        let mismatch = raw_w > screen_w * 1.02;
+        let (visible_w, visible_h) = if mismatch {
+            (raw_w / scale, raw_h / scale)
+        } else {
+            (raw_w, raw_h)
+        };
         self.layout_w.set(visible_w);
         let hide_sides = self.focus_mode;
         // 设置页与技能市场是"全页"视图，会话列表和右栏都让出来。
-        let full_page = matches!(self.center, CenterView::Settings | CenterView::Skills);
+        let full_page = matches!(
+            self.center,
+            CenterView::Settings | CenterView::Skills
+        );
         let hide_right = visible_w < 1080.0 || full_page;
         let hide_list = visible_w < 620.0 || full_page;
         if std::env::var("NW_LAYOUT_DEBUG").is_ok() {
@@ -1779,7 +1890,11 @@ impl Render for AppState {
         }
         let mut root = div()
             .relative()
-            .size_full()
+            // 用「可见尺寸」而不是 size_full()：单位不一致的环境下
+            // size_full 会铺满物理像素，导致内容被放大后裁掉右侧。
+            .w(px(visible_w))
+            .h(px(visible_h))
+            .overflow_hidden()
             .flex()
             .flex_col()
             .bg(theme::surface())
@@ -1798,11 +1913,9 @@ impl Render for AppState {
                     let row = row
                         .child(self.left_sidebar(hide_list, cx))
                         .child(self.center_area(cx));
-                    if hide_right {
-                        row
-                    } else {
-                        row.child(self.right_panel(cx))
-                    }
+                    // 窄窗口不整块隐藏右栏，而是收成窄条：
+                    // 否则用户再也点不回来（折叠按钮也一起消失）。
+                    row.child(self.right_panel(hide_right, cx))
                 }
             })
             .child(input_bridge(

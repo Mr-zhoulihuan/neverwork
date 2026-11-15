@@ -469,6 +469,11 @@ pub struct Settings {
     #[serde(default)]
     pub skills: Vec<Skill>,
 
+    // ---- 工作区 ----
+    /// 上次打开的工作区（绝对路径）。空则用内置默认。
+    #[serde(default)]
+    pub last_workspace: String,
+
     // ---- 同步与升级 ----
     /// 配置同步开关（导出/导入或云同步）。
     #[serde(default)]
@@ -521,6 +526,7 @@ impl Default for Settings {
             providers,
             active_provider_id: active,
             skills: Vec::new(),
+            last_workspace: String::new(),
             sync_enabled: false,
             last_sync_at: 0,
             last_update_check: 0,
@@ -594,6 +600,9 @@ impl Settings {
         }
     }
 }
+
+/// 内置默认工作区。换机器时不存在会自动回退。
+pub const DEFAULT_WORKSPACE: &str = r"E:\go";
 
 /// 当前应用版本（用于「检查更新」展示）。
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

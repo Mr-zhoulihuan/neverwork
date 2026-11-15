@@ -105,7 +105,49 @@ design/   设计稿（HTML/PNG）与设计规范 DESIGN-SPEC.md
 - **响应式 + 专注模式**：窗口较窄或高 DPI 时自动收起侧栏，
   标题栏「◧ 专注」可手动切换。
 
-测试：185 个。app 侧 text_buffer 11 / text_fit 5 / model_picker 10 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2；agent 侧 tools 17 / diff 12 / team role_provider 5 / sse 2；core 侧 settings 13 + config 5；ui 3。另有 3 条打真实 DeepSeek API 的集成测试（需密钥，默认跳过）。
+测试：208 个。app 侧 text_buffer 11 / text_fit 5 / model_picker 10 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2；agent 侧 tools 17 / diff 12 / team role_provider 5 / sse 2；core 侧 settings 13 + config 5；ui 3。另有 3 条打真实 DeepSeek API 的集成测试（需密钥，默认跳过）。
+
+### M9 — Git 面板 + 默认工作区 + 可见尺寸修复（本期）
+
+**1. 右侧「改动」换成 Git 面板**
+
+`文件 / Git / 预览` 三个 Tab，Git 页显示：
+
+- 头部：当前分支、领先/落后上游的提交数（`⎇ main ↑1`）、刷新按钮
+- 改动摘要：`N 个文件（暂存 X · 未暂存 Y）`，有冲突时红标提示
+- 改动文件列表：`A/M/D/R/!` 标记 + 颜色，已暂存的文件带绿点；
+  点一下在下方看该文件相对 HEAD 的 diff（`+` 绿 / `-` 红 / `@@` 蓝）
+- 最近提交：hash、摘要、相对时间
+
+全部走 `git` 命令行（`status --porcelain=v1 -z`、`log`、`diff HEAD`），
+不引 libgit2 —— 只读展示不需要编 C 依赖。所有命令带 `-C <repo>`，不依赖进程 cwd。
+
+**2. 工作区默认 `E:\go`，且支持子仓库**
+
+- 优先级：`NW_ROOT` → 上次用过的（`settings.last_workspace`）→ 内置默认 `E:\go`
+  → 从当前目录向上找 `Cargo.toml` → 当前目录。每一步都校验目录存在，避免打开空目录。
+- 切换工作区后会记住，下次启动直接回到那里。
+- `E:\go` 这类「容器目录」本身不是仓库、但子目录各自是仓库时，
+  Git 页会列出这些子仓库（如 `ShareNasWorkTool` / `goDemo` / `nas-os` / `ops-go`），
+  点一下即切换过去。
+
+**3. 修掉多轮困扰的「右栏看不见」（可见尺寸修复）**
+
+现象：远程桌面 / 特殊 DPI 环境下，窗口按 1:1 物理像素创建，但 `bounds()` 返回物理像素、
+渲染又按 scale 放大 —— 内容被放大一倍，右侧与底部整块跑到窗口外，右栏永远看不到。
+
+判据：**窗口不可能比屏幕还宽**。当 `bounds().width > display().width` 说明两者单位不一致，
+此时 `bounds()` 是物理值，需除以 scale 才等于逻辑尺寸。修复后用该值显式约束根容器宽高
+（替代 `size_full()`）。
+
+正常的 200% 缩放机器上 `bounds` 已是逻辑值（小于屏幕），不会触发这条分支，行为不变。
+
+**4. 移除终端与全局搜索**
+
+试做后移除：终端不做 PTY 时无法支持交互式程序，价值有限；全局搜索与编辑器内查找重叠。
+对应的 `terminal.rs` / `search.rs` 与视图、快捷键、图标栏入口一并删除，保持代码干净。
+
+测试：208 个（新增 git 10 / brackets 13、移除终端 6 与搜索 12）。
 
 ### M8 — 多光标 / 代码折叠 / 跨文件补丁 / 真主管分派 / Gemini 原生（本期）
 

@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use neverwork_core::{AppError, AppResult, FileNode};
 
@@ -139,43 +138,6 @@ pub fn write_file(path: &Path, content: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// 最近修改的文件（相对路径 + 修改时间），用于「改动」面板。
-pub fn recent_files(root: &Path, limit: usize) -> Vec<(String, SystemTime)> {
-    let mut found: Vec<(String, SystemTime)> = Vec::new();
-    collect_recent(root, root, 0, &mut found);
-    found.sort_by(|a, b| b.1.cmp(&a.1));
-    found.truncate(limit);
-    found
-}
-
-fn collect_recent(base: &Path, dir: &Path, depth: u8, out: &mut Vec<(String, SystemTime)>) {
-    if depth > 3 || out.len() > 400 {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_dir() {
-            if IGNORE_DIRS.contains(&name.as_str()) {
-                continue;
-            }
-            collect_recent(base, &entry.path(), depth + 1, out);
-        } else if let Ok(meta) = entry.metadata() {
-            if meta.len() == 0 {
-                continue;
-            }
-            if let Ok(mtime) = meta.modified() {
-                let rel = entry
-                    .path()
-                    .strip_prefix(base)
-                    .map(|p| p.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or(name);
-                out.push((rel, mtime));
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

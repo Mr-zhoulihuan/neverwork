@@ -150,6 +150,13 @@ impl AppState {
         // 折叠：先算出「真实行号 → 是否可见」，再让列表只渲染可见行。
         // 用真实行号做映射（而不是重排文本），这样光标/选区/保存全都无需改动。
         let raw_text = self.editor.text();
+        // 括号配对：光标停在括号上（或紧跟其后）时，两个括号都描边高亮。
+        let bracket_hl: Option<(usize, usize)> =
+            match crate::brackets::find_pair(raw_text, cursor, lang) {
+                Some(b) if b.is_balanced() => Some((b.at, b.mate)),
+                _ => None,
+            };
+        let bracket_rc = std::rc::Rc::new(bracket_hl);
         let raw_lines: Vec<&str> = raw_text.split('\n').collect();
         let foldable: Vec<usize> = crate::folding::foldable_starts(&raw_lines);
         let ranges = crate::folding::collapsed_ranges(&self.folds, &raw_lines);
@@ -182,6 +189,7 @@ impl AppState {
                     gutter_w,
                     foldable_rc.binary_search(&i).is_ok(),
                     folds_rc.contains(&i),
+                    bracket_rc.clone(),
                 ));
             }
             out
@@ -508,6 +516,7 @@ fn render_line(
     gutter_w: f32,
     foldable: bool,
     folded: bool,
+    bracket_hl: std::rc::Rc<Option<(usize, usize)>>,
 ) -> AnyElement {
     let start = lines.line_start(idx);
     let text: &str = &lines.texts[idx];
@@ -557,12 +566,17 @@ fn render_line(
                 .as_ref()
                 .map(|r| abs >= r.start && abs < r.end)
                 .unwrap_or(false);
+            let is_bracket = matches!(
+                bracket_hl.as_ref(),
+                Some((a, b)) if abs == *a || abs == *b
+            );
             text_el = text_el.child(char_cell(
                 entity.clone(),
                 focus.clone(),
                 ch,
                 color,
                 selected,
+                is_bracket,
                 abs,
                 font_px,
             ));
@@ -702,12 +716,14 @@ fn caret_colored(
 }
 
 
+#[allow(clippy::too_many_arguments)]
 fn char_cell(
     entity: Entity<AppState>,
     focus: FocusHandle,
     ch: char,
     color: Rgba,
     selected: bool,
+    is_bracket: bool,
     abs: usize,
     font_px: f32,
 ) -> AnyElement {
@@ -721,6 +737,12 @@ fn char_cell(
         .flex_shrink_0()
         .text_color(color)
         .when(selected, |d| d.bg(gpui::rgb(SEL_BG)))
+        // 配对括号：加底色 + 描边，比单纯变色更容易在密集代码里看到
+        .when(is_bracket, |d| {
+            d.bg(theme::with_alpha(0x3b82f6, 0.22))
+                .border_b_1()
+                .border_color(theme::accent())
+        })
         .child(display)
         .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
             let extend = ev.modifiers.shift;
