@@ -335,8 +335,12 @@ fn numbered_item(trimmed: &str) -> Option<(u32, &str)> {
 /// 各片段也只在**片段之间**断行，长段落仍会挤成「首行只剩一个词」的样子。
 ///
 /// 断行规则：优先在空格处断（英文单词不拆开），中文等无空格文本按字符断。
+///
+/// 估宽必须用**等宽**公式：对话流整体是 `theme::mono_family()`（Cascadia
+/// Mono，ASCII 前进宽度 0.6em）。之前用比例字体的 0.5em 估算，每行会
+/// 少算 20% 宽度，折出来的行在渲染时超宽、右侧被父容器裁掉半截。
 pub fn wrap_spans(spans: &[InlineSpan], max_px: f32, font_px: f32) -> Vec<Vec<InlineSpan>> {
-    use crate::views::text_fit::char_width;
+    use crate::views::text_fit::char_width_mono as char_width;
 
     // 先摊平成「字符 + 样式」，跨片段折行才不会丢样式
     let mut chars: Vec<(char, InlineKind)> = Vec::new();
@@ -422,7 +426,7 @@ mod wrap_tests {
         let lines = wrap_spans(&spans, 300.0, 14.0);
         assert!(lines.len() > 1, "长文本必须折行");
         for line in &lines {
-            let w: f32 = total(line).chars().map(|c| crate::views::text_fit::char_width(c, 14.0)).sum();
+            let w: f32 = total(line).chars().map(|c| crate::views::text_fit::char_width_mono(c, 14.0)).sum();
             assert!(w <= 310.0, "行宽 {w} 超出预算");
         }
         // 不丢字

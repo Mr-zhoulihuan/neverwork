@@ -551,6 +551,7 @@ mod aggregate_tests {
             },
             body: String::new(),
             code: None,
+            elapsed_ms: 0,
         }
     }
 
@@ -588,6 +589,7 @@ mod aggregate_tests {
                 kind: MessageKind::User,
                 body: "hi".into(),
                 code: None,
+                elapsed_ms: 0,
             },
         ];
         assert!(aggregate_changes(&msgs).is_empty());

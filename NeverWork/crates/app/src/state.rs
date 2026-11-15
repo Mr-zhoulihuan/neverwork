@@ -299,6 +299,11 @@ pub struct AppState {
     pub update_status: Option<String>,
     /// 当前窗口的可用逻辑宽度（render 时写入，供网格类视图算列数）。
     pub layout_w: std::rc::Rc<std::cell::Cell<f32>>,
+    /// 中栏（对话 / 编辑器）的实际可用宽度，render 时写入。
+    ///
+    /// 正文折行必须按这个值算：写死常量（如 `CHAT_MAX_W`）在三栏全开时
+    /// 比可用宽度还宽，文字二次折行后右边被裁；右栏收起时又窄一截留白。
+    pub chat_w: f32,
     /// 自动保存计时代数（每次改动 +1，用于判定"最后一次改动"）。
     pub auto_save_gen: std::rc::Rc<std::cell::Cell<u64>>,
     /// 是否有待保存的自动保存。
@@ -353,6 +358,33 @@ pub struct PendingApproval {
     pub summary: String,
     /// 把用户决定送回 Agent 线程。
     pub respond: flume::Sender<bool>,
+}
+
+/// 「一轮模型回复对应一个消息气泡」的簿记。
+///
+/// 之前只用 `HashMap<角色, 当前气泡下标>`，工具调用结束后也不清空：第 2 轮的
+/// 正文会继续追加到第 1 轮的气泡里 —— 最终回答被拼到工具步骤**上方**那段
+/// 前言后面，读起来顺序全错。把规则收成这个小结构，才能单测。
+#[derive(Default)]
+pub(crate) struct RoundBubbles {
+    current: std::collections::HashMap<usize, usize>,
+}
+
+impl RoundBubbles {
+    /// 取本轮该写入的气泡下标；还没有就调 `create` 建一个。
+    pub(crate) fn bubble(&mut self, role: usize, create: impl FnOnce() -> usize) -> usize {
+        if let Some(i) = self.current.get(&role) {
+            return *i;
+        }
+        let i = create();
+        self.current.insert(role, i);
+        i
+    }
+
+    /// 本轮正文结束（模型开始调工具）：下一段文字要落进新气泡。
+    pub(crate) fn end_round(&mut self, role: usize) {
+        self.current.remove(&role);
+    }
 }
 
 /// 决定启动时打开哪个工作区。
@@ -479,6 +511,7 @@ impl AppState {
             action_msg: None,
             update_status: None,
             layout_w: std::rc::Rc::new(std::cell::Cell::new(1200.0)),
+            chat_w: 1200.0,
             auto_save_gen: std::rc::Rc::new(std::cell::Cell::new(0)),
             auto_save_pending: false,
             streaming: false,
@@ -1595,11 +1628,14 @@ impl AppState {
         });
 
         cx.spawn(async move |weak, async_cx| {
-            // 每个角色当前正在追加文本的 Agent 消息下标
-            let mut agent_msg: std::collections::HashMap<usize, usize> =
-                std::collections::HashMap::new();
-            // 每个角色当前正在进行的工具卡片下标
-            let mut tool_msg: std::collections::HashMap<usize, usize> =
+            // 每一轮模型回复对应一个气泡：工具调用一结束就要换新的，
+            // 否则下一轮正文会追加到上一轮那段前言里（顺序全错）。
+            let mut bubbles = RoundBubbles::default();
+            // 正在执行的工具卡片：**按调用 id** 记录，不能用角色作键。
+            // 一轮里模型可能同时发起多个工具调用（如一次读 3 个文件），
+            // 用角色作键会互相覆盖：结果全写到最后一个卡片，
+            // 前面的永远停在「执行中」转圈。
+            let mut tool_msg: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
 
             loop {
@@ -1618,20 +1654,16 @@ impl AppState {
                         });
                         let _ = weak.update(async_cx, |this, cx| {
                             let Some(p) = participant else { return };
-                            let idx = match agent_msg.get(&ri).copied() {
-                                Some(i) => i,
-                                None => {
-                                    let i = this.sessions[session_idx].messages.len();
-                                    this.sessions[session_idx].messages.push(Message {
-                                        kind: MessageKind::Agent { participant: p },
-                                        body: String::new(),
-                                        code: None,
-                                        elapsed_ms: 0,
-                                    });
-                                    agent_msg.insert(ri, i);
-                                    i
-                                }
-                            };
+                            let idx = bubbles.bubble(ri, || {
+                                let i = this.sessions[session_idx].messages.len();
+                                this.sessions[session_idx].messages.push(Message {
+                                    kind: MessageKind::Agent { participant: p },
+                                    body: String::new(),
+                                    code: None,
+                                    elapsed_ms: 0,
+                                });
+                                i
+                            });
                             if let Some(m) = this.sessions[session_idx].messages.get_mut(idx) {
                                 m.body.push_str(&d);
                             }
@@ -1645,6 +1677,8 @@ impl AppState {
                         preview,
                     } => {
                         let _ = weak.update(async_cx, |this, cx| {
+                            // 本轮正文到此为止：工具跑完后的那段回答要落到新气泡里
+                            bubbles.end_round(ri);
                             let idx = this.sessions[session_idx].messages.len();
                             this.sessions[session_idx].messages.push(Message {
                                 kind: MessageKind::ToolCall {
@@ -1671,7 +1705,7 @@ impl AppState {
                                 code: None,
                                 elapsed_ms: 0,
                             });
-                            tool_msg.insert(ri, idx);
+                            tool_msg.insert(call.id.clone(), idx);
                             this.chat_scroll_dirty.set(true);
                             cx.notify();
                         });
@@ -1683,7 +1717,7 @@ impl AppState {
                     } => {
                         let tool = call.name.clone();
                         let summary = call.summary();
-                        let tmsg = tool_msg.get(&ri).copied();
+                        let tmsg = tool_msg.get(&call.id).copied();
                         let _ = weak.update(async_cx, |this, cx| {
                             if this.auto_approve {
                                 let _ = respond.send(true);
@@ -1701,7 +1735,8 @@ impl AppState {
                         });
                     }
                     neverwork_agent::AgentEvent::ToolFinished { result } => {
-                        let tmsg = tool_msg.get(&ri).copied();
+                        // 用完就清：同一 id 不会再来第二次，留着只会让表无限增长
+                        let tmsg = tool_msg.remove(&result.call_id);
                         let _ = weak.update(async_cx, |this, cx| {
                             if let Some(idx) = tmsg {
                                 if let Some(m) = this.sessions[session_idx].messages.get_mut(idx) {
@@ -1741,8 +1776,8 @@ impl AppState {
                             cx.notify();
                         });
                     }
-                    neverwork_agent::AgentEvent::Denied { .. } => {
-                        let tmsg = tool_msg.get(&ri).copied();
+                    neverwork_agent::AgentEvent::Denied { call } => {
+                        let tmsg = tool_msg.remove(&call.id);
                         let _ = weak.update(async_cx, |this, cx| {
                             if let Some(idx) = tmsg {
                                 if let Some(m) = this.sessions[session_idx].messages.get_mut(idx) {
@@ -1757,14 +1792,39 @@ impl AppState {
                     }
                     neverwork_agent::AgentEvent::RoundLimit => {
                         let _ = weak.update(async_cx, |this, cx| {
-                            this.notice =
-                                Some("某个角色已达到单轮工具调用上限（8 轮），已停下".into());
+                            // 不是错误：只是不再继续读，接下来会基于已读内容作答。
+                            // 原文案「已达到上限（8 轮），已停下」看起来像崩了。
+                            this.notice = Some(
+                                "已达到本轮工具调用上限，不再继续读取，正在基于已有信息作答…"
+                                    .into(),
+                            );
                             cx.notify();
                         });
                     }
                     neverwork_agent::AgentEvent::Error(e) => {
+                        // provider 的原始错误往往是一大段 JSON（如 context_length_exceeded），
+                        // 直接甩给用户只会让人以为程序坏了。把最常见的几种翻成人话，
+                        // 其余保留原文（排查时还需要它）。
+                        let low = e.to_lowercase();
+                        let msg = if low.contains("context_length")
+                            || low.contains("maximum context length")
+                            || low.contains("too many tokens")
+                            || low.contains("context window")
+                        {
+                            "这次读到的内容超出了模型的上下文上限，已停下。可以新开一个会话，或直接说清要改哪个文件。"
+                                .to_string()
+                        } else if low.contains("invalid api key")
+                            || low.contains("unauthorized")
+                            || low.contains("incorrect api key")
+                        {
+                            "API Key 无效或已过期，去设置里检查一下。".to_string()
+                        } else if low.contains("rate limit") || low.contains("429") {
+                            "请求太频繁被限流了，稍等几秒再试。".to_string()
+                        } else {
+                            format!("Agent 错误：{e}")
+                        };
                         let _ = weak.update(async_cx, |this, cx| {
-                            this.notice = Some(format!("Agent 错误：{e}"));
+                            this.notice = Some(msg);
                             cx.notify();
                         });
                     }
@@ -2152,13 +2212,24 @@ impl AppState {
     pub(crate) fn answer_approval(&mut self, allow: bool, cx: &mut Context<Self>) {
         if let Some(p) = self.pending.take() {
             let _ = p.respond.send(allow);
-            if !allow {
-                if let Some(m) = self.sessions[p.session_idx].messages.get_mut(p.msg_idx) {
-                    if let MessageKind::ToolCall { status, .. } = &mut m.kind {
-                        *status = ToolRunStatus::Denied;
-                    }
+            // 允许后立刻回到「执行中」：否则卡片会一直停在「待确认」，按钮却已经
+            // 消失，看起来像卡住了（大文件写入要等几秒）。
+            if let Some(m) = self
+                .sessions
+                .get_mut(p.session_idx)
+                .and_then(|s| s.messages.get_mut(p.msg_idx))
+            {
+                if let MessageKind::ToolCall { status, .. } = &mut m.kind {
+                    *status = if allow {
+                        ToolRunStatus::Running
+                    } else {
+                        ToolRunStatus::Denied
+                    };
                 }
             }
+            // 保持展开：`awaiting` 是强制展开的条件，状态一回 `Running` 卡片就会
+            // 收起，用户看不到随后的写入结果和 diff。
+            self.expanded_steps.insert(p.msg_idx);
         }
         cx.notify();
     }
@@ -2236,6 +2307,23 @@ impl Render for AppState {
         );
         let hide_right = visible_w < 1080.0 || full_page;
         let hide_list = visible_w < 620.0 || full_page;
+        // 中栏可用宽度：左栏（图标栏 + 会话列表）与右栏（面板或 16px 窄条）
+        // 都是定宽，减掉就是正文真实可用的宽度（`chat_pane` 据此折行）。
+        let left_w = if hide_sides {
+            0.0
+        } else if hide_list {
+            crate::views::sidebar::RAIL_W
+        } else {
+            crate::views::sidebar::RAIL_W + crate::views::sidebar::SESSION_W
+        };
+        let right_w = if hide_sides {
+            0.0
+        } else if hide_right || self.right_collapsed {
+            16.0
+        } else {
+            theme::FILES_W
+        };
+        self.chat_w = (visible_w - left_w - right_w).max(240.0);
         if std::env::var("NW_LAYOUT_DEBUG").is_ok() {
             // 尺寸变化时才打印。拖动窗口时能连续看到断点变化，便于确认跟随是否正常。
             static LAST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -2390,4 +2478,43 @@ fn start_watcher(root: PathBuf, cx: &mut Context<AppState>) {
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod round_bubble_tests {
+    use super::RoundBubbles;
+
+    #[test]
+    fn each_round_gets_its_own_bubble() {
+        let mut bubbles = RoundBubbles::default();
+        let mut next = 0usize;
+        let mut alloc = || {
+            let i = next;
+            next += 1;
+            i
+        };
+        // 同一轮内的流式增量共用一个气泡
+        assert_eq!(bubbles.bubble(0, &mut alloc), 0);
+        assert_eq!(bubbles.bubble(0, &mut alloc), 0);
+        // 开始调工具 → 本轮结束，下一段文字必须换新气泡
+        bubbles.end_round(0);
+        assert_eq!(bubbles.bubble(0, &mut alloc), 1);
+    }
+
+    #[test]
+    fn roles_do_not_share_bubbles() {
+        let mut bubbles = RoundBubbles::default();
+        let mut next = 0usize;
+        let mut alloc = || {
+            let i = next;
+            next += 1;
+            i
+        };
+        assert_eq!(bubbles.bubble(0, &mut alloc), 0);
+        assert_eq!(bubbles.bubble(1, &mut alloc), 1);
+        // 结束角色 0 的一轮不应该影响角色 1
+        bubbles.end_round(0);
+        assert_eq!(bubbles.bubble(1, &mut alloc), 1);
+        assert_eq!(bubbles.bubble(0, &mut alloc), 2);
+    }
 }

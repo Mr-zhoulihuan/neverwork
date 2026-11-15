@@ -3,7 +3,53 @@ use gpui::{ClickEvent, CursorStyle, KeyDownEvent};
 use neverwork_core::MessageKind;
 use crate::state::InputTarget;
 
+/// 对话正文基准字号。折行估宽与渲染必须用同一个值：
+/// 估窄了行会顶出气泡右侧被父容器裁掉半截。
+const BODY_PX: f32 = 16.0;
+
+/// 列表标记（`•` / `1.`）连同 `gap_2` 占掉的横向宽度。
+fn marker_w(label: &str) -> f32 {
+    label.chars().count() as f32 * BODY_PX * crate::views::text_fit::MONO_ASCII_RATIO + 8.0
+}
+
+/// 点击回调（`cx.listener` 的返回类型）：自由函数要接住它必须装箱。
+pub(crate) type ClickCb =
+    Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static>;
+
+/// 消息级「复制」按钮：常驻但很淡，悬停变亮。
+///
+/// gpui 0.2.2 的文本元素没有选中能力（无 `InteractiveText`），
+/// 所以「复制一句话」只能由消息自带的按钮驱动。
+/// 用文字而不是 `⧉` 图标：图标太隐晦，用户根本不知道哪里能点。
+fn copy_chip(
+    id: impl Into<gpui::ElementId>,
+    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .px_2()
+        .py_0p5()
+        .rounded_sm()
+        .text_xs()
+        .text_color(theme::dim())
+        .cursor_pointer()
+        .hover(|d| d.bg(theme::raised()).text_color(theme::accent()))
+        .on_click(on_click)
+        .child("复制")
+}
+
 impl AppState {
+    /// 把一段对话内容写进系统剪贴板，并给一条轻提示。
+    pub(crate) fn copy_message(&mut self, text: String, what: &str, cx: &mut Context<Self>) {
+        if text.trim().is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.notice = Some(format!("已复制{what}"));
+        cx.notify();
+    }
+
     pub(crate) fn chat_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let session = self.session();
         let mut col = div().flex().flex_col().flex_1().h_full().overflow_hidden().bg(theme::surface());
@@ -120,7 +166,12 @@ impl AppState {
             .gap_4()
             .px_5()
             .py_5()
-            .font_family(theme::mono_family());
+            .font_family(theme::mono_family())
+            // 显式钉死字号：gpui 默认是 1rem（16px），但折行估宽用的是
+            // `BODY_PX`，两者必须一致，不能靠默认值巧合相等。
+            .text_size(px(BODY_PX));
+        // 正文折行宽度：中栏真实可用宽度减去左右 px_5 内边距。
+        let avail = (self.chat_w - 40.0).max(240.0);
         let sidx = self.active_session;
         let total = session.messages.len();
         let mut i = 0usize;
@@ -143,7 +194,7 @@ impl AppState {
                 continue;
             }
             let m = session.messages[i].clone();
-            thread = thread.child(self.render_msg(&m));
+            thread = thread.child(self.render_msg(&m, avail, i, cx));
             i += 1;
         }
         if self.streaming {
@@ -509,11 +560,30 @@ pub(crate) fn flow_step(initial: &str, idx: usize, label: &str, active: bool) ->
 
 impl AppState {
     /// 渲染一条会话消息。`pending_here` 为真时给写操作卡片加上允许/拒绝按钮。
-    pub(crate) fn render_msg(&self, m: &neverwork_core::Message) -> gpui::AnyElement {
+    pub(crate) fn render_msg(
+        &self,
+        m: &neverwork_core::Message,
+        avail: f32,
+        idx: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         match &m.kind {
-            MessageKind::User => user_bubble(&m.body).into_any_element(),
+            MessageKind::User => {
+                let body = m.body.clone();
+                user_bubble(
+                    &m.body,
+                    copy_chip(
+                        SharedString::from(format!("copy-user-{idx}")),
+                        cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                            this.copy_message(body.clone(), "提问", cx);
+                        }),
+                    ),
+                )
+                .into_any_element()
+            }
             MessageKind::Agent { participant } => {
                 let (model, provider) = self.model_labels();
+                let body = m.body.clone();
                 agent_bubble(
                     &participant.role_name,
                     &participant.role_id,
@@ -524,6 +594,13 @@ impl AppState {
                     m.elapsed_ms,
                     &model,
                     &provider,
+                    avail,
+                    Some((
+                        gpui::ElementId::from(SharedString::from(format!("copy-agent-{idx}"))),
+                        Box::new(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                            this.copy_message(body.clone(), "回答", cx);
+                        })) as ClickCb,
+                    )),
                 )
                 .into_any_element()
             }
@@ -847,7 +924,7 @@ fn tool_verb(name: &str) -> &'static str {
 ///
 /// 对齐参考稿（opencode）：用户输入是一段被引用的文本块，
 /// 左右留白对齐正文，一眼能分辨「谁说的」但不抢视觉。
-pub(crate) fn user_bubble(text: &str) -> impl IntoElement {
+pub(crate) fn user_bubble(text: &str, copy: impl IntoElement) -> impl IntoElement {
     div()
         .w_full()
         .pl_3()
@@ -858,9 +935,19 @@ pub(crate) fn user_bubble(text: &str) -> impl IntoElement {
         .bg(theme::with_alpha(0xffffff, 0.035))
         .child(
             div()
-                .text_color(theme::fg())
-                .line_height(px(22.0))
-                .child(SharedString::from(text.to_string())),
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_color(theme::fg())
+                        .line_height(px(22.0))
+                        .child(SharedString::from(text.to_string())),
+                )
+                .child(copy),
         )
 }
 
@@ -878,6 +965,9 @@ pub(crate) fn agent_bubble(
     elapsed_ms: u64,
     model_label: &str,
     provider_label: &str,
+    avail: f32,
+    // 复制按钮（元素 id + 回调）；`None` 时不渲染。
+    copy: Option<(gpui::ElementId, ClickCb)>,
 ) -> impl IntoElement {
     let mut col = div()
         .w_full()
@@ -890,7 +980,7 @@ pub(crate) fn agent_bubble(
         col = col.child(div().text_color(theme::dim()).child("…"));
     } else {
         for b in crate::markdown::parse(text) {
-            col = col.child(markdown_block(b));
+            col = col.child(markdown_block(b, avail));
         }
     }
     if let Some(c) = code {
@@ -918,31 +1008,32 @@ pub(crate) fn agent_bubble(
     if elapsed_ms > 0 {
         parts.push(format_elapsed(elapsed_ms));
     }
-    // 角色色仍用来区分多角色场景（单助手时是灰的）
-    let foot_color = if role_id == "agent" {
-        theme::dim()
-    } else {
-        theme::with_alpha(0xffffff, 0.45)
-    };
-    col = col.child(
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .pt_1()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme::role_color(color_idx))
-                    .child("▣"),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(foot_color)
-                    .child(SharedString::from(parts.join(" · "))),
-            ),
-    );
+    // 页脚文字统一走弱化色令牌：之前多角色用「白色 45% 透明」，
+    // 浅色主题下白底白字几乎看不见；主题令牌两套底色都安全。
+    // 角色区分交给前面的 ▣（用 role_color 着色）。
+    let foot_color = theme::muted();
+    let mut foot = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .pt_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::role_color(color_idx))
+                .child("▣"),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(foot_color)
+                .child(SharedString::from(parts.join(" · "))),
+        )
+        .child(div().flex_1());
+    if let Some((id, cb)) = copy {
+        foot = foot.child(copy_chip(id, cb));
+    }
+    col = col.child(foot);
     col
 }
 
@@ -959,7 +1050,7 @@ pub(crate) fn format_elapsed(ms: u64) -> String {
 }
 
 /// 渲染一个 Markdown 块。
-fn markdown_block(block: crate::markdown::Block) -> gpui::AnyElement {
+fn markdown_block(block: crate::markdown::Block, avail: f32) -> gpui::AnyElement {
     use crate::markdown::Block;
     match block {
         Block::Heading(level, text) => {
@@ -974,17 +1065,13 @@ fn markdown_block(block: crate::markdown::Block) -> gpui::AnyElement {
                 .flex_col()
                 .gap_1()
                 .pt_1()
-                .border_1()
-                .border_color(gpui::rgb(0xff0000))
                 .child(
                     div()
                         .text_size(px(size))
                         .font_weight(FontWeight::BOLD)
-                        .border_1()
-                        .border_color(gpui::rgb(0x0000ff))
                         // 参考稿里小标题是琥珀色，比正文更亮一档
                         .text_color(theme::yellow())
-                        .child(inline_row(&text)),
+                        .child(inline_row(&text, avail, size)),
                 )
                 .when(level <= 2, |d| d.child(div().h(px(1.0)).bg(theme::border())))
                 .into_any_element()
@@ -992,13 +1079,13 @@ fn markdown_block(block: crate::markdown::Block) -> gpui::AnyElement {
         Block::Paragraph(text) => div()
             .text_color(theme::fg())
             .line_height(px(22.0))
-            .border_1()
-            .border_color(gpui::rgb(0x00ff00))
-            .child(inline_row(&text))
+            .child(inline_row(&text, avail, BODY_PX))
             .into_any_element(),
         Block::Code { lang, lines } => code_fence_block(&lang, &lines).into_any_element(),
         Block::Bullet(items) => {
             let mut col = div().flex().flex_col().gap_1();
+            // 标记占掉的宽度要从折行预算里扣掉，否则每行多算一截、行尾被裁。
+            let inner = (avail - marker_w("•")).max(120.0);
             for item in items {
                 col = col.child(
                     div()
@@ -1007,7 +1094,7 @@ fn markdown_block(block: crate::markdown::Block) -> gpui::AnyElement {
                         .gap_2()
                         .items_start()
                         .child(div().text_color(theme::dim()).child("•"))
-                        .child(div().flex_1().line_height(px(22.0)).child(inline_row(&item))),
+                        .child(div().flex_1().line_height(px(22.0)).child(inline_row(&item, inner, BODY_PX))),
                 );
             }
             col.into_any_element()
@@ -1015,6 +1102,9 @@ fn markdown_block(block: crate::markdown::Block) -> gpui::AnyElement {
         Block::Numbered(start, items) => {
             let mut col = div().flex().flex_col().gap_1();
             for (i, item) in items.into_iter().enumerate() {
+                // 序号宽度随位数变化（`9.` 比 `10.` 窄），按实际标签算。
+                let label = format!("{}.", start + i as u32);
+                let inner = (avail - marker_w(&label)).max(120.0);
                 col = col.child(
                     div()
                         .flex()
@@ -1024,17 +1114,19 @@ fn markdown_block(block: crate::markdown::Block) -> gpui::AnyElement {
                         .child(
                             div()
                                 .text_color(theme::dim())
-                                .child(SharedString::from(format!("{}.", start + i as u32))),
+                                .child(SharedString::from(label)),
                         )
-                        .child(div().flex_1().line_height(px(22.0)).child(inline_row(&item))),
+                        .child(div().flex_1().line_height(px(22.0)).child(inline_row(&item, inner, BODY_PX))),
                 );
             }
             col.into_any_element()
         }
         Block::Quote(items) => {
             let mut col = div().flex().flex_col().gap_1();
+            // 左侧 pl_3（12）+ 竖线（2）会吃掉内容宽度
+            let inner = (avail - 14.0).max(120.0);
             for line in items {
-                col = col.child(div().line_height(px(22.0)).child(inline_row(&line)));
+                col = col.child(div().line_height(px(22.0)).child(inline_row(&line, inner, BODY_PX)));
             }
             div()
                 .pl_3()
@@ -1053,23 +1145,34 @@ fn markdown_block(block: crate::markdown::Block) -> gpui::AnyElement {
 /// 折行自己做（`markdown::wrap_spans`）而不是交给 flex `flex_wrap`：
 /// 气泡宽度按内容撑开，flex 拿不到确定宽度，长片段会顶出气泡边界；
 /// 即使给上限，flex 也只在片段之间断行，长段落会挤成「首行只剩一个词」。
-fn inline_row(text: &str) -> gpui::AnyElement {
+fn inline_row(text: &str, avail: f32, font_px: f32) -> gpui::AnyElement {
     use crate::markdown::InlineKind;
-    // 气泡可用宽度：正文已改为平铺，直接用上限本身
-    let avail = theme::CHAT_MAX_W - 8.0;
+    // 折行宽度由调用方按中栏真实可用宽度传入。之前写死 `CHAT_MAX_W - 8`：
+    // 右栏收起时比可用宽度窄一截（每行右侧留一大块空白），展开时又比可用
+    // 宽度宽，文字被二次折行后裁掉右边。
+    let avail = avail.max(200.0);
     let spans = crate::markdown::inline_spans(text);
-    // 字号按比实际略大取值：估宽偏保守，宁可少放几个字也不要溢出气泡。
-    let lines = crate::markdown::wrap_spans(&spans, avail, 14.0);
+    // 字号取调用方的实际渲染字号：估窄了行会超宽被裁，估宽了又会提前折行。
+    let lines = crate::markdown::wrap_spans(&spans, avail, font_px);
 
     let mut col = div()
         .flex()
         .flex_col()
         .gap_0p5()
-        .max_w(px(avail))
-        .border_1()
-        .border_color(gpui::rgb(0xffff00));
+        // 必须给确定宽度：只给 `max_w` 时父容器的宽度传到这一层仍然是
+        // auto，taffy 会把它归约成最小内容宽（≈1 个字），正文因此竖排
+        // 成一列并与后面的元素重叠。`w_full` 把父宽坐实，`max_w` 只做上限。
+        .w_full()
+        .max_w(px(avail));
     for line in lines {
-        let mut row = div().flex().flex_row().items_baseline().max_w(px(avail)).min_w(px(0.0));
+        // 行内不换行、不压缩：本行已经按 `avail` 预折好，若再让 flex 去
+        // 压缩每个 span，各 span 会各自内部折行，行高与列宽全乱、互相重叠。
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .max_w(px(avail))
+            .min_w(px(0.0));
         for span in line {
             let el = match span.kind {
                 InlineKind::Plain => div().child(SharedString::from(span.text)),
@@ -1085,9 +1188,9 @@ fn inline_row(text: &str) -> gpui::AnyElement {
                     .text_color(theme::muted())
                     .child(SharedString::from(span.text)),
             };
-            // 不设 `flex_shrink_0`：万一估宽偏差让整行超宽，
-            // flex 还能把它压回可用宽度重新折行，而不是硬顶到气泡外面。
-            row = row.child(el.min_w(px(0.0)));
+            // 不参与收缩：折行已在上面按可用宽度算好，
+            // 这里再让 span 被压窄只会把它自己的文字挤成竖排。
+            row = row.child(el.flex_shrink_0().whitespace_nowrap());
         }
         col = col.child(row);
     }

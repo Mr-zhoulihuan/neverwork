@@ -121,6 +121,38 @@ struct PartialCall {
     arguments: String,
 }
 
+/// 把一个流式碎片并进已累积的值。
+///
+/// 不能无脑 `push_str`：`function.name` 按规范只在首片出现一次、之后靠拼接，
+/// 但不少兼容网关/代理**每片都重发完整 name 或累计值**。这样拼出来的
+/// `read_file` 会变成 `read_fileread_file`，随后按名分发时找不到工具。
+/// 三种行为都要兼容：
+/// - 增量碎片：`read_` + `file` → 追加
+/// - 累计值：`r` → `re` → `rea`（每片带全部前缀）→ 只追加前缀之后的部分
+/// - 重复完整值：每片都是 `read_file` → 忽略
+///
+/// 「只追加前缀之后的部分」对任意文本（含 JSON arguments）都等价于正确拼接，
+/// 不会丢字符；不要用「已累积值结尾等于碎片」来判重 —— 那会把合法的
+/// 重复内容（如 `"a":"a"` 的尾部）吃掉，产出非法 JSON。
+fn accumulate(slot: &mut String, piece: &str) {
+    if piece.is_empty() {
+        return;
+    }
+    if slot.is_empty() {
+        slot.push_str(piece);
+        return;
+    }
+    if piece == slot.as_str() {
+        return;
+    }
+    if piece.starts_with(slot.as_str()) {
+        // `starts_with` 保证 slot.len() 落在字符边界上
+        slot.push_str(&piece[slot.len()..]);
+        return;
+    }
+    slot.push_str(piece);
+}
+
 impl OpenAiProvider {
     fn stream_impl(
         &self,
@@ -221,12 +253,10 @@ impl OpenAiProvider {
                         }
                         if let Some(f) = item.get("function") {
                             if let Some(n) = f.get("name").and_then(|x| x.as_str()) {
-                                if !n.is_empty() {
-                                    slot.name.push_str(n);
-                                }
+                                accumulate(&mut slot.name, n);
                             }
                             if let Some(a) = f.get("arguments").and_then(|x| x.as_str()) {
-                                slot.arguments.push_str(a);
+                                accumulate(&mut slot.arguments, a);
                             }
                         }
                     }
@@ -331,4 +361,63 @@ pub(crate) fn debug_request_body(model: &str, messages: &[ChatMessage], tools: &
         tool_choice: if tools.is_empty() { None } else { Some("auto") },
     };
     serde_json::to_value(&body).unwrap_or(json!({}))
+}
+
+#[cfg(test)]
+mod accumulate_tests {
+    use super::accumulate;
+
+    #[test]
+    fn incremental_fragments_are_appended() {
+        // OpenAI 规范行为：name 首片完整，arguments 被切成碎片
+        let mut name = String::new();
+        accumulate(&mut name, "read_file");
+        assert_eq!(name, "read_file");
+
+        let mut args = String::new();
+        accumulate(&mut args, "{\"path\":");
+        accumulate(&mut args, "\"src/lib.rs\"}");
+        assert_eq!(args, "{\"path\":\"src/lib.rs\"}");
+    }
+
+    #[test]
+    fn repeated_full_value_is_not_duplicated() {
+        // 实测踩到过：兼容网关每片都重发完整 name，拼成 read_fileread_file
+        let mut name = String::new();
+        for _ in 0..3 {
+            accumulate(&mut name, "read_file");
+        }
+        assert_eq!(name, "read_file");
+    }
+
+    #[test]
+    fn cumulative_value_replaces_prefix() {
+        // 有的网关发的不是增量而是「累计值」
+        let mut name = String::new();
+        for piece in ["r", "re", "rea", "read"] {
+            accumulate(&mut name, piece);
+        }
+        assert_eq!(name, "read");
+
+        let mut args = String::new();
+        accumulate(&mut args, "{\"a\":");
+        accumulate(&mut args, "{\"a\":\"b\"}");
+        assert_eq!(args, "{\"a\":\"b\"}");
+    }
+
+    #[test]
+    fn repeated_text_inside_arguments_is_kept() {
+        // 判重不能用「已累积值以碎片结尾」：`"a":"a` 的尾部会跟下一片重叠
+        let mut args = String::new();
+        accumulate(&mut args, "{\"a\":\"a");
+        accumulate(&mut args, "a\"}");
+        assert_eq!(args, "{\"a\":\"aa\"}");
+    }
+
+    #[test]
+    fn empty_piece_is_ignored() {
+        let mut s = String::from("keep");
+        accumulate(&mut s, "");
+        assert_eq!(s, "keep");
+    }
 }
