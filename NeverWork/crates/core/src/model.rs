@@ -212,6 +212,8 @@ pub enum ToolRunStatus {
     Denied,
     /// 失败。
     Failed,
+    /// 用户中断了整条生成，这条工具不会再返回结果。
+    Cancelled,
 }
 
 impl ToolRunStatus {
@@ -222,6 +224,7 @@ impl ToolRunStatus {
             ToolRunStatus::Ok => "完成",
             ToolRunStatus::Denied => "已拒绝",
             ToolRunStatus::Failed => "失败",
+            ToolRunStatus::Cancelled => "已中断",
         }
     }
 
@@ -254,6 +257,9 @@ pub struct Message {
     pub body: String,
     /// 代码块（可选）。
     pub code: Option<CodeBlock>,
+    /// 这一轮生成耗时（毫秒）。0 表示还没结束或未记录。
+    #[serde(default)]
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,6 +283,74 @@ pub enum SessionStatus {
     Done,
     /// 已废弃。
     Dropped,
+}
+
+/// 会话分类标记。用于在列表里区分工作类型，并支持按类筛选。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTag {
+    /// 未分类。
+    #[default]
+    None,
+    /// 新功能开发。
+    Feature,
+    /// 缺陷修复。
+    Bug,
+    /// 重构。
+    Refactor,
+    /// 文档。
+    Docs,
+    /// 调试排查。
+    Debug,
+    /// 实验探索。
+    Experiment,
+}
+
+impl SessionTag {
+    pub fn all() -> [SessionTag; 7] {
+        [
+            SessionTag::None,
+            SessionTag::Feature,
+            SessionTag::Bug,
+            SessionTag::Refactor,
+            SessionTag::Docs,
+            SessionTag::Debug,
+            SessionTag::Experiment,
+        ]
+    }
+
+    /// 中文短标签（显示在卡片上）。
+    pub fn label(&self) -> &'static str {
+        match self {
+            SessionTag::None => "",
+            SessionTag::Feature => "功能",
+            SessionTag::Bug => "修复",
+            SessionTag::Refactor => "重构",
+            SessionTag::Docs => "文档",
+            SessionTag::Debug => "调试",
+            SessionTag::Experiment => "实验",
+        }
+    }
+
+    /// 分类主色（24 位 RGB）。
+    pub fn hue(&self) -> u32 {
+        match self {
+            SessionTag::None => 0x6b7280,
+            SessionTag::Feature => 0x3b82f6,
+            SessionTag::Bug => 0xef4444,
+            SessionTag::Refactor => 0xa855f7,
+            SessionTag::Docs => 0x22c55e,
+            SessionTag::Debug => 0xf59e0b,
+            SessionTag::Experiment => 0x06b6d4,
+        }
+    }
+
+    /// 下一个分类（点击循环切换用）。
+    pub fn next(&self) -> SessionTag {
+        let all = Self::all();
+        let i = all.iter().position(|t| t == self).unwrap_or(0);
+        all[(i + 1) % all.len()]
+    }
 }
 
 /// 一个会话。
@@ -311,6 +385,73 @@ pub struct Session {
     /// 卡片右上角的状态圆圈：可继续 / 可重放 / 已完成 / 失败。
     #[serde(default)]
     pub action: SessionAction,
+    /// 分类标记。
+    #[serde(default)]
+    pub tag: SessionTag,
+    /// 最后活跃时间（Unix 秒）。会话列表按它倒序，最新在最前。
+    ///
+    /// 用真实时间戳而不是字符串标签（如「2 分钟前」），因为字符串无法排序。
+    #[serde(default)]
+    pub updated_at: u64,
+    /// 是否置顶。置顶的会话永远排在最前，不参与按时间排序。
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+impl Session {
+    /// 记录一次活跃：刷新时间戳与相对标签。
+    pub fn touch(&mut self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.updated_at = now;
+        self.updated_label = relative_label(now);
+    }
+}
+
+/// 把时间戳转成「x 分钟前」这类相对标签。
+///
+/// 没有用 chrono：只为这一个用途引一个时间库不值得，
+/// 而 `SystemTime` 的秒数差足够表达「几秒/几分/几小时/几天前」。
+pub fn relative_label(at: u64) -> String {
+    if at == 0 {
+        return "刚刚".into();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(at);
+    let d = now.saturating_sub(at);
+    match d {
+        0..=59 => "刚刚".into(),
+        60..=3599 => format!("{}分钟前", d / 60),
+        3600..=86399 => format!("{}小时前", d / 3600),
+        86400..=2_592_000 => format!("{}天前", d / 86400),
+        _ => format!("{}个月前", d / 2_592_000),
+    }
+}
+
+/// 把会话按「最近活跃优先」排序，返回它们在原数组里的下标。
+///
+/// 返回下标而不是重排数组：`active_session` 是索引引用，
+/// 重排会让它指向别的会话。渲染层按下标取值即可。
+pub fn sessions_by_recent(sessions: &[Session]) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..sessions.len()).collect();
+    // 排序规则：置顶优先 → 最近活跃优先 → 时间相同时保持原顺序（避免顺序乱跳）
+    idx.sort_by(|a, b| {
+        let pa = sessions[*a].pinned;
+        let pb = sessions[*b].pinned;
+        pb.cmp(&pa)
+            .then(sessions[*b].updated_at.cmp(&sessions[*a].updated_at))
+            .then(a.cmp(b))
+    });
+    idx
+}
+
+/// 置顶的会话数量（列表分隔线用）。
+pub fn pinned_count(sessions: &[Session]) -> usize {
+    sessions.iter().filter(|s| s.pinned).count()
 }
 
 /// 会话卡片右上角的圆圈指示（同时也是可点击的操作入口）。

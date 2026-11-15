@@ -51,6 +51,30 @@ fn floor_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
+
+/// 计算本次 IME 替换应作用的范围（UTF-16 下标）。
+///
+/// GPUI 在 Windows 上一律传 `range = None`，自己不做范围记忆，
+/// 所以优先级是：显式 range > 上次组合范围（marked）> `None`（表示在光标/选区处插入）。
+pub fn ime_target_range(
+    text: &str,
+    explicit: Option<&Range<usize>>,
+    marked: Option<&Range<usize>>,
+) -> Option<Range<usize>> {
+    explicit
+        .map(|r| utf16_to_byte(text, r))
+        .or_else(|| marked.map(|r| utf16_to_byte(text, r)))
+}
+
+/// 组合串更新后应标记为 IME 组合态的范围（UTF-16）。
+///
+/// 传入的「选中范围」在 Windows 上常是折叠的（IME 光标位置），
+/// 不能当成选区，否则标记范围为空、下一次更新会重复插入。
+pub fn composition_marked_range(text_after: &str, start_byte: usize, len_byte: usize) -> Range<usize> {
+    let end = (start_byte + len_byte).min(text_after.len());
+    byte_to_utf16(text_after, &(start_byte.min(end)..end))
+}
+
 impl AppState {
     /// 当前输入目标的可变缓冲区。
     pub(crate) fn active_buffer_mut(&mut self) -> &mut TextBuffer {
@@ -175,15 +199,12 @@ impl EntityInputHandler for AppState {
         &mut self,
         range_utf16: Option<Range<usize>>,
         new_text: &str,
-        new_selected_range_utf16: Option<Range<usize>>,
+        _new_selected_range_utf16: Option<Range<usize>>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let text = self.active_buffer().text().to_string();
-        let byte_range = range_utf16
-            .as_ref()
-            .map(|r| utf16_to_byte(&text, r))
-            .or_else(|| self.marked_range.as_ref().map(|r| utf16_to_byte(&text, r)));
+        let byte_range = ime_target_range(&text, range_utf16.as_ref(), self.marked_range.as_ref());
 
         let (start, len) = {
             let buf = self.active_buffer_mut();
@@ -201,16 +222,17 @@ impl EntityInputHandler for AppState {
             (start, new_text.len())
         };
 
-        let after = self.active_buffer().text().to_string();
+        // 关键：整段组合串都要算作 marked。
+        //
+        // GPUI 的 `new_selected_range_utf16` 传的其实是 IME **光标位置**
+        // （Windows 上是 `pos..pos`，折叠范围），不是选区。以前拿它算标记范围，
+        // 得到的是一个空区间，于是下一次组合更新（`range=None`）找不到要替换的位置，
+        // 直接在光标处插入 —— 表现为「每打一个字就把前面已输入的整段重复一遍」。
         if new_text.is_empty() {
             self.marked_range = None;
         } else {
-            // 保住 IME 给出的候选词内选中范围（未给出时整段标记）。
-            let inner = new_selected_range_utf16
-                .unwrap_or_else(|| 0..new_text.encode_utf16().count());
-            let inner_start = start + utf16_to_byte(&after[start..start + len], &inner).start;
-            let inner_end = start + utf16_to_byte(&after[start..start + len], &inner).end;
-            self.marked_range = Some(byte_to_utf16(&after, &(inner_start..inner_end)));
+            let after = self.active_buffer().text().to_string();
+            self.marked_range = Some(composition_marked_range(&after, start, len));
         }
         self.after_edit(cx);
     }
@@ -222,7 +244,10 @@ impl EntityInputHandler for AppState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        // 用「行号 + 字符列」估算屏幕位置，让输入法候选框贴住光标。
+        // 基准点用输入框自身的位置（`input_area_bounds`），而不是 GPUI 传进来的
+        // element_bounds —— 后者是那个 1x1 输入桥，拿它当基准会让候选框
+        // 永远飘在窗口左上角。
+        let element_bounds = self.input_area_bounds.get().unwrap_or(element_bounds);
         let buf = self.active_buffer();
         let text = buf.text();
         let bytes = utf16_to_byte(text, &range_utf16);
@@ -323,3 +348,67 @@ mod tests {
         assert_eq!(byte_to_utf16(s, &(0..4)), 0..2);
     }
 }
+
+
+    #[test]
+    fn composition_marks_whole_string_not_ime_caret() {
+        // Windows 传的「选中范围」是 IME 光标位置（折叠区间）。
+        // 标记范围必须是整段组合串，否则下一次组合更新找不到替换位置，
+        // 会在光标处再插一遍 —— 这就是「打一个字重复一整段」的 bug。
+        let text = "a'b";
+        let r = composition_marked_range(text, 0, text.len());
+        assert_eq!(r, 0..3, "整段都算组合态");
+    }
+
+    #[test]
+    fn composition_marks_only_inserted_part() {
+        let text = "开头组合串";
+        let start = "开头".len();
+        let r = composition_marked_range(text, start, "组合串".len());
+        assert_eq!(r, 2..5, "只标记本次插入的部分（UTF-16）");
+    }
+
+    #[test]
+    fn composition_marked_range_clamps_overflow() {
+        let text = "abc";
+        // len 超出（比如 IME 给的字节数比实际长）时不能越界
+        let r = composition_marked_range(text, 1, 99);
+        assert_eq!(r, 1..3);
+    }
+
+    #[test]
+    fn empty_composition_has_empty_range() {
+        let r = composition_marked_range("", 0, 0);
+        assert_eq!(r, 0..0);
+    }
+
+    #[test]
+    fn ime_target_prefers_explicit_range() {
+        let text = "abcdef";
+        let explicit = 2..4;
+        let marked = 0..1;
+        let r = ime_target_range(text, Some(&explicit), Some(&marked));
+        assert_eq!(r, Some(2..4), "显式 range 优先于上次组合范围");
+    }
+
+    #[test]
+    fn ime_target_falls_back_to_marked() {
+        let text = "abcdef";
+        let marked = 1..3;
+        let r = ime_target_range(text, None, Some(&marked));
+        assert_eq!(r, Some(1..3), "没有显式 range 时替换上次组合串");
+    }
+
+    #[test]
+    fn ime_target_none_means_insert_at_cursor() {
+        let r = ime_target_range("abc", None, None);
+        assert_eq!(r, None, "无范围表示在光标处插入");
+    }
+
+    #[test]
+    fn ime_target_handles_utf16_offsets() {
+        // 「中」是 1 个 UTF-16 单元但 3 个 UTF-8 字节，转换必须按字符边界走
+        let text = "中文ab";
+        let r = ime_target_range(text, Some(&(1..2)), None);
+        assert_eq!(r, Some(3..6), "第二个字符 文 的字节范围（3 字节）");
+    }

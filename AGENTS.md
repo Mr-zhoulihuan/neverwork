@@ -8,11 +8,11 @@
 
 ```bash
 cargo run -p neverwork          # 主界面
-cargo test --workspace          # 全部测试（223 个；3 条打真实 DeepSeek，需 NW_DEEPSEEK_KEY）
+cargo test --workspace          # 全部测试（247 个；3 条打真实 DeepSeek，需 NW_DEEPSEEK_KEY）
 cargo build -p neverwork        # 只编应用（增量约 6s）
 ```
 
-运行期变量：`NW_ROOT`、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_EXPAND_STEPS`/`NW_RIGHT_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_TYPE`/`NW_PICK_MODEL`/`NW_LAYOUT_DEBUG`。
+运行期变量：`NW_ROOT`、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_EXPAND_STEPS`/`NW_RIGHT_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_LAYOUT_DEBUG`。
 
 ## 红线
 
@@ -22,8 +22,8 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - 配置在 `~/.neverwork/`：`config.json`（团队）、`settings.json`（偏好，**含 Key 明文**，别提交别外传），均原子写。测试用 `NW_CONFIG_DIR`。
 - **主题必须走 `theme::set_theme_mode()`**，不要在视图里写死颜色——深浅两套色板由全局原子量切换，写死 `rgb(0x…)` 在浅色主题下不可读。
 - **API Key 一律脱敏**：导出/同步走 `config::export_all(..., ExportOptions::default())`（不含密钥）；界面只显示 `masked_key()`（末尾 4 位）；不要给 `ProviderEntry` 加回 `derive(Debug)`（手写版会打码）。新增任何序列化 Settings 到文件或日志的路径，先确认 Key 不跟着走。
-- `design/`、`pic/` 是设计与截图，`message.md` 是历史汇报。
-- 顶层三份计划文档是历史演进：`rust-ide-plan.md` → `gpui-ide-plan.md` → `gpui-ide-plan-v2.md`（最新口径）。冲突时以 v2 和 README 为准。
+- `design/`、`pic/` 是设计与截图。
+- 计划文档演进：`rust-ide-plan.md` → `gpui-ide-plan.md` → `gpui-ide-plan-v2.md`（最新）。冲突以 v2 和 README 为准。
 
 ## 输入与交互的架构约束（改这里前必读）
 
@@ -43,7 +43,9 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 
 ## 环境特性（容易误判）
 
-本机是 GameViewer 远程会话 + 200% DPI。GPUI 在此环境下 `bounds()` 返回**物理像素**、渲染却按 scale 放大，内容被放大一倍、右侧与底部出界（右栏曾完全看不到）。已在 `AppState::render` 修复：`bounds().width > display().width`（窗口不可能比屏幕宽）时判定单位不一致，用 `bounds/scale` 作可见尺寸约束根容器。**常规机器不受影响，不要删这段判断或改写布局常量。** 自动化点按坐标被虚拟化，验收靠集成测试 + `NW_*` 开关截图。
+逻辑屏 1280x800、物理屏 2560x1600、`scale_factor()`=2。`bounds()` 与 `display.bounds()` 都是**逻辑值**，按逻辑值布局即可，不要再除 scale；根容器用 `size_full()`，`visible_w` 只判断点。
+
+**验收截图须 DPI-aware**：PowerShell 默认 unaware，`CopyFromScreen` 只拿到左上 1/4，会伪造「内容被放大、右侧出界」的假象。先 `SetProcessDpiAwarenessContext(-4)` 再抓（见 `design/shot.ps1`）。
 
 ## Agent 工具调用（改这里前必读）
 

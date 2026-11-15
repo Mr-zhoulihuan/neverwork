@@ -72,6 +72,15 @@ pub(crate) fn titlebar(state: &AppState, cx: &mut Context<AppState>) -> impl Int
                 ),
         )
         .child(div().flex_1())
+        // 调试读数：布局实际使用的可见宽度。只在 NW_LAYOUT_DEBUG 时出现。
+        .when(std::env::var("NW_LAYOUT_DEBUG").is_ok(), |d| {
+            d.child(
+                div()
+                    .text_xs()
+                    .text_color(theme::yellow())
+                    .child(SharedString::from(format!("W={:.0}", state.layout_w.get()))),
+            )
+        })
         .child(
             div()
                 .id("toggle-focus")

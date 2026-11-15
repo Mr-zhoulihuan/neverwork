@@ -10,6 +10,7 @@ mod git_ops;
 mod highlight;
 mod input_handler;
 mod keymap;
+mod markdown;
 mod line_cache;
 mod settings_ops;
 mod skills_catalog;
@@ -23,30 +24,37 @@ use gpui::{px, size, App, AppContext, Application, Bounds, Context, Render, Wind
 use neverwork_ui::theme;
 use state::AppState;
 
-/// 计算窗口尺寸。
-/// 计算窗口尺寸。
+/// 计算窗口尺寸与位置。
 ///
-/// 说明：本机是 GameViewer 远程会话 + 200% 缩放，GPUI 得到的 scale=2，
-/// 而窗口按 1:1 物理像素创建，导致内容被放大一倍后裁掉右半边。
-/// 窗口尺寸本身仍按常规逻辑像素给出，布局侧的响应式折叠会处理可见范围
-/// （见 `AppState::render`）。这里支持 NW_WIN_W / NW_WIN_H 覆盖，便于异常
-/// DPI 环境下验证。
+/// 关键约束：**窗口不能超出屏幕**。默认按屏幕可用区域的 92% 开窗并居中，
+/// 再留出任务栏高度；`NW_WIN_W` / `NW_WIN_H` 可覆盖（覆盖值也会被夹回屏幕范围，
+/// 否则在高 DPI 环境下窗口会大到看不见边缘，用户没法拖回来）。
+///
+/// 说明：本机是 GameViewer 远程会话 + 200% 缩放，逻辑屏 1280x800、物理 2560x1600。
+/// `display.bounds()` 报的是逻辑尺寸，所以这里全程用逻辑值计算，不用再除缩放。
 fn window_bounds(cx: &App) -> Bounds<gpui::Pixels> {
-    let mut w: f32 = 1200.0;
-    let mut h: f32 = 740.0;
-
-    if let Some(display) = cx.primary_display() {
-        let db = display.bounds();
-        let dw: f32 = db.size.width.into();
-        let dh: f32 = db.size.height.into();
-        if dw > 0.0 && dh > 0.0 {
-            // display 尺寸与窗口逻辑尺寸同单位时，这个上限才是安全的。
-            w = w.min((dw * 0.94).max(560.0));
-            h = h.min((dh * 0.94 - 24.0).max(360.0));
+    // 逻辑屏幕尺寸与原点
+    let (screen_w, screen_h, screen_x, screen_y) = match cx.primary_display() {
+        Some(display) => {
+            let b = display.bounds();
+            (
+                f32::from(b.size.width),
+                f32::from(b.size.height),
+                f32::from(b.origin.x),
+                f32::from(b.origin.y),
+            )
         }
-    }
+        None => (1200.0, 760.0, 0.0, 0.0),
+    };
 
-    // 显式覆盖，便于在异常 DPI 环境下验证界面。
+    // 任务栏等占位：逻辑 40px 足够，最多占屏幕的 8%
+    let chrome = (screen_h * 0.08).min(40.0);
+    let usable_w = (screen_w * 0.92).max(560.0);
+    let usable_h = (screen_h * 0.92 - chrome).max(400.0);
+
+    let mut w = 1200.0f32.min(usable_w);
+    let mut h = 740.0f32.min(usable_h);
+
     if let Ok(v) = std::env::var("NW_WIN_W") {
         if let Ok(v) = v.parse::<f32>() {
             w = v.max(480.0);
@@ -57,17 +65,18 @@ fn window_bounds(cx: &App) -> Bounds<gpui::Pixels> {
             h = v.max(320.0);
         }
     }
+    // 覆盖值也不能把窗口开出屏幕
+    w = w.min(usable_w);
+    h = h.min(usable_h);
 
-    let mut bounds = Bounds::centered(None, size(px(w), px(h)), cx);
-    if let Some(display) = cx.primary_display() {
-        let db = display.bounds();
-        let dw: f32 = db.size.width.into();
-        let dh: f32 = db.size.height.into();
-        let ox: f32 = db.origin.x.into();
-        let oy: f32 = db.origin.y.into();
-        bounds.origin = point(px(ox + ((dw - w) / 2.0).max(0.0)), px(oy + ((dh - h) / 2.0).max(0.0)));
+    // 居中到屏幕，并夹在屏幕内（右下角不越界）
+    let x = (screen_x + (screen_w - w) / 2.0).clamp(screen_x, screen_x + screen_w - w);
+    let y = (screen_y + (screen_h - h - chrome) / 2.0).clamp(screen_y, screen_y + screen_h - h - chrome);
+
+    Bounds {
+        origin: point(px(x), px(y)),
+        size: size(px(w), px(h)),
     }
-    bounds
 }
 
 /// 根视图：包裹主界面。
@@ -101,16 +110,17 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // 最小尺寸：再小布局会碎成一团，也没有继续拖的意义。
+                window_min_size: Some(size(px(660.0), px(440.0))),
                 ..Default::default()
             },
             move |window, cx| {
-                // 高 DPI 下窗口按 1:1 物理像素创建却按 scale 倍渲染，
-                // 常规尺寸装不下内容（只显示左上角）。最大化能让物理宽度接近屏幕宽度。
-                // NW_MAXIMIZE=0 可关闭。
-                let auto_max = window.scale_factor() > 1.0;
+                // 只在显式要求时最大化。之前在高 DPI 下默认自动最大化，
+                // 会让窗口启动就贴满整屏、且无法用「还原」回到正常大小，
+                // 观感上就是「一启动就超出屏幕」。
                 if std::env::var("NW_MAXIMIZE")
                     .map(|v| v != "0")
-                    .unwrap_or(auto_max)
+                    .unwrap_or(false)
                 {
                     window.zoom_window();
                 }

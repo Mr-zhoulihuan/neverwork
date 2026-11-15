@@ -99,6 +99,7 @@ fn run(
         Vec::new(),
         prompt,
         dir.clone(),
+        true,
         &mut emit,
         cancel,
     );

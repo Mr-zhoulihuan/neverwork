@@ -51,6 +51,22 @@ pub fn lang_for(filename: &str) -> Lang {
     }
 }
 
+/// 由 Markdown 代码围栏的语言标签推断语言。
+///
+/// 与 `lang_for` 的区别：那里的输入是**文件名**（按扩展名），
+/// 这里的输入是围栏标签（`rust` / `go` / `ts` / `python`…），两者写法不同。
+pub fn lang_from_tag(tag: &str) -> Lang {
+    match tag.trim().to_lowercase().as_str() {
+        "rust" | "rs" => Lang::Rust,
+        "ts" | "tsx" | "typescript" | "js" | "jsx" | "javascript" => Lang::Ts,
+        "py" | "python" => Lang::Python,
+        "json" => Lang::Json,
+        "toml" => Lang::Toml,
+        "md" | "markdown" => Lang::Markdown,
+        _ => Lang::Other,
+    }
+}
+
 /// 语义类别 -> 颜色（对齐设计稿的语法色）。
 pub fn color_for(tok: Tok) -> Rgba {
     match tok {

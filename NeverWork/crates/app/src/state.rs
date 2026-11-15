@@ -146,6 +146,12 @@ pub enum Command {
     Preview,
     SwitchWorkspace,
     FocusMode,
+    /// 给当前会话设置分类（参数是分类编号，见 `Command::all`）。
+    TagSession(u8),
+    /// 置顶 / 取消置顶当前会话。
+    TogglePin,
+    /// 在「单个助手」和「团队流水线」之间切换。
+    ToggleAgentMode,
     Settings,
     Skills,
 }
@@ -162,6 +168,16 @@ impl Command {
             (Command::Preview, "预览当前文件", ""),
             (Command::SwitchWorkspace, "切换工作区…", ""),
             (Command::FocusMode, "专注模式（隐藏侧栏）", ""),
+            // 当前会话的分类：直接列出所有分类，点了就设上（比在卡片上连点快）
+            (Command::TogglePin, "置顶 / 取消置顶当前会话", ""),
+            (Command::ToggleAgentMode, "切换：单个助手 / 团队流水线", ""),
+            (Command::TagSession(0), "分类：清除标记", ""),
+            (Command::TagSession(1), "分类：功能", ""),
+            (Command::TagSession(2), "分类：修复", ""),
+            (Command::TagSession(3), "分类：重构", ""),
+            (Command::TagSession(4), "分类：文档", ""),
+            (Command::TagSession(5), "分类：调试", ""),
+            (Command::TagSession(6), "分类：实验", ""),
             (Command::Settings, "打开设置", ""),
             (Command::Skills, "技能市场", ""),
         ]
@@ -195,6 +211,8 @@ pub struct AppState {
     pub git_confirm: Option<crate::git_ops::GitOp>,
     /// Git 面板是否展开分支列表。
     pub git_show_branches: bool,
+    /// 会话列表的分类筛选；`None` 表示「全部」。
+    pub tag_filter: Option<neverwork_core::SessionTag>,
 
     // ===== 视图 =====
     pub center: CenterView,
@@ -248,7 +266,16 @@ pub struct AppState {
     /// 导出配置时是否包含 API Key（默认不含）。
     pub export_with_secrets: bool,
     /// 是否允许 Agent 调用工具（读写文件）。关掉就退化为纯对话。
+    /// 本轮生成的开始时刻，用来在回答末尾显示耗时。
+    pub turn_started: Option<std::time::Instant>,
     pub tools_enabled: bool,
+    /// 是否走「多角色团队流水线」。
+    ///
+    /// 默认关闭 = 单个助手。之前默认就把每条输入都塞进
+    /// Planner → Coder → Reviewer 三个角色串行处理，问一句「你是谁」
+    /// 也要跑三个模型，而且每个角色的职责都写死成改代码，
+    /// 于是问答类诉求必然答得别扭。
+    pub team_mode: bool,
     /// 等待用户批准的写操作。同一时刻最多一个。
     pub pending: Option<PendingApproval>,
     /// 自动批准写操作（仅供自动化验证，`NW_AUTO_APPROVE=1` 开启）。
@@ -401,6 +428,7 @@ impl AppState {
             git_branch_input: TextBuffer::single_line(),
             git_confirm: None,
             git_show_branches: false,
+            tag_filter: None,
             center: initial_view(),
             settings_tab: initial_settings_tab(),
             right_tab: RightTab::Files,
@@ -432,11 +460,17 @@ impl AppState {
             model_query: String::new(),
             model_highlight: 0,
             export_with_secrets: false,
+            turn_started: None,
             tools_enabled: true,
+            team_mode: false,
             pending: None,
             auto_approve: false,
             expanded_steps: std::collections::HashSet::new(),
-            right_collapsed: false,
+            // 右侧文件/Git 面板默认收起：把宽度让给对话区，
+            // 需要时点一下窄条展开（`NW_RIGHT_COLLAPSED=0` 可强制展开用于验证）。
+            right_collapsed: std::env::var("NW_RIGHT_COLLAPSED")
+                .map(|v| v != "0")
+                .unwrap_or(true),
             expand_steps_all: false,
             find: crate::find::FindState::default(),
             find_query_buf: TextBuffer::single_line(),
@@ -490,9 +524,6 @@ impl AppState {
                 }
             }
             me.expand_steps_all = true;
-        }
-        if std::env::var("NW_RIGHT_COLLAPSED").map(|v| v == "1").unwrap_or(false) {
-            me.right_collapsed = true;
         }
         // 验证用：预置多光标（逗号分隔的字节偏移），便于截图确认渲染。
         if let Ok(v) = std::env::var("NW_CURSORS") {
@@ -618,7 +649,14 @@ impl AppState {
             icon: "＋".into(),
             badge: String::new(),
             action: neverwork_core::SessionAction::None,
+            tag: neverwork_core::SessionTag::None,
+            updated_at: 0,
+            pinned: false,
         });
+        // 新会话的活跃时间设为当前，列表按它倒序时会自动排到最前
+        if let Some(last) = self.sessions.last_mut() {
+            last.touch();
+        }
         self.active_session = self.sessions.len() - 1;
         self.center = CenterView::Chat;
         self.palette_open = false;
@@ -629,8 +667,75 @@ impl AppState {
         if idx < self.sessions.len() {
             self.active_session = idx;
             self.center = CenterView::Chat;
+            // 注意：这里**不** touch。
+            // 单纯「点开看一眼」不该把会话顶到最前，否则列表会随着浏览乱跳；
+            // 只有真正发消息（send_message）才算活跃。
             cx.notify();
         }
+    }
+
+    /// 按「最近活跃优先」排序后的会话下标。
+    pub(crate) fn ordered_sessions(&self) -> Vec<usize> {
+        neverwork_core::sessions_by_recent(&self.sessions)
+    }
+
+    /// 给当前会话打分类标记（命令面板用，可直接跳到某个分类）。
+    #[allow(dead_code)]
+    pub(crate) fn set_session_tag(
+        &mut self,
+        idx: usize,
+        tag: neverwork_core::SessionTag,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.tag = tag;
+            cx.notify();
+        }
+    }
+
+    /// 在「单个助手」和「团队流水线」之间切换。
+    pub(crate) fn toggle_agent_mode(&mut self, cx: &mut Context<Self>) {
+        self.team_mode = !self.team_mode;
+        self.notice = Some(if self.team_mode {
+            "已切到团队流水线：多角色按顺序协作，适合分阶段的大任务".into()
+        } else {
+            "已切到单个助手：一个助手同时负责问答和改代码".into()
+        });
+        cx.notify();
+    }
+
+    /// 切换置顶。置顶的会话永远排在最前。
+    pub(crate) fn toggle_pin(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.pinned = !s.pinned;
+            let pinned = s.pinned;
+            let title = s.title.clone();
+            let short: String = title.chars().take(16).collect();
+            self.notice = Some(if pinned {
+                format!("已置顶「{short}」")
+            } else {
+                format!("已取消置顶「{short}」")
+            });
+            cx.notify();
+        }
+    }
+
+    /// 点一下循环切换分类。
+    pub(crate) fn cycle_session_tag(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.tag = s.tag.next();
+            cx.notify();
+        }
+    }
+
+    /// 当前分类筛选；`None` 表示全部。
+    pub(crate) fn set_tag_filter(
+        &mut self,
+        tag: Option<neverwork_core::SessionTag>,
+        cx: &mut Context<Self>,
+    ) {
+        self.tag_filter = tag;
+        cx.notify();
     }
 
     // ===== 文件 =====
@@ -1018,6 +1123,25 @@ impl AppState {
                 self.focus_mode = !self.focus_mode;
                 cx.notify();
             }
+            Command::ToggleAgentMode => self.toggle_agent_mode(cx),
+            Command::TogglePin => {
+                let idx = self.active_session;
+                self.toggle_pin(idx, cx);
+            }
+            Command::TagSession(n) => {
+                let tag = neverwork_core::SessionTag::all()
+                    .get(n as usize)
+                    .copied()
+                    .unwrap_or(neverwork_core::SessionTag::None);
+                let idx = self.active_session;
+                self.set_session_tag(idx, tag, cx);
+                self.notice = Some(if tag == neverwork_core::SessionTag::None {
+                    "已清除分类标记".into()
+                } else {
+                    format!("已标记为「{}」", tag.label())
+                });
+                cx.notify();
+            }
             Command::Settings => self.open_settings(SettingsTab::General, cx),
             Command::Skills => self.open_skills(cx),
         }
@@ -1369,30 +1493,45 @@ impl AppState {
                 kind: MessageKind::User,
                 body: text.clone(),
                 code: None,
+                elapsed_ms: 0,
             });
             session.team_name = team.name.clone();
             if session.title.is_empty() || session.title == "新会话" {
                 session.title = text.chars().take(16).collect();
             }
+            // 真正产生内容才算活跃：刷新时间戳让它在列表里上浮
+            session.touch();
         }
 
         self.streaming = true;
+        self.turn_started = Some(std::time::Instant::now());
         self.cancel.store(false, Ordering::Relaxed);
         self.chat_scroll_dirty.set(true);
         cx.notify();
 
-        // 开启工具 → 团队成员**串行**带工具干活：前一个角色的产出作为后一个的上下文，
-        //   写操作逐个弹审批（并发写同一文件只会互相覆盖，所以不做并行）。
-        // 关闭工具 → 多角色团队按原编排轮流发言（无工具、纯文本）。
-        if self.tools_enabled {
+        // 三种走法，按「用户想要什么」分：
+        //
+        // 1. 默认（`team_mode = false`）：**一个**助手带工具。
+        //    它能问答、能读文件、能改代码，由模型自己判断这次要不要动工具。
+        //    绝大多数输入都走这里。
+        // 2. 团队模式（`team_mode = true`）+ 开工具：多角色串行带工具，
+        //    前一个角色的产出作为后一个的上下文，写操作逐个弹审批。
+        //    适合「规划 → 编码 → 审查」这种明确的多阶段任务。
+        // 3. 团队模式 + 关工具：多角色纯文本轮流发言。
+        if self.team_mode && self.tools_enabled {
             let mut roles = team.roles.clone();
             if roles.is_empty() {
                 roles.push(neverwork_core::Role::new("agent", "Assistant", "A"));
             }
             // 模型与厂商一律以设置里的当前选择为准：role.model 只是展示标签。
             self.spawn_agents_chain(session_idx, text, roles, provider_id, config, cx);
-        } else {
+        } else if self.team_mode {
             self.spawn_team(session_idx, text, team, provider_id, config, cx);
+        } else {
+            // 单个助手：不套任何角色 prompt，避免「规划者 / 编码」这类
+            // 与具体诉求无关的角色约束把问答带偏。
+            let solo = neverwork_core::Role::new("agent", "Assistant", "A");
+            self.spawn_agents_chain(session_idx, text, vec![solo], provider_id, config, cx);
         }
     }
 
@@ -1409,6 +1548,8 @@ impl AppState {
         config: neverwork_agent::ProviderConfig,
         cx: &mut Context<Self>,
     ) {
+        // 关工具时把 false 传下去，模型连工具清单都看不到。
+        let with_tools = self.tools_enabled;
         let cancel = self.cancel.clone();
         let root = self.root.clone();
         // 线程里用一份，UI 侧留一份（角色名/颜色要用来渲染气泡）
@@ -1438,6 +1579,7 @@ impl AppState {
                         history.clone(),
                         &text,
                         root.clone(),
+                        with_tools,
                         &mut emit,
                         cancel.clone(),
                     );
@@ -1484,6 +1626,7 @@ impl AppState {
                                         kind: MessageKind::Agent { participant: p },
                                         body: String::new(),
                                         code: None,
+                                        elapsed_ms: 0,
                                     });
                                     agent_msg.insert(ri, i);
                                     i
@@ -1526,6 +1669,7 @@ impl AppState {
                                 },
                                 body: String::new(),
                                 code: None,
+                                elapsed_ms: 0,
                             });
                             tool_msg.insert(ri, idx);
                             this.chat_scroll_dirty.set(true);
@@ -1631,6 +1775,20 @@ impl AppState {
             let _ = weak.update(async_cx, |this, cx| {
                 this.streaming = false;
                 this.pending = None;
+                // 把本轮耗时写到最后一条回答上，渲染成 OpenCode 那样的页脚。
+                if let Some(started) = this.turn_started.take() {
+                    let ms = started.elapsed().as_millis() as u64;
+                    if let Some(session) = this.sessions.get_mut(session_idx) {
+                        if let Some(m) = session
+                            .messages
+                            .iter_mut()
+                            .rev()
+                            .find(|m| matches!(m.kind, MessageKind::Agent { .. }))
+                        {
+                            m.elapsed_ms = ms;
+                        }
+                    }
+                }
                 cx.notify();
             });
         })
@@ -1678,6 +1836,7 @@ impl AppState {
                                         },
                                         body: String::new(),
                                         code: None,
+                                        elapsed_ms: 0,
                                     });
                                     role_msg.insert(role_index, idx);
                                 }
@@ -2010,6 +2169,21 @@ impl AppState {
         if let Some(p) = self.pending.take() {
             let _ = p.respond.send(false);
         }
+        // 立刻复位 streaming：只置取消标志的话，要等 Agent 线程跑完当前工具
+        // 才收尾，界面上「生成中」和停止按钮会一直挂着（长工具调用可达几十秒），
+        // 用户会以为卡死、也无法继续输入下一条。
+        self.streaming = false;
+        // 正在执行/待批准的卡片不会再返回结果，直接标成已取消，避免永远转圈。
+        let idx = self.active_session.min(self.sessions.len().saturating_sub(1));
+        if let Some(session) = self.sessions.get_mut(idx) {
+            for m in session.messages.iter_mut() {
+                if let MessageKind::ToolCall { status, .. } = &mut m.kind {
+                    if matches!(status, ToolRunStatus::Running | ToolRunStatus::Awaiting) {
+                        *status = ToolRunStatus::Cancelled;
+                    }
+                }
+            }
+        }
         self.notice = Some("已停止生成".into());
         cx.notify();
     }
@@ -2047,6 +2221,12 @@ impl Render for AppState {
         } else {
             (raw_w, raw_h)
         };
+        // 尺寸变了就再请求一帧。拖动窗口时 GPUI 在 Windows 的 modal resize
+        // 循环里偶尔会漏掉一次重绘，导致内容停在旧尺寸（观感就是「不跟随」）。
+        // 这里只在尺寸真的变化时补一帧，不会自激成循环。
+        if (self.layout_w.get() - visible_w).abs() > 0.5 {
+            cx.notify();
+        }
         self.layout_w.set(visible_w);
         let hide_sides = self.focus_mode;
         // 设置页与技能市场是"全页"视图，会话列表和右栏都让出来。
@@ -2057,21 +2237,46 @@ impl Render for AppState {
         let hide_right = visible_w < 1080.0 || full_page;
         let hide_list = visible_w < 620.0 || full_page;
         if std::env::var("NW_LAYOUT_DEBUG").is_ok() {
-            static ONCE: std::sync::Once = std::sync::Once::new();
-            ONCE.call_once(|| {
+            // 尺寸变化时才打印。拖动窗口时能连续看到断点变化，便于确认跟随是否正常。
+            static LAST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let key = (visible_w as u32) ^ ((visible_h as u32) << 16);
+            if LAST.swap(key, std::sync::atomic::Ordering::Relaxed) != key {
                 tracing::info!(
-                    "layout: w={visible_w:.0} scale={:.1} center={:?} hide_sides={hide_sides} hide_right={hide_right} hide_list={hide_list}",
-                    window.scale_factor(),
-                    self.center
+                    "layout: w={visible_w:.0} h={visible_h:.0} scale={:.1} hide_right={hide_right} hide_list={hide_list}",
+                    window.scale_factor()
                 );
-            });
+            }
         }
+        // 焦点始终跟着「当前输入目标」走。
+        //
+        // 之前只在启动时聚焦一次：之后任何一次点击落到没有 `track_focus` 的元素上
+        // （文件树、会话卡片、标题栏、Git 面板…），焦点就被清空，
+        // 输入桥也不再注册输入处理器 —— 键盘和输入法事件全部丢弃，
+        // 表现就是「明明有光标，怎么打字都没反应」。
+        // 现在每帧检查一次，掉焦就补回来；用户无需先点一下输入框。
+        {
+            let want = match self.input_target {
+                InputTarget::Editor => Some(self.editor_focus.clone()),
+                InputTarget::Workspace => Some(self.ws_focus.clone()),
+                InputTarget::Chat | InputTarget::Field(_) => Some(self.focus_handle.clone()),
+            };
+            if let Some(handle) = want {
+                if !handle.is_focused(window) {
+                    // 渲染期间不能直接改焦点，推迟到本帧结束
+                    window.defer(cx, move |window, _cx| {
+                        window.focus(&handle);
+                    });
+                }
+            }
+        }
+
         let mut root = div()
             .relative()
-            // 用「可见尺寸」而不是 size_full()：单位不一致的环境下
-            // size_full 会铺满物理像素，导致内容被放大后裁掉右侧。
-            .w(px(visible_w))
-            .h(px(visible_h))
+            // 用 size_full() 铺满窗口，而不是写死 `px(visible_w)`。
+            // 写死会有两个后果：拖动窗口时内容先停在旧尺寸（观感就是
+            // 「界面不跟随」），以及尺寸读到中间值时比窗口小一圈留出黑边。
+            // `visible_w` 只用来判断断点，不再用来定尺寸。
+            .size_full()
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -2098,6 +2303,7 @@ impl Render for AppState {
             })
             .child(input_bridge(
                 cx,
+                self.input_target,
                 self.focus_handle.clone(),
                 self.editor_focus.clone(),
                 self.ws_focus.clone(),
@@ -2113,30 +2319,32 @@ impl Render for AppState {
 /// 把 IME/文本输入接到当前聚焦的输入目标上。
 fn input_bridge(
     cx: &mut Context<AppState>,
+    target: InputTarget,
     chat_focus: FocusHandle,
     editor_focus: FocusHandle,
     ws_focus: FocusHandle,
 ) -> impl IntoElement {
     let entity = cx.entity();
+    // 绑定哪个 handle 只看「当前输入目标」，不再靠 `is_focused` 三选一。
+    //
+    // 之前是按「谁此刻持有焦点」挑，一旦焦点掉到没有 handle 的元素上
+    // （点一下文件树、会话卡片、标题栏），三个分支全不命中，`handle_input`
+    // 就不会被注册 —— 键盘和输入法事件直接丢弃，表现就是「打字没反应」。
+    // 现在输入目标由点击逻辑决定（`input_target`），焦点始终跟着它走。
+    let handle = match target {
+        InputTarget::Editor => editor_focus.clone(),
+        InputTarget::Workspace => ws_focus.clone(),
+        // 表单字段与对话共用同一个输入宿主
+        InputTarget::Chat | InputTarget::Field(_) => chat_focus.clone(),
+    };
     gpui::canvas(
         |_bounds, _window, _cx| {},
         move |bounds, _state, window, cx| {
-            let handle = if ws_focus.is_focused(window) {
-                Some(&ws_focus)
-            } else if editor_focus.is_focused(window) {
-                Some(&editor_focus)
-            } else if chat_focus.is_focused(window) {
-                Some(&chat_focus)
-            } else {
-                None
-            };
-            if let Some(handle) = handle {
-                window.handle_input(
-                    handle,
-                    ElementInputHandler::new(bounds, entity.clone()),
-                    cx,
-                );
-            }
+            window.handle_input(
+                &handle,
+                ElementInputHandler::new(bounds, entity.clone()),
+                cx,
+            );
         },
     )
     .absolute()

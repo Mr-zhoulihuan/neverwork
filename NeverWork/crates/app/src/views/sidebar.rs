@@ -258,6 +258,30 @@ impl AppState {
                 ),
         );
 
+        // ---- 分类筛选 ----
+        {
+            let mut chips = div()
+                .id("tag-filter")
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .px_2()
+                .pb_2
+                ()
+                .child(self.tag_chip(None, "全部", cx));
+            // 只显示实际有会话的分类，避免一排空按钮
+            for tag in neverwork_core::SessionTag::all() {
+                if tag == neverwork_core::SessionTag::None {
+                    continue;
+                }
+                if !self.sessions.iter().any(|s| s.tag == tag) {
+                    continue;
+                }
+                chips = chips.child(self.tag_chip(Some(tag), tag.label(), cx));
+            }
+            panel = panel.child(chips);
+        }
+
         // ---- 工作区细条（点击切换工作区） ----
         panel = panel.child(
             div()
@@ -310,7 +334,50 @@ impl AppState {
             .min_h(px(0.0))
             .overflow_scroll();
 
-        for idx in 0..self.sessions.len() {
+        // 按「最近活跃优先」排序，最新在最前；筛选只影响显示，不改数据顺序
+        let mut pinned_done = false;
+        let mut normal_started = false;
+        for idx in self.ordered_sessions() {
+            if let Some(f) = self.tag_filter {
+                if self.sessions[idx].tag != f {
+                    continue;
+                }
+            }
+            // 置顶区结束后插一条分隔，视觉上把两段分开
+            if !self.sessions[idx].pinned && !normal_started {
+                normal_started = true;
+                if pinned_done {
+                    list = list.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(1.0))
+                                    .bg(theme::border()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::dim())
+                                    .child("最近"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(1.0))
+                                    .bg(theme::border()),
+                            ),
+                    );
+                }
+            }
+            if self.sessions[idx].pinned {
+                pinned_done = true;
+            }
             list = list.child(self.session_card(idx, cx));
         }
         panel = panel.child(list);
@@ -349,6 +416,44 @@ impl AppState {
         panel
     }
 
+    /// 分类筛选 chip。
+    fn tag_chip(
+        &self,
+        tag: Option<neverwork_core::SessionTag>,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let on = self.tag_filter == tag;
+        let hue = tag.map(|t| t.hue()).unwrap_or(0x8a8a8a);
+        div()
+            .id(SharedString::from(format!("tagchip-{label}")))
+            .px_2
+            ()
+            .py_0p5
+            ()
+            .rounded_full
+            ()
+            .text_xs
+            ()
+            .cursor_pointer
+            ()
+            .when(on, |d| {
+                d.bg(theme::with_alpha(hue, 0.22))
+                    .text_color(gpui::rgb(hue))
+                    .border_1()
+                    .border_color(theme::with_alpha(hue, 0.5))
+            })
+            .when(!on, |d| {
+                d.bg(theme::raised())
+                    .text_color(theme::dim())
+                    .hover(|d| d.bg(theme::border()))
+            })
+            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                this.set_tag_filter(tag, cx);
+            }))
+            .child(SharedString::from(label.to_string()))
+    }
+
     fn session_card(&self, idx: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let session = &self.sessions[idx];
         let selected = idx == self.active_session;
@@ -366,7 +471,13 @@ impl AppState {
         // 确定宽度才生效，嵌套 flex 里会硬裁且不出省略号。
         let action_w = if has_action { 18.0 } else { 0.0 };
         let badge_w = if has_badge { 16.0 } else { 0.0 };
-        let title_w = CARD_INNER - 20.0 - 8.0 - badge_w - action_w - 6.0;
+        // 分类标签大约占 34px（两字 + 内边距）
+        let tag_w = if session.tag != neverwork_core::SessionTag::None {
+            34.0
+        } else {
+            0.0
+        };
+        let title_w = CARD_INNER - 20.0 - 8.0 - badge_w - action_w - tag_w - 6.0;
         let title_text = crate::views::text_fit::fit_text(&session.title, title_w, 14.0);
 
         let (pill_label, pill_fg, pill_bg) = match session.status {
@@ -404,7 +515,9 @@ impl AppState {
         };
         let time_w = 46.0;
         // 摘要列吃掉除「时间 + 胶囊」以外的全部宽度。
-        let preview_w = CARD_INNER - time_w - if has_pill { pill_w + 6.0 } else { 0.0 } - 6.0;
+        // 第二行右侧有置顶按钮（16px）+ 间距
+        let preview_w =
+            CARD_INNER - time_w - if has_pill { pill_w + 6.0 } else { 0.0 } - 16.0 - 8.0;
 
         // ---- 第一行：头像 + 分支徽标 + 标题 +（右）状态圆圈 ----
         let mut head = div()
@@ -432,6 +545,29 @@ impl AppState {
                     .text_xs()
                     .text_color(theme::green())
                     .child(SharedString::from(session.badge.clone())),
+            );
+        }
+
+        // 分类标签：点一下循环切换（功能 → 修复 → 重构 → 文档 → 调试 → 实验 → 无）
+        if session.tag != neverwork_core::SessionTag::None {
+            let hue = session.tag.hue();
+            let label = session.tag.label();
+            head = head.child(
+                div()
+                    .id(SharedString::from(format!("sess-tag-{idx}")))
+                    .flex_shrink_0()
+                    .px_1()
+                    .rounded_sm()
+                    .bg(theme::with_alpha(hue, 0.18))
+                    .text_xs()
+                    .text_color(gpui::rgb(hue))
+                    .cursor_pointer()
+                    .hover(|d| d.opacity(0.75))
+                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                        // 点分类只切分类，不要连带切会话
+                        this.cycle_session_tag(idx, cx);
+                    }))
+                    .child(SharedString::from(label)),
             );
         }
 
@@ -522,6 +658,28 @@ impl AppState {
             );
         }
 
+        // 置顶按钮放第二行右侧：第一行留给标题，避免长标题被挤成省略号。
+        // 已置顶显示实心图钉（黄色），未置顶是淡色空心。
+        let pinned = session.pinned;
+        foot = foot.child(
+            div()
+                .id(SharedString::from(format!("sess-pin-{idx}")))
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(16.0))
+                .flex_shrink_0()
+                .rounded_sm()
+                .text_color(if pinned { theme::yellow() } else { theme::dim() })
+                .cursor_pointer()
+                .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    // 只切置顶，不要连带切会话
+                    this.toggle_pin(idx, cx);
+                }))
+                .child(if pinned { "📌" } else { "⚲" }),
+        );
+
         // 参考稿里卡片无边框，靠底色区分；选中项用略亮的底色。
         div()
             .id(SharedString::from(format!("sess-{idx}")))
@@ -532,8 +690,16 @@ impl AppState {
             .py(px(7.0))
             .rounded_lg()
             .cursor_pointer()
-            .when(selected, |d| d.bg(theme::raised()))
-            .when(!selected, |d| d.hover(|d| d.bg(theme::with_alpha(0xffffff, 0.035))))
+            .when(selected, |d| {
+                d.bg(theme::raised())
+                    .border_1()
+                    .border_color(theme::accent_line())
+            })
+            .when(!selected, |d| {
+                d.border_1()
+                    .border_color(theme::with_alpha(0x000000, 0.0))
+                    .hover(|d| d.bg(theme::with_alpha(0xffffff, 0.035)))
+            })
             .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                 this.select_session(idx, cx);
             }))

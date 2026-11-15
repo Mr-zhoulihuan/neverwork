@@ -139,6 +139,48 @@ pub fn with_alpha(hex: u32, alpha: f32) -> Rgba {
     gpui::rgba((hex << 8) | (a & 0xff))
 }
 
+// ============ 字体 ============
+/// 等宽字体族名（代码块、执行命令用）。
+///
+/// 必须按平台给不同候选：Windows 上 "Menlo"/"DejaVu Sans Mono" 都不存在，
+/// 一旦 `font_family` 指向不存在的族名，gpui 会回退到比例字体，
+/// 代码块的对齐就全乱了（实测 Consolas 写死时在 Linux 上退化成无衬线）。
+pub fn mono_family() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Cascadia Mono"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "SF Mono"
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "DejaVu Sans Mono"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    {
+        "monospace"
+    }
+}
+
+/// 等宽字体候选列表：首选不存在时按顺序回退。
+pub fn mono_fallbacks() -> &'static [&'static str] {
+    const CANDIDATES: &[&str] = &[
+        "Cascadia Mono",
+        "Cascadia Code",
+        "Consolas",
+        "SF Mono",
+        "Menlo",
+        "DejaVu Sans Mono",
+        "Liberation Mono",
+        "Ubuntu Mono",
+        "Noto Sans Mono",
+        "monospace",
+    ];
+    CANDIDATES
+}
+
 // ============ 尺寸 ============
 pub const SIDEBAR_W: f32 = 236.0;
 pub const FILES_W: f32 = 300.0;

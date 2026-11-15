@@ -2,7 +2,6 @@ use super::*;
 use gpui::{ClickEvent, CursorStyle, KeyDownEvent};
 use neverwork_core::MessageKind;
 use crate::state::InputTarget;
-use crate::views::text_fit::fit_text;
 
 impl AppState {
     pub(crate) fn chat_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -24,7 +23,10 @@ impl AppState {
                         .flex_col()
                         .gap_1()
                         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(SharedString::from(session.title.clone())))
-                        .child(role_dots_row(&self.config)),
+                        // 团队模式才显示角色点；单助手模式不放任何说明文字。
+                        // 「能问答也能读文件」这种事说了也没用：用户直接问就行，
+                        // 挂在标题下面只会一直占着一行。
+                        .when(self.team_mode, |d| d.child(role_dots_row(&self.config))),
                 )
                 .child(div().flex_1())
                 .child(
@@ -43,45 +45,82 @@ impl AppState {
                         .text_color(theme::muted())
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                            this.center = CenterView::Team;
-                            cx.notify();
+                            // 单击直接切模式：这是最常用的动作。
+                            // 编辑团队角色走侧栏「团队」或命令面板。
+                            this.toggle_agent_mode(cx);
                         }))
-                        .child(SharedString::from(format!(
-                            "◈ {} · 编辑 ▾",
-                            self.config.active_team().map(|t| t.name.clone()).unwrap_or_default()
-                        ))),
+                        .child(if self.team_mode {
+                            SharedString::from(format!(
+                                "◈ {} · 团队 ▾",
+                                self.config.active_team().map(|t| t.name.clone()).unwrap_or_default()
+                            ))
+                        } else {
+                            SharedString::from("◎ 单助手 ▾")
+                        }),
                 ),
         );
 
-        col = col.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_5()
-                .py_2()
-                .bg(theme::accent_soft())
-                .border_b_1()
-                .border_color(theme::border())
-                .child(flow_step("P", 0, "规划", true))
-                .child(div().text_xs().text_color(theme::dim()).child("→"))
-                .child(flow_step("C", 1, "编码", true))
-                .child(div().text_xs().text_color(theme::dim()).child("→"))
-                .child(flow_step("R", 2, "审查", false))
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_md()
-                        .bg(theme::accent_soft())
-                        .text_xs()
-                        .text_color(theme::accent())
-                        .child(if self.streaming { "生成中…" } else { "步骤 2/3" }),
-                ),
-        );
+        // 顶部状态条：团队模式显示流水线，单助手模式默认整条不出现。
+        // 之前单助手也会挂一条「需要时会读文件，改文件前会问你」，
+        // 属于解释了也不影响操作的废话提示，还白占一行高度。
+        // 只有正在生成时才给一条，让用户知道它在干活、能停止。
+        if self.team_mode {
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_5()
+                    .py_2()
+                    .bg(theme::accent_soft())
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .child(flow_step("P", 0, "规划", true))
+                    .child(div().text_xs().text_color(theme::dim()).child("→"))
+                    .child(flow_step("C", 1, "编码", true))
+                    .child(div().text_xs().text_color(theme::dim()).child("→"))
+                    .child(flow_step("R", 2, "审查", false))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .bg(theme::accent_soft())
+                            .text_xs()
+                            .text_color(theme::accent())
+                            .child(if self.streaming { "生成中…" } else { "团队流水线" }),
+                    ),
+            );
+        } else if self.streaming {
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_5()
+                    .py_2()
+                    .bg(theme::accent_soft())
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::accent())
+                            .child("生成中…"),
+                    ),
+            );
+        }
 
-        let mut thread = div().flex().flex_col().gap_3().px_6().py_5();
+        // 整个对话流用等宽字体：参考稿（opencode）是终端风格，
+        // 等宽让工具行、代码块、正文的行首对齐在同一条竖线上。
+        let mut thread = div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .px_5()
+            .py_5()
+            .font_family(theme::mono_family());
         let sidx = self.active_session;
         let total = session.messages.len();
         let mut i = 0usize;
@@ -136,13 +175,11 @@ impl AppState {
 
     pub(crate) fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = self.chat.text().is_empty();
-        let send_bg = if self.streaming { theme::dim() } else { theme::accent() };
-        let send_label = if self.streaming { "停止 ■" } else { "发送 ↑" };
         let has_open_file = self.open_path.is_some();
 
         let mut col = div()
-            .px_5()
-            .pt_3()
+            .px_6()
+            .pt_4()
             .pb_4()
             .border_t_1()
             .border_color(theme::border())
@@ -208,16 +245,22 @@ impl AppState {
         }
 
         // ===== 输入行：逐字符渲染，能看到光标，也能点任意位置改字 =====
+        // 输入框真实位置：IME 候选框要贴住这里，而不是窗口左上角。
+        // 之前 GPUI 拿到的 bounds 来自那个 1x1 的输入桥，候选框永远飘在角落。
+        let area_slot = self.input_area_bounds.clone();
         let mut input_el = div()
             .id("composer-input")
             .flex()
             .flex_row()
+            // 单行内容在加高后的框里垂直居中；多行时从顶端自然排开
             .items_center()
             .flex_wrap()
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
-            .text_sm()
-            .min_h(px(22.0))
+            // 正文用 text_base：原来 text_sm 偏小，长句在宽窗口里很难读
+            .text_base()
+            .line_height(px(24.0))
+            .min_h(px(48.0))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.switch_input_target(InputTarget::Chat);
                 let end = this.chat.text().len();
@@ -227,14 +270,32 @@ impl AppState {
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
                 this.on_chat_key(ev, cx);
-            }));
+            }))
+            // 1x1 画布只为记录这块区域的真实坐标（渲染期拿 bounds 的唯一可靠时机）。
+            .child(
+                gpui::canvas(
+                    |_b, _w, _cx| {},
+                    move |bounds, _st, _w, _cx| {
+                        area_slot.set(Some(bounds));
+                    },
+                )
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .size(px(1.0)),
+            );
 
         if empty {
-            input_el = input_el.child(
-                div()
-                    .text_color(theme::dim())
-                    .child("继续指令，或让团队继续协作…（Enter 发送）"),
-            );
+            // 空输入框也要画光标：否则默认状态只有一个占位提示，
+            // 看不出「这里已经可以打字了」，用户得先点一下才敢输入。
+            // 光标画在占位文字左侧，符合「插入点在文本起始处」的直觉。
+            input_el = input_el
+                .child(chat_caret())
+                .child(
+                    div()
+                        .text_color(theme::dim())
+                        .child("在这里提问，或下达要执行的任务…"),
+                );
         } else {
             let cursor = self.chat.cursor();
             let sel = self.chat.selection();
@@ -285,7 +346,9 @@ impl AppState {
                     theme::border()
                 })
                 .bg(theme::panel())
-                .p_3()
+                .px_4()
+                .pt_3()
+                .pb_3()
                 .flex()
                 .flex_col()
                 .gap_2()
@@ -362,28 +425,38 @@ impl AppState {
                                 .child("清空"),
                         )
                         .child(div().flex_1())
-                        .child(
-                            div()
-                                .id("send-btn")
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .h(px(32.0))
-                                .px_4()
-                                .rounded_md()
-                                .bg(send_bg)
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                    if this.streaming {
+                        // 发送走 Enter，不再占一个按钮。
+                        // 只有生成中才出现「停止」，否则没有任何中断入口。
+                        .when(self.streaming, |d| {
+                            d.child(
+                                div()
+                                    .id("stop-btn")
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .h(px(28.0))
+                                    .px_3()
+                                    .rounded_md()
+                                    .bg(theme::raised())
+                                    .text_xs()
+                                    .text_color(theme::yellow())
+                                    .cursor_pointer()
+                                    .hover(|d| d.opacity(0.85))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                                         this.stop_streaming(cx);
-                                    } else {
-                                        this.send_message(cx);
-                                    }
-                                }))
-                                .child(SharedString::from(send_label)),
-                        ),
+                                    }))
+                                    .child("■ 停止"),
+                            )
+                        })
+                        // 生成中已经有「停止」按钮和顶部状态，这里不再重复提示
+                        .when(!self.streaming, |d| {
+                            d.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::dim())
+                                    .child("Enter 发送 · Shift+Enter 换行"),
+                            )
+                        }),
                 ),
         );
 
@@ -407,7 +480,7 @@ impl AppState {
 fn chat_caret() -> impl IntoElement {
     div()
         .w(px(2.0))
-        .h(px(16.0))
+        .h(px(20.0))
         .flex_shrink_0()
         .bg(theme::accent())
 }
@@ -439,14 +512,21 @@ impl AppState {
     pub(crate) fn render_msg(&self, m: &neverwork_core::Message) -> gpui::AnyElement {
         match &m.kind {
             MessageKind::User => user_bubble(&m.body).into_any_element(),
-            MessageKind::Agent { participant } => agent_bubble(
-                &participant.role_name,
-                participant.initial.clone(),
-                participant.color_index,
-                &m.body,
-                m.code.as_ref(),
-            )
-            .into_any_element(),
+            MessageKind::Agent { participant } => {
+                let (model, provider) = self.model_labels();
+                agent_bubble(
+                    &participant.role_name,
+                    &participant.role_id,
+                    participant.initial.clone(),
+                    participant.color_index,
+                    &m.body,
+                    m.code.as_ref(),
+                    m.elapsed_ms,
+                    &model,
+                    &provider,
+                )
+                .into_any_element()
+            }
             MessageKind::Handoff { to, action, .. } => handoff(to, action).into_any_element(),
             MessageKind::Tool { summary, .. } => tool_result(summary).into_any_element(),
             MessageKind::Parallel { items } => parallel_row(items).into_any_element(),
@@ -455,11 +535,11 @@ impl AppState {
         }
     }
 
-    /// 一组连续的工具调用：折叠成一行，展开看每一步的细节。
+    /// 一组连续的工具调用：每步一行 `→ Read <path>`，点击展开输出 / diff。
     ///
-    /// 折叠态形态（对齐参考稿）：
-    /// `▸ ● 读取了文件 readme.txt · 1 步`
-    /// 待审批的组永远自动展开，否则用户看不到按钮。
+    /// 参考稿（opencode）就是这种形态：工具调用不是一张张卡片，
+    /// 而是列在回答上方的一行行灰字；点开才看细节。
+    /// 待审批的步骤永远展开，否则用户看不到按钮。
     fn tool_steps_group(
         &self,
         start: usize,
@@ -478,7 +558,7 @@ impl AppState {
         struct Step {
             idx: usize,
             name: String,
-            summary: String,
+            path: String,
             status: ToolRunStatus,
             output: String,
             diff: Vec<neverwork_core::DiffLineView>,
@@ -490,7 +570,7 @@ impl AppState {
         for i in start..end.min(session.messages.len()) {
             if let MessageKind::ToolCall {
                 name,
-                summary,
+                path,
                 status,
                 output,
                 diff,
@@ -502,7 +582,7 @@ impl AppState {
                 steps.push(Step {
                     idx: i,
                     name: name.clone(),
-                    summary: summary.clone(),
+                    path: path.clone(),
                     status: *status,
                     output: output.clone(),
                     diff: diff.clone(),
@@ -515,270 +595,184 @@ impl AppState {
             return div().into_any_element();
         }
 
-        let expanded = pending_here || self.expand_steps_all || self.expanded_steps.contains(&start);
+        // 先把步骤搬进局部 Vec，避免借用生命周期问题
+        let mut col = div().flex().flex_col().gap_0p5();
+        for step in steps.iter() {
+            // 复制出闭包要用的下标：`move` 闭包不能捕获 `step` 的借用
+            let step_idx = step.idx;
+            let awaiting = step.status == ToolRunStatus::Awaiting;
+            let expanded =
+                awaiting || self.expand_steps_all || self.expanded_steps.contains(&step.idx);
 
-        // ---- 折叠行标题 ----
-        let first = &steps[0];
-        let mut title = format!("{} {}", tool_verb(&first.name), first.summary);
-        if steps.len() > 1 {
-            title.push_str(&format!(" 等 {} 步", steps.len()));
-        } else {
-            title.push_str(" · 1 步");
-        }
-        let title = fit_text(&title, 520.0, 12.0);
+            // 参数：优先显示真实路径（绝对路径，同参考稿），为空时只留动词
+            let arg = if step.path.is_empty() {
+                String::new()
+            } else {
+                self.root.join(&step.path).display().to_string()
+            };
+            let verb = tool_verb(&step.name);
 
-        let (dot, dot_color) = if pending_here
-            || steps.iter().any(|s| s.status == ToolRunStatus::Awaiting)
-        {
-            ("●", theme::yellow())
-        } else if steps.iter().any(|s| s.status == ToolRunStatus::Failed) {
-            ("●", theme::red())
-        } else if steps.iter().any(|s| s.status.is_pending()) {
-            ("◌", theme::accent())
-        } else if steps.iter().any(|s| s.status == ToolRunStatus::Denied) {
-            ("●", theme::dim())
-        } else {
-            ("●", theme::green())
-        };
-
-        let total_added: u32 = steps.iter().map(|s| s.added).sum();
-        let total_removed: u32 = steps.iter().map(|s| s.removed).sum();
-
-        let mut head = div()
-            .id(SharedString::from(format!("steps-{start}")))
-            .flex()
-            .items_center()
-            .gap_2()
-            .h(px(28.0))
-            .px_2()
-            .rounded_md()
-            .bg(theme::with_alpha(0xffffff, 0.04))
-            .cursor_pointer()
-            .hover(|d| d.bg(theme::with_alpha(0xffffff, 0.07)))
-            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
-                this.toggle_steps(start, cx);
-            }))
-            .child(
-                div()
-                    .w(px(10.0))
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(theme::dim())
-                    .child(if expanded { "▾" } else { "▸" }),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(dot_color)
-                    .child(dot),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_xs()
-                    .text_color(theme::muted())
-                    .child(SharedString::from(title)),
-            );
-
-        if total_added > 0 || total_removed > 0 {
-            head = head
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme::green())
-                        .child(SharedString::from(format!("+{total_added}"))),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme::red())
-                        .child(SharedString::from(format!("−{total_removed}"))),
-                );
-        }
-
-        if pending_here {
-            head = head.child(
-                div()
-                    .px_1p5()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(theme::with_alpha(0xf59e0b, 0.18))
-                    .text_xs()
-                    .text_color(theme::yellow())
-                    .child("待确认"),
-            );
-        }
-
-        let mut wrap = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .rounded_md()
-            .when(pending_here, |d| {
-                d.p_2()
-                    .border_1()
-                    .border_color(theme::with_alpha(0xf59e0b, 0.5))
-            })
-            .child(head);
-
-        if !expanded {
-            return wrap.into_any_element();
-        }
-
-        // ---- 展开态：每一步一行，写操作带 diff 与审批按钮 ----
-        let mut body = div().flex().flex_col().gap_2().pl(px(14.0));
-
-        for step in &steps {
-            let (icon, color) = tool_icon(&step.name);
-            let (status_text, status_color) = match step.status {
-                ToolRunStatus::Running => ("执行中…", theme::accent()),
-                ToolRunStatus::Awaiting => ("等待你确认", theme::yellow()),
-                ToolRunStatus::Ok => ("完成", theme::green()),
-                ToolRunStatus::Denied => ("已拒绝", theme::dim()),
-                ToolRunStatus::Failed => ("失败", theme::red()),
+            let mark_color = match step.status {
+                ToolRunStatus::Running => theme::accent(),
+                ToolRunStatus::Awaiting => theme::yellow(),
+                ToolRunStatus::Failed => theme::red(),
+                _ => theme::dim(),
             };
 
-            let mut row = div().flex().flex_col().gap_1().child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(18.0))
-                            .flex_shrink_0()
-                            .rounded_sm()
-                            .bg(theme::with_alpha(0xffffff, 0.06))
-                            .text_xs()
-                            .text_color(color)
-                            .child(SharedString::from(icon)),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .text_color(theme::fg())
-                            .child(SharedString::from(step.name.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_xs()
-                            .text_color(theme::muted())
-                            .child(SharedString::from(fit_text(&step.summary, 380.0, 12.0))),
-                    )
-                    .when(step.added > 0 || step.removed > 0, |d| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::green())
-                                .child(SharedString::from(format!("+{}", step.added))),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::red())
-                                .child(SharedString::from(format!("−{}", step.removed))),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .text_color(status_color)
-                            .child(SharedString::from(status_text)),
-                    ),
-            );
-
-            if !step.diff.is_empty() {
-                row = row.child(self.diff_box(step.idx, &step.diff));
-            } else if !step.output.is_empty() {
-                let first3: String = step.output.lines().take(3).collect::<Vec<_>>().join("\n");
-                row = row.child(
+            let mut head = div()
+                .id(SharedString::from(format!("step-{}", step.idx)))
+                .flex()
+                .items_center()
+                .gap_1()
+                .py_0p5()
+                .cursor_pointer()
+                .rounded_sm()
+                .hover(|d| d.bg(theme::with_alpha(0xffffff, 0.035)))
+                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                    this.toggle_steps(step_idx, cx);
+                }))
+                .child(div().flex_shrink_0().text_color(mark_color).child("→"))
+                .child(
                     div()
-                        .max_h(px(64.0))
-                        .overflow_hidden()
-                        .rounded_md()
-                        .bg(theme::bg())
-                        .p_2()
-                        .text_xs()
+                        .flex_shrink_0()
                         .text_color(if step.status == ToolRunStatus::Failed {
                             theme::red()
                         } else {
-                            theme::dim()
+                            theme::muted()
                         })
-                        .child(SharedString::from(first3)),
-                );
-            }
-
-            let is_pending_step = self
-                .pending
-                .as_ref()
-                .map(|p| p.session_idx == sidx && p.msg_idx == step.idx)
-                .unwrap_or(false);
-            if is_pending_step && step.status == ToolRunStatus::Awaiting {
-                row = row.child(
+                        .child(SharedString::from(verb)),
+                )
+                .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::yellow())
-                                .child("这个操作会改文件，确认后才会写入："),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("deny-{}", step.idx)))
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(theme::raised())
-                                .text_xs()
-                                .text_color(theme::muted())
-                                .cursor_pointer()
-                                .hover(|d| d.bg(theme::border()))
-                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
-                                    this.answer_approval(false, cx);
-                                }))
-                                .child("拒绝"),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("allow-{}", step.idx)))
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(theme::green())
-                                .text_xs()
-                                .text_color(gpui::rgb(0xffffff))
-                                .cursor_pointer()
-                                .hover(|d| d.opacity(0.88))
-                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
-                                    this.answer_approval(true, cx);
-                                }))
-                                .child("允许并写入"),
-                        ),
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_color(theme::dim())
+                        .child(SharedString::from(arg)),
                 );
+
+            if step.added > 0 || step.removed > 0 {
+                head = head
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(theme::green())
+                            .child(SharedString::from(format!("+{}", step.added))),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(theme::red())
+                            .child(SharedString::from(format!("−{}", step.removed))),
+                    );
+            }
+            // 只有异常状态才加状态词，正常完成不加噪音
+            match step.status {
+                ToolRunStatus::Running => {
+                    head = head.child(div().flex_shrink_0().text_color(theme::accent()).child("…"));
+                }
+                ToolRunStatus::Awaiting => {
+                    head = head.child(div().flex_shrink_0().text_color(theme::yellow()).child("待确认"));
+                }
+                ToolRunStatus::Failed => {
+                    head = head.child(div().flex_shrink_0().text_color(theme::red()).child("失败"));
+                }
+                ToolRunStatus::Denied | ToolRunStatus::Cancelled => {
+                    head = head.child(div().flex_shrink_0().text_color(theme::dim()).child("中断"));
+                }
+                ToolRunStatus::Ok => {}
             }
 
-            body = body.child(row);
+            let mut item = div().flex().flex_col().gap_1().child(head);
+
+            if expanded {
+                if !step.diff.is_empty() {
+                    item = item.child(self.diff_box(step_idx, &step.diff));
+                } else if !step.output.is_empty() {
+                    // 输出直接铺在正文下方（同参考稿的命令输出块），限高防刷屏
+                    item = item.child(
+                        div()
+                            .max_h(px(220.0))
+                            .overflow_hidden()
+                            .pl(px(14.0))
+                            .py_1()
+                            .text_color(if step.status == ToolRunStatus::Failed {
+                                theme::red()
+                            } else {
+                                theme::dim()
+                            })
+                            .child(SharedString::from(step.output.clone())),
+                    );
+                }
+
+                let is_pending_step = self
+                    .pending
+                    .as_ref()
+                    .map(|p| p.session_idx == sidx && p.msg_idx == step.idx)
+                    .unwrap_or(false);
+                if is_pending_step && awaiting {
+                    item = item.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .pl(px(14.0))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::yellow())
+                                    .child("会改文件，确认后写入："),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("deny-{}", step.idx)))
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(theme::raised())
+                                    .text_color(theme::muted())
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(theme::border()))
+                                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                                        this.answer_approval(false, cx);
+                                    }))
+                                    .child("拒绝"),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("allow-{}", step.idx)))
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(theme::green())
+                                    .text_color(gpui::rgb(0x000000))
+                                    .cursor_pointer()
+                                    .hover(|d| d.opacity(0.88))
+                                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                                        this.answer_approval(true, cx);
+                                    }))
+                                    .child("允许并写入"),
+                            ),
+                    );
+                }
+            }
+
+            col = col.child(item);
         }
 
-        wrap = wrap.child(body);
-        wrap.into_any_element()
+        // 待确认时给整组一圈提示色，避免混在灰字里看不见
+        if pending_here {
+            return div()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(theme::with_alpha(0xf59e0b, 0.45))
+                .child(col)
+                .into_any_element();
+        }
+        col.into_any_element()
     }
 
     /// diff 展示块（`+` 绿 / `-` 红 / 上下文灰）。
@@ -833,147 +827,336 @@ impl AppState {
     }
 }
 
-/// 工具图标与配色。
-fn tool_icon(name: &str) -> (&'static str, gpui::Rgba) {
-    match name {
-        "read_file" => ("◧", theme::cyan()),
-        "list_dir" => ("▤", theme::cyan()),
-        "search_files" => ("⌕", theme::cyan()),
-        "write_file" => ("✎", theme::orange()),
-        "apply_patch" => ("±", theme::orange()),
-        _ => ("⚒", theme::muted()),
-    }
-}
-
-/// 折叠行里的动作词。
+/// 动作词：对齐参考稿的 `→ Read <path>` 写法。
+///
+/// 用动词原形而不是「读取了文件」这种叙述句：一行一条工具调用时，
+/// 叙述句会把整列挤满，也看不出动作类型。
 fn tool_verb(name: &str) -> &'static str {
     match name {
-        "read_file" => "读取了文件",
-        "list_dir" => "浏览了目录",
-        "search_files" => "搜索了",
-        "write_file" => "写入了文件",
-        "apply_patch" => "修改了文件",
-        _ => "执行了",
+        "read_file" => "Read",
+        "list_dir" => "List",
+        "search_files" => "Search",
+        "write_file" => "Write",
+        "apply_patch" => "Patch",
+        "multi_patch" => "Multi-edit",
+        _ => "Run",
     }
 }
 
+/// 用户发言：整块浅底 + 左侧强调条，等宽字体，不画气泡和头像。
+///
+/// 对齐参考稿（opencode）：用户输入是一段被引用的文本块，
+/// 左右留白对齐正文，一眼能分辨「谁说的」但不抢视觉。
 pub(crate) fn user_bubble(text: &str) -> impl IntoElement {
     div()
-        .flex()
-        .flex_row()
-        .gap_3()
-        .justify_end()
+        .w_full()
+        .pl_3()
+        .pr_3()
+        .py_2()
+        .border_l_2()
+        .border_color(theme::accent())
+        .bg(theme::with_alpha(0xffffff, 0.035))
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .items_end()
-                .child(div().text_xs().text_color(theme::dim()).child("你"))
-                .child(
-                    div()
-                        .max_w(px(theme::CHAT_MAX_W * 0.75))
-                        .px_4()
-                        .py_3()
-                        .rounded_lg()
-                        .bg(theme::accent_soft())
-                        .border_1()
-                        .border_color(theme::accent_line())
-                        .text_sm()
-                        .child(SharedString::from(text.to_string())),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(30.0))
-                .rounded_md()
-                .bg(theme::raised())
-                .border_1()
-                .border_color(theme::border())
-                .text_xs()
-                .text_color(theme::muted())
-                .child("U"),
+                .text_color(theme::fg())
+                .line_height(px(22.0))
+                .child(SharedString::from(text.to_string())),
         )
 }
 
+/// AI 回答：没有头像、没有气泡框，就是一段文档流 + 一行页脚。
+///
+/// 参考稿（opencode）里回答本身完全平铺，`▣ Build · 模型 · 厂商 · 4.2s`
+/// 这条页脚承担「这是谁说的、花了多久」的信息，比头像更省地方。
 pub(crate) fn agent_bubble(
     name: &str,
+    role_id: &str,
     initial: String,
     color_idx: usize,
     text: &str,
     code: Option<&neverwork_core::CodeBlock>,
+    elapsed_ms: u64,
+    model_label: &str,
+    provider_label: &str,
 ) -> impl IntoElement {
-    let body = if text.is_empty() { "…" } else { text };
-    let mut bubble = div()
-        .max_w(px(theme::CHAT_MAX_W * 0.78))
-        .px_4()
-        .py_3()
-        .rounded_lg()
-        .bg(theme::raised())
-        .border_1()
-        .border_color(theme::border())
-        .text_sm()
-        .child(SharedString::from(body.to_string()));
-    if let Some(c) = code {
-        bubble = bubble.child(code_block(c));
-    }
-    div()
+    let mut col = div()
+        .w_full()
         .flex()
-        .flex_row()
-        .gap_3()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(30.0))
-                .rounded_md()
-                .bg(theme::role_color(color_idx))
-                .text_sm()
-                .font_weight(FontWeight::BOLD)
-                .child(SharedString::from(initial)),
-        )
-        .child(
+        .flex_col()
+        .gap_2()
+        .text_color(theme::fg());
+
+    if text.trim().is_empty() && code.is_none() {
+        col = col.child(div().text_color(theme::dim()).child("…"));
+    } else {
+        for b in crate::markdown::parse(text) {
+            col = col.child(markdown_block(b));
+        }
+    }
+    if let Some(c) = code {
+        col = col.child(code_block(c));
+    }
+
+    // 页脚：多角色时带上角色名，单助手时只写模型与厂商。
+    let who = if role_id == "agent" {
+        String::new()
+    } else if initial.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}")
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if !who.is_empty() {
+        parts.push(who);
+    }
+    if !model_label.is_empty() {
+        parts.push(model_label.to_string());
+    }
+    if !provider_label.is_empty() {
+        parts.push(provider_label.to_string());
+    }
+    if elapsed_ms > 0 {
+        parts.push(format_elapsed(elapsed_ms));
+    }
+    // 角色色仍用来区分多角色场景（单助手时是灰的）
+    let foot_color = if role_id == "agent" {
+        theme::dim()
+    } else {
+        theme::with_alpha(0xffffff, 0.45)
+    };
+    col = col.child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .pt_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::role_color(color_idx))
+                    .child("▣"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(foot_color)
+                    .child(SharedString::from(parts.join(" · "))),
+            ),
+    );
+    col
+}
+
+/// 毫秒 → `272ms` / `4.2s` / `1m 03s`。
+pub(crate) fn format_elapsed(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        let total = ms / 1000;
+        format!("{}m {:02}s", total / 60, total % 60)
+    }
+}
+
+/// 渲染一个 Markdown 块。
+fn markdown_block(block: crate::markdown::Block) -> gpui::AnyElement {
+    use crate::markdown::Block;
+    match block {
+        Block::Heading(level, text) => {
+            // 标题按等级递减字号，并配一条细分隔线，让长回答有清晰层次
+            let size = match level {
+                1 => 18.0,
+                2 => 16.0,
+                _ => 14.5,
+            };
             div()
                 .flex()
                 .flex_col()
                 .gap_1()
-                .flex_1()
+                .pt_1()
+                .border_1()
+                .border_color(gpui::rgb(0xff0000))
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child(SharedString::from(name.to_string())))
-                        .child(tag_el(role_kind(color_idx))),
+                        .text_size(px(size))
+                        .font_weight(FontWeight::BOLD)
+                        .border_1()
+                        .border_color(gpui::rgb(0x0000ff))
+                        // 参考稿里小标题是琥珀色，比正文更亮一档
+                        .text_color(theme::yellow())
+                        .child(inline_row(&text)),
                 )
-                .child(bubble),
-        )
-}
-
-pub(crate) fn role_kind(idx: usize) -> &'static str {
-    match idx {
-        0 => "规划",
-        1 => "AI",
-        2 => "审查",
-        _ => "角色",
+                .when(level <= 2, |d| d.child(div().h(px(1.0)).bg(theme::border())))
+                .into_any_element()
+        }
+        Block::Paragraph(text) => div()
+            .text_color(theme::fg())
+            .line_height(px(22.0))
+            .border_1()
+            .border_color(gpui::rgb(0x00ff00))
+            .child(inline_row(&text))
+            .into_any_element(),
+        Block::Code { lang, lines } => code_fence_block(&lang, &lines).into_any_element(),
+        Block::Bullet(items) => {
+            let mut col = div().flex().flex_col().gap_1();
+            for item in items {
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .items_start()
+                        .child(div().text_color(theme::dim()).child("•"))
+                        .child(div().flex_1().line_height(px(22.0)).child(inline_row(&item))),
+                );
+            }
+            col.into_any_element()
+        }
+        Block::Numbered(start, items) => {
+            let mut col = div().flex().flex_col().gap_1();
+            for (i, item) in items.into_iter().enumerate() {
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .items_start()
+                        .child(
+                            div()
+                                .text_color(theme::dim())
+                                .child(SharedString::from(format!("{}.", start + i as u32))),
+                        )
+                        .child(div().flex_1().line_height(px(22.0)).child(inline_row(&item))),
+                );
+            }
+            col.into_any_element()
+        }
+        Block::Quote(items) => {
+            let mut col = div().flex().flex_col().gap_1();
+            for line in items {
+                col = col.child(div().line_height(px(22.0)).child(inline_row(&line)));
+            }
+            div()
+                .pl_3()
+                .border_l_2()
+                .border_color(theme::accent_line())
+                .text_color(theme::muted())
+                .child(col)
+                .into_any_element()
+        }
+        Block::Rule => div().h(px(1.0)).bg(theme::border()).into_any_element(),
     }
 }
 
-pub(crate) fn tag_el(text: &str) -> impl IntoElement {
+/// 行内样式（`**粗体**` / `` `代码` ``）渲染。
+///
+/// 折行自己做（`markdown::wrap_spans`）而不是交给 flex `flex_wrap`：
+/// 气泡宽度按内容撑开，flex 拿不到确定宽度，长片段会顶出气泡边界；
+/// 即使给上限，flex 也只在片段之间断行，长段落会挤成「首行只剩一个词」。
+fn inline_row(text: &str) -> gpui::AnyElement {
+    use crate::markdown::InlineKind;
+    // 气泡可用宽度：正文已改为平铺，直接用上限本身
+    let avail = theme::CHAT_MAX_W - 8.0;
+    let spans = crate::markdown::inline_spans(text);
+    // 字号按比实际略大取值：估宽偏保守，宁可少放几个字也不要溢出气泡。
+    let lines = crate::markdown::wrap_spans(&spans, avail, 14.0);
+
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .max_w(px(avail))
+        .border_1()
+        .border_color(gpui::rgb(0xffff00));
+    for line in lines {
+        let mut row = div().flex().flex_row().items_baseline().max_w(px(avail)).min_w(px(0.0));
+        for span in line {
+            let el = match span.kind {
+                InlineKind::Plain => div().child(SharedString::from(span.text)),
+                InlineKind::Bold => div()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme::fg())
+                    .child(SharedString::from(span.text)),
+                InlineKind::Code => div()
+                    .text_color(theme::green())
+                    .child(SharedString::from(span.text)),
+                InlineKind::Italic => div()
+                    .italic()
+                    .text_color(theme::muted())
+                    .child(SharedString::from(span.text)),
+            };
+            // 不设 `flex_shrink_0`：万一估宽偏差让整行超宽，
+            // flex 还能把它压回可用宽度重新折行，而不是硬顶到气泡外面。
+            row = row.child(el.min_w(px(0.0)));
+        }
+        col = col.child(row);
+    }
+    col.into_any_element()
+}
+
+/// 代码围栏：带语言标签的顶栏 + 语法高亮内容。
+fn code_fence_block(lang: &str, lines: &[String]) -> impl IntoElement {
+    let lang = crate::highlight::lang_from_tag(lang);
+    let mut body = div().flex().flex_col();
+    for line in lines {
+        // 空行也要占位，否则代码块的空行会被压掉
+        if line.trim().is_empty() {
+            body = body.child(div().h(px(18.0)));
+            continue;
+        }
+        let mut row = div().flex().flex_row().flex_wrap();
+        for span in crate::highlight::highlight_line(line, lang) {
+            row = row.child(
+                div()
+                    .text_color(crate::highlight::color_for(span.tok))
+                    .child(SharedString::from(span.text)),
+            );
+        }
+        body = body.child(row);
+    }
     div()
-        .px_1()
-        .py_0p5()
-        .rounded_sm()
-        .bg(theme::raised())
+        .rounded_md()
         .border_1()
         .border_color(theme::border())
-        .text_xs()
-        .text_color(theme::dim())
-        .child(SharedString::from(text.to_string()))
+        .overflow_hidden()
+        .bg(theme::bg())
+        .child(
+            div()
+                .px_3()
+                .py_2()
+                .text_xs()
+                .font_family(theme::mono_family())
+                .child(body),
+        )
+}
+
+impl AppState {
+    /// 当前模型 / 厂商的展示名（回答页脚用）。
+    pub(crate) fn model_labels(&self) -> (String, String) {
+        let provider = self
+            .active_provider_config()
+            .map(|(id, _)| {
+                self.settings
+                    .providers
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or(id)
+            })
+            .unwrap_or_default();
+        let model = self
+            .active_provider_config()
+            .map(|(id, _)| {
+                self.settings
+                    .providers
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.model.clone())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        (model, provider)
+    }
 }
 
 pub(crate) fn code_block(c: &neverwork_core::CodeBlock) -> impl IntoElement {

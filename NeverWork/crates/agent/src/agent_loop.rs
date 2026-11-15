@@ -53,6 +53,11 @@ pub enum AgentEvent {
 ///
 /// 写操作的批准通过 `AgentEvent::NeedApproval` 里携带的 `respond` 通道完成：
 /// 界面收到事件后展示 diff 与「允许 / 拒绝」，把用户选择发回该通道即可。
+/// 跑一次 Agent 循环（模型 → 工具 → 回填，直到模型不再要工具）。
+///
+/// `enable_tools = false` 时**不把工具清单发给模型**：模型看不到工具就不会
+/// 试着调用，纯文本作答。关工具的场景（比如纯问答）也因此更省 token。
+#[allow(clippy::too_many_arguments)]
 pub fn run_agent(
     provider_id: &str,
     config: ProviderConfig,
@@ -60,19 +65,32 @@ pub fn run_agent(
     history: Vec<ChatMessage>,
     user_text: &str,
     root: PathBuf,
+    enable_tools: bool,
     emit: &mut dyn FnMut(AgentEvent),
     cancel: Arc<AtomicBool>,
 ) {
     let ctx = ToolContext::new(root.clone());
-    let specs = tools::tool_specs();
+    let specs = if enable_tools {
+        tools::tool_specs()
+    } else {
+        Vec::new()
+    };
 
     let mut messages: Vec<ChatMessage> = Vec::new();
-    messages.push(ChatMessage::system(build_system_prompt(system_prompt, &root)));
+    let mut sys = build_system_prompt(system_prompt, &root);
+    if !enable_tools {
+        sys.push_str(
+            "
+
+注意：本次会话没有开启文件工具。只做回答与解释，             不要声称已经读过或改过任何文件。",
+        );
+    }
+    messages.push(ChatMessage::system(sys));
     messages.extend(history);
     messages.push(ChatMessage::user(user_text.to_string()));
 
     let provider = build_provider(provider_id, config);
-    let with_tools = provider.supports_tools();
+    let with_tools = enable_tools && provider.supports_tools();
 
     for round in 0..MAX_ROUNDS {
         if cancel.load(Ordering::Relaxed) {
@@ -187,8 +205,12 @@ pub fn run_agent(
     emit(AgentEvent::Done);
 }
 
-/// 系统提示词：工具约定 + 工作方式。
-fn build_system_prompt(persona: &str, root: &std::path::Path) -> String {
+/// 系统提示词：先分清「回答问题」和「改代码」，再决定要不要用工具。
+///
+/// 之前的提示词通篇在讲怎么读写文件、还要求「改文件之前先用 read_file」，
+/// 模型于是把**任何输入**都当成代码任务：问一句常识也先去翻目录、
+/// 解释一个概念也去搜文件，既慢又答不到点上。
+pub(crate) fn build_system_prompt(persona: &str, root: &std::path::Path) -> String {
     let persona = if persona.trim().is_empty() {
         "你是一个在 IDE 里工作的编程助手。"
     } else {
@@ -198,23 +220,47 @@ fn build_system_prompt(persona: &str, root: &std::path::Path) -> String {
     format!(
         "{persona}
 
-你正在用户的工作区里工作，工作区根目录：{root_p}
+你工作在一个代码编辑器里，当前工作区根目录：{root_p}
 
-你可以使用这些工具直接访问文件（路径一律用相对工作区根的路径）：
+## 先判断用户要什么
+
+用户的输入大致分两类，处理方式完全不同：
+
+**A. 提问 / 解释 / 讨论** —— 直接回答，不要动工具。
+包括：概念解释、技术选型、报错原因分析、代码该怎么写、方案对比、
+闲聊与自我介绍、翻译、写作、常识问答、学习建议。
+这类问题**不要**调用任何工具，不要读文件、不要列目录。
+凭你已有的知识直接答；确实需要看代码才能回答时才读。
+不确定的事实就说不知道，不要编造，也不要靠翻文件掩盖不确定性。
+
+**B. 在本工作区里动手** —— 才使用工具。
+包括：读某个真实文件、查找某段代码在哪、修改/新建/删除文件、重构。
+这类任务先看清真实内容再动手，不要凭猜测改代码。
+
+判断依据是**用户想要结果，还是想要信息**：
+要结果（「把这个函数改成异步」「加个单测」）→ B；
+要信息（「这个报错啥意思」「Rust 的 lifetime 怎么理解」）→ A。
+
+## 可用工具（仅在 B 类任务时使用）
+
+路径一律用相对工作区根的路径。
+
 - read_file(path, offset?, limit?)：读文件，返回带行号的内容
 - list_dir(path?)：列目录
-- search_files(pattern, path?)：按文本搜索，定位改动位置
+- search_files(pattern, path?)：按文本搜索
 - write_file(path, content)：整体写入（新建或覆盖）
 - apply_patch(path, old_string, new_string)：把一段**唯一存在**的原文替换掉
 - multi_patch(edits[])：一次改多个文件，整批当作事务（全部校验通过才写，失败回滚），
-  只弹一次审批。跨文件重构（改签名、重命名、批量替换）优先用它，而不是逐个 apply_patch
+  只弹一次审批。跨文件重构（改签名、重命名、批量替换）优先用它
 
-工作方式要求：
-1. 改文件之前先用 read_file 看真实内容，不要凭猜测写代码。
-2. 小改动优先用 apply_patch；要动 2 个以上文件时用 multi_patch 一次提交，
+## 工作方式
+
+1. B 类任务先 read_file 看真实内容，再决定改什么。
+2. 小改动用 apply_patch；动 2 个以上文件用 multi_patch 一次提交，
    old_string 都要带足够上下文保证唯一。
-3. 写操作会弹给用户批准，批准后才会落盘；被拒绝就换方案，不要重复同样的写入。
-4. 回答简洁，说清「改了什么、为什么」，不要复述整个文件。
-5. 不确定的事实不要编造；需要更多信息就继续调用工具。"
+3. 写操作会弹给用户批准，批准后才落盘；被拒绝就换方案，不要重复同样的写入。
+4. 回答简洁：说清结论、改了什么、为什么。不要复述整个文件，不要为了显得勤奋而
+   堆叠工具调用。
+5. A 类问题用自然语言答完即可，不需要「下一步建议」式的清单。"
     )
 }
