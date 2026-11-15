@@ -291,15 +291,29 @@ impl AppState {
             .border_color(theme::border())
             .child(div().text_xs().text_color(theme::accent()).child("⎇"));
 
+        // 分支名：点一下在下方展开已有分支列表，选了就切换
         head = head.child(
             div()
+                .id("git-branch-btn")
+                .px_1()
+                .rounded_sm()
                 .text_xs()
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
                 .text_color(theme::fg())
+                .cursor_pointer()
+                .hover(|d| d.bg(theme::raised()))
+                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                    this.git_show_branches = !this.git_show_branches;
+                    cx.notify();
+                }))
                 .child(SharedString::from(if st.branch.is_empty() {
                     "—".to_string()
                 } else {
-                    fit_text(&st.branch, 110.0, 12.0)
-                })),
+                    fit_text(&st.branch, 100.0, 12.0)
+                }))
+                .child(div().text_color(theme::dim()).child(" ▾")),
         );
 
         if st.ahead > 0 {
@@ -340,6 +354,201 @@ impl AppState {
             );
 
         col = col.child(head);
+
+        // ---- 已有分支列表 ----
+        if self.git_show_branches {
+            let branches = crate::git_ops::branches(&self.git_dir());
+            let cur = self.git.branch.clone();
+            let mut bl = div()
+                .id("git-branch-list")
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .px_2()
+                .pb_2()
+                .max_h(px(140.0))
+                .overflow_scroll()
+                .text_xs()
+                .child(
+                    div()
+                        .px_1()
+                        .pb_1()
+                        .text_color(theme::dim())
+                        .child(SharedString::from(format!(
+                            "{} 个分支（点一下切换）",
+                            branches.len()
+                        ))),
+                );
+            if branches.is_empty() {
+                bl = bl.child(div().px_1().text_color(theme::dim()).child("没有分支"));
+            }
+            for (bi, b) in branches.iter().enumerate() {
+                let on = b == &cur;
+                let b2 = b.clone();
+                bl = bl.child(
+                    div()
+                        .id(SharedString::from(format!("branch-{bi}")))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .h(px(22.0))
+                        .px_2()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .when(on, |d| d.bg(theme::accent_soft()).text_color(theme::accent()))
+                        .when(!on, |d| {
+                            d.text_color(theme::muted())
+                                .hover(|d| d.bg(theme::raised()))
+                        })
+                        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                            this.git_show_branches = false;
+                            this.run_git_op(
+                                crate::git_ops::GitOp::SwitchBranch(b2.clone()),
+                                cx,
+                            );
+                        }))
+                        .child(div().w(px(10.0)).child(if on { "●" } else { "" }))
+                        .child(SharedString::from(fit_text(b, 170.0, 12.0))),
+                );
+            }
+            col = col.child(bl);
+        }
+
+        // ---- 多仓库切换（工作区里有多个仓库时才显示） ----
+        if self.git_repos.len() > 1 {
+            let mut bar = div()
+                .id("git-repos")
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .px_3()
+                .pb_2()
+                .text_xs();
+            bar = bar.child(
+                div()
+                    .w_full()
+                    .pb_1()
+                    .text_color(theme::dim())
+                    .child(SharedString::from(format!(
+                        "工作区内有 {} 个仓库",
+                        self.git_repos.len()
+                    ))),
+            );
+            let active = self.git_dir();
+            for (name, path) in self.git_repos.iter() {
+                let on = path == &active;
+                let p2 = path.clone();
+                bar = bar.child(
+                    div()
+                        .id(SharedString::from(format!("gitrepo-{name}")))
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .when(on, |d| {
+                            d.bg(theme::accent_soft()).text_color(theme::accent())
+                        })
+                        .when(!on, |d| {
+                            d.bg(theme::raised())
+                                .text_color(theme::muted())
+                                .hover(|d| d.bg(theme::border()))
+                        })
+                        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                            this.select_git_repo(p2.clone(), cx);
+                        }))
+                        .child(SharedString::from(fit_text(name, 90.0, 12.0))),
+                );
+            }
+            col = col.child(bar);
+        }
+
+        // ---- 逐步确认条（破坏性操作） ----
+        if let Some(op) = &self.git_confirm {
+            let op_c = op.clone();
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .mx_2()
+                    .mb_1()
+                    .p_2()
+                    .rounded_md()
+                    .bg(theme::with_alpha(0xef4444, 0.12))
+                    .border_1()
+                    .border_color(theme::with_alpha(0xef4444, 0.45))
+                    .text_xs()
+                    .child(
+                        div()
+                            .text_color(theme::red())
+                            .child(SharedString::from(format!("⚠ {}", op.describe()))),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme::dim())
+                            .child("这个操作不可撤销，确认继续？"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id("git-cancel")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(theme::raised())
+                                    .text_color(theme::muted())
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(theme::border()))
+                                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                        this.cancel_git_op(cx);
+                                    }))
+                                    .child("取消"),
+                            )
+                            .child(
+                                div()
+                                    .id("git-confirm")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(theme::red())
+                                    .text_color(gpui::rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .hover(|d| d.opacity(0.88))
+                                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                                        let _ = &op_c;
+                                        this.confirm_git_op(cx);
+                                    }))
+                                    .child("确认丢弃"),
+                            ),
+                    ),
+            );
+        }
+
+        // ---- 多仓库但还没选：明确提示，避免误操作 ----
+        if !self.git_repo_chosen() && self.git_repos.len() > 1 {
+            return col
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .text_xs()
+                        .text_color(theme::dim())
+                        .child("请先在上方选一个仓库")
+                        .child(
+                            div()
+                                .text_color(theme::muted())
+                                .child("工作区里有多个仓库，选好后才能暂存/提交"),
+                        ),
+                )
+                .into_any_element();
+        }
 
         // ---- 不是仓库：给出明确提示 ----
         if !self.git_is_repo {
@@ -435,6 +644,9 @@ impl AppState {
             .flex_col()
             .gap_0p5()
             .px_2()
+            // 必须 flex_shrink_0：否则在纵向 flex 里会被后面的 diff 挤成 0 高度，
+            // 表现为「摘要说有 N 个文件，但列表一个都不显示」。
+            .flex_shrink_0()
             .max_h(px(220.0))
             .overflow_scroll();
 
@@ -500,15 +712,197 @@ impl AppState {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_color(if selected { theme::fg() } else { theme::muted() })
-                            .child(SharedString::from(fit_text(&c.path, 190.0, 12.0))),
-                    ),
+                            .child(SharedString::from(fit_text(&c.path, 150.0, 12.0))),
+                    )
+                    // 单文件操作：暂存 / 取消暂存 / 丢弃
+                    .child({
+                        let p_stage = c.path.clone();
+                        div()
+                            .id(SharedString::from(format!("stage-{i}")))
+                            .px_1()
+                            .rounded_sm()
+                            .text_color(theme::green())
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme::border()))
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                                this.run_git_op(
+                                    crate::git_ops::GitOp::Stage(p_stage.clone()),
+                                    cx,
+                                );
+                            }))
+                            .child(if c.staged { "✓" } else { "＋" })
+                    })
+                    .child({
+                        let p_unstage = c.path.clone();
+                        div()
+                            .id(SharedString::from(format!("unstage-{i}")))
+                            .px_1()
+                            .rounded_sm()
+                            .text_color(theme::yellow())
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme::border()))
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                                this.run_git_op(
+                                    crate::git_ops::GitOp::Unstage(p_unstage.clone()),
+                                    cx,
+                                );
+                            }))
+                            .child("−")
+                    })
+                    .child({
+                        let p_discard = c.path.clone();
+                        div()
+                            .id(SharedString::from(format!("discard-{i}")))
+                            .px_1()
+                            .rounded_sm()
+                            .text_color(theme::red())
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme::border()))
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                                // 破坏性：run_git_op 会先挂起等确认
+                                this.run_git_op(
+                                    crate::git_ops::GitOp::Discard(p_discard.clone()),
+                                    cx,
+                                );
+                            }))
+                            .child("✕")
+                    }),
             );
         }
         col = col.child(list);
 
+        // ---- 批量与分支操作 ----
+        col = col.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_3()
+                .pb_2()
+                .text_xs()
+                .child(
+                    div()
+                        .id("git-stage-all")
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(theme::raised())
+                        .text_color(theme::muted())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                            this.run_git_op(crate::git_ops::GitOp::StageAll, cx);
+                        }))
+                        .child("暂存全部"),
+                )
+                .child(
+                    div()
+                        .id("git-create-branch")
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(theme::raised())
+                        .text_color(theme::muted())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                            this.create_branch_from_input(cx);
+                        }))
+                        .child("＋分支"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .h(px(22.0))
+                        .px_2()
+                        .rounded_sm()
+                        .bg(theme::raised())
+                        .border_1()
+                        .border_color(theme::border())
+                        .text_color(if self.git_branch_input.text().is_empty() {
+                            theme::dim()
+                        } else {
+                            theme::fg()
+                        })
+                        .child(SharedString::from(if self.git_branch_input.text().is_empty() {
+                            "新分支名".to_string()
+                        } else {
+                            fit_text(self.git_branch_input.text(), 100.0, 12.0)
+                        })),
+                ),
+        );
+
+        // ---- 提交框 ----
+        let msg_empty = self.git_commit_msg.text().is_empty();
+        col = col.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_3()
+                .pb_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::dim())
+                                .child(SharedString::from(format!(
+                                    "提交信息（已暂存 {} 个文件）",
+                                    st.staged_count()
+                                ))),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .id("git-commit")
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .when(st.staged_count() > 0 && !msg_empty, |d| {
+                                    d.bg(theme::accent())
+                                        .text_color(gpui::rgb(0xffffff))
+                                        .cursor_pointer()
+                                        .hover(|d| d.opacity(0.88))
+                                })
+                                .when(st.staged_count() == 0 || msg_empty, |d| {
+                                    d.bg(theme::raised()).text_color(theme::dim())
+                                })
+                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                    this.commit_from_input(cx);
+                                }))
+                                .child("提交"),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("git-msg")
+                        .flex()
+                        .items_center()
+                        .h(px(24.0))
+                        .px_2()
+                        .rounded_sm()
+                        .bg(theme::raised())
+                        .border_1()
+                        .border_color(theme::border())
+                        .text_xs()
+                        .text_color(if msg_empty { theme::dim() } else { theme::fg() })
+                        .child(SharedString::from(if msg_empty {
+                            "写一句提交信息".to_string()
+                        } else {
+                            fit_text(self.git_commit_msg.text(), 200.0, 12.0)
+                        })),
+                ),
+        );
+
+
         // ---- 选中文件的 diff ----
         if let Some(sel) = &self.git_selected {
-            let diff = crate::git::file_diff(&self.root, sel);
+            let diff = crate::git::file_diff(&self.git_dir(), sel);
             let mut boxel = div()
                 .id("git-diff")
                 .flex()

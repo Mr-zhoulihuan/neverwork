@@ -180,6 +180,21 @@ pub struct AppState {
     pub git_selected: Option<String>,
     /// 当前目录是否是一个 git 仓库（false 时显示提示而不是空列表）。
     pub git_is_repo: bool,
+    /// 工作区里发现的所有 git 仓库：(显示名, 绝对路径)。
+    ///
+    /// 工作区常常是「容器目录」（如 `E:\go`），其下每个项目各自是仓库。
+    /// Git 面板可以独立切换要操作的仓库，文件树仍显示整个工作区。
+    pub git_repos: Vec<(String, PathBuf)>,
+    /// 当前 Git 面板操作的仓库路径；`None` 表示工作区根本身。
+    pub git_active: Option<PathBuf>,
+    /// 提交信息输入框。
+    pub git_commit_msg: TextBuffer,
+    /// 分支操作输入框（新建 / 切换）。
+    pub git_branch_input: TextBuffer,
+    /// 等待二次确认的破坏性操作（丢弃改动）。
+    pub git_confirm: Option<crate::git_ops::GitOp>,
+    /// Git 面板是否展开分支列表。
+    pub git_show_branches: bool,
 
     // ===== 视图 =====
     pub center: CenterView,
@@ -380,6 +395,12 @@ impl AppState {
             git: crate::git::RepoStatus::default(),
             git_selected: None,
             git_is_repo: false,
+            git_repos: Vec::new(),
+            git_active: None,
+            git_commit_msg: TextBuffer::single_line(),
+            git_branch_input: TextBuffer::single_line(),
+            git_confirm: None,
+            git_show_branches: false,
             center: initial_view(),
             settings_tab: initial_settings_tab(),
             right_tab: RightTab::Files,
@@ -518,6 +539,36 @@ impl AppState {
         if std::env::var("NW_AUTO_APPROVE").map(|v| v == "1").unwrap_or(false) {
             me.auto_approve = true;
         }
+        // 验证用：启动时执行一次 Git 写操作，走与界面完全相同的代码路径。
+        if let Ok(spec) = std::env::var("NW_GIT_OP") {
+            me.refresh_git(cx);
+            // NW_GIT_REPO=<子目录名> 先切到该仓库
+            if let Ok(name) = std::env::var("NW_GIT_REPO") {
+                let p = me.root.join(name);
+                me.git_active = Some(p);
+                me.git_selected = None;
+                me.refresh_git(cx);
+            }
+            let (kind, arg) = match spec.split_once(':') {
+                Some((k, a)) => (k.to_string(), a.to_string()),
+                None => (spec.clone(), String::new()),
+            };
+            match kind.as_str() {
+                "stage-all" => me.run_git_op(crate::git_ops::GitOp::StageAll, cx),
+                "commit" => me.run_git_op(crate::git_ops::GitOp::Commit(arg), cx),
+                "discard" => me.run_git_op(crate::git_ops::GitOp::Discard(arg), cx),
+                "branch" => me.run_git_op(crate::git_ops::GitOp::CreateBranch(arg), cx),
+                "switch" => me.run_git_op(crate::git_ops::GitOp::SwitchBranch(arg), cx),
+                _ => {}
+            }
+            // NW_GIT_CONFIRM=1 时把挂起的破坏性操作也执行掉（仅验证用）
+            if std::env::var("NW_GIT_CONFIRM").map(|v| v == "1").unwrap_or(false)
+                && me.git_confirm.is_some()
+            {
+                me.confirm_git_op(cx);
+            }
+            tracing::info!("NW_GIT_OP={spec} -> {:?}", me.notice);
+        }
         // 验证用：直接打开右侧某个 Tab（files|git|preview）。
         if let Ok(t) = std::env::var("NW_RIGHT_TAB") {
             match t.to_lowercase().as_str() {
@@ -609,9 +660,53 @@ impl AppState {
         self.refresh_tree(cx);
     }
 
+    /// 当前 Git 面板操作的目录（选中的子仓库，或工作区根）。
+    pub(crate) fn git_dir(&self) -> PathBuf {
+        self.git_active.clone().unwrap_or_else(|| self.root.clone())
+    }
+
+    /// 重新发现工作区里的仓库。
+    ///
+    /// 规则：工作区根本身是仓库 → 只列它；否则列直接子目录里的仓库。
+    /// 不递归深层找，避免在 node_modules 之类目录里翻出几百个仓库。
+    fn discover_git_repos(&mut self) {
+        let mut repos: Vec<(String, PathBuf)> = Vec::new();
+        if crate::git::repo_root(&self.root).is_some() {
+            repos.push((".".to_string(), self.root.clone()));
+        } else {
+            for name in crate::git::child_repos(&self.root) {
+                repos.push((name.clone(), self.root.join(&name)));
+            }
+        }
+        self.git_repos = repos;
+
+        // 当前选中的仓库若已不存在就清掉
+        if let Some(active) = &self.git_active {
+            if !self.git_repos.iter().any(|(_, p)| p == active) {
+                self.git_active = None;
+            }
+        }
+        // **只有一个仓库时才自动选中**。
+        // 多个仓库时保持未选中：暂存/提交是写操作，作用到用户没点选的仓库
+        // 是不可接受的（曾经默认选第一个，导致 `git add -A` 加到别的项目里）。
+        if self.git_active.is_none() && self.git_repos.len() == 1 {
+            self.git_active = self.git_repos.first().map(|(_, p)| p.clone());
+        }
+    }
+
+    /// 切换 Git 面板操作的仓库。
+    pub(crate) fn select_git_repo(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.git_active = Some(path);
+        self.git_selected = None;
+        self.git_commit_msg.reset("");
+        self.refresh_git(cx);
+    }
+
     /// 刷新 Git 状态。
     pub(crate) fn refresh_git(&mut self, cx: &mut Context<Self>) {
-        match crate::git::status(&self.root) {
+        self.discover_git_repos();
+        let dir = self.git_dir();
+        match crate::git::status(&dir) {
             crate::git::RepoQuery::Ok(st) => {
                 self.git_is_repo = true;
                 self.git = st;
@@ -629,7 +724,11 @@ impl AppState {
                 self.git_is_repo = false;
                 self.git = crate::git::RepoStatus::default();
                 self.git_selected = None;
-                self.notice = Some(msg);
+                // 只有在「连子仓库都没有」时才提示不是仓库；
+                // 多仓库工作区里这是正常状态，不该报错。
+                if self.git_repos.is_empty() {
+                    self.notice = Some(msg);
+                }
             }
         }
         cx.notify();
@@ -639,6 +738,85 @@ impl AppState {
     pub(crate) fn select_git_file(&mut self, path: String, cx: &mut Context<Self>) {
         self.git_selected = Some(path);
         cx.notify();
+    }
+
+    /// 是否已明确选好要操作的仓库。
+    ///
+    /// 多仓库且未选中时为 `false`，此时禁止写操作——避免误改别的项目。
+    pub(crate) fn git_repo_chosen(&self) -> bool {
+        self.git_active.is_some() || self.git_repos.len() <= 1
+    }
+
+    /// 执行一次 Git 写操作。破坏性操作先挂起等确认。
+    pub(crate) fn run_git_op(&mut self, op: crate::git_ops::GitOp, cx: &mut Context<Self>) {
+        if !self.git_repo_chosen() {
+            self.notice = Some("工作区内有多个仓库，先在 Git 面板选一个再操作".into());
+            cx.notify();
+            return;
+        }
+        // 破坏性操作必须二次确认，不能直接执行
+        if op.is_destructive() {
+            self.git_confirm = Some(op);
+            cx.notify();
+            return;
+        }
+        self.exec_git_op(op, cx);
+    }
+
+    /// 真正执行（已确认或非破坏性）。
+    fn exec_git_op(&mut self, op: crate::git_ops::GitOp, cx: &mut Context<Self>) {
+        let dir = self.git_dir();
+        let is_commit = matches!(op, crate::git_ops::GitOp::Commit(_));
+
+        let r = crate::git_ops::apply(&dir, &op);
+        self.notice = Some(r.message.clone());
+
+        if r.ok {
+            if is_commit {
+                self.git_commit_msg.reset("");
+            }
+            // 改动文件可能被删/改名，清掉失效的选中项
+            self.git_selected = None;
+            self.refresh_git(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// 用户确认了破坏性操作。
+    pub(crate) fn confirm_git_op(&mut self, cx: &mut Context<Self>) {
+        if let Some(op) = self.git_confirm.take() {
+            self.exec_git_op(op, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_git_op(&mut self, cx: &mut Context<Self>) {
+        self.git_confirm = None;
+        cx.notify();
+    }
+
+    /// 用输入框里的内容提交。
+    pub(crate) fn commit_from_input(&mut self, cx: &mut Context<Self>) {
+        let msg = self.git_commit_msg.text().to_string();
+        if msg.trim().is_empty() {
+            self.notice = Some("提交信息不能为空".into());
+            cx.notify();
+            return;
+        }
+        self.exec_git_op(crate::git_ops::GitOp::Commit(msg), cx);
+    }
+
+    /// 用输入框里的内容新建分支。
+    pub(crate) fn create_branch_from_input(&mut self, cx: &mut Context<Self>) {
+        let name = self.git_branch_input.text().to_string();
+        if name.trim().is_empty() {
+            self.notice = Some("分支名不能为空".into());
+            cx.notify();
+            return;
+        }
+        self.git_branch_input.reset("");
+        self.exec_git_op(crate::git_ops::GitOp::CreateBranch(name), cx);
     }
 
 

@@ -6,6 +6,7 @@ mod brackets;
 mod find;
 mod folding;
 mod git;
+mod git_ops;
 mod highlight;
 mod input_handler;
 mod keymap;

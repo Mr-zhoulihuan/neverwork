@@ -105,7 +105,42 @@ design/   设计稿（HTML/PNG）与设计规范 DESIGN-SPEC.md
 - **响应式 + 专注模式**：窗口较窄或高 DPI 时自动收起侧栏，
   标题栏「◧ 专注」可手动切换。
 
-测试：208 个。app 侧 text_buffer 11 / text_fit 5 / model_picker 10 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2；agent 侧 tools 17 / diff 12 / team role_provider 5 / sse 2；core 侧 settings 13 + config 5；ui 3。另有 3 条打真实 DeepSeek API 的集成测试（需密钥，默认跳过）。
+测试：223 个。app 侧 text_buffer 11 / text_fit 5 / model_picker 10 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2；agent 侧 tools 17 / diff 12 / team role_provider 5 / sse 2；core 侧 settings 13 + config 5；ui 3。另有 3 条打真实 DeepSeek API 的集成测试（需密钥，默认跳过）。
+
+### M10 — Git 写操作 + 多仓库工作区（本期）
+
+**1. Git 写操作**（`app/src/git_ops.rs`）
+
+| 操作 | 说明 |
+|---|---|
+| 暂存 / 取消暂存 | 单文件 `＋`/`−` 按钮，或「暂存全部」 |
+| 提交 | 提交框输入信息后点「提交」（暂存区为空时禁用并提示） |
+| 丢弃改动 | 单文件 `✕`，**先弹确认条**才执行 |
+| 新建分支 | 输入框 + 「＋分支」，`check-ref-format` 挡非法名 |
+| 切换分支 | 点分支名展开已有分支列表，选中即切 |
+
+安全设计：
+
+- **只有「丢弃」是破坏性的**，用 `GitOp::is_destructive()` 单独标注，UI 必须二次确认。
+  已跟踪文件走 `git restore --`（还原到 HEAD），未跟踪文件直接删这一个文件（不做目录级 clean）。
+- **暂存区为空时拒绝提交**，并给出「先暂存」的明确提示，而不是把 git 的长篇提示甩给用户。
+- **空提交信息直接拒绝**，避免产生无标题提交。
+- 失败一律带 git 的 stderr 原文（如分支不存在、名不合法），不返回笼统的「操作失败」。
+- 空仓库（无 HEAD）里取消暂存会走 `git rm --cached`——`git restore --staged` 此时会报 `could not resolve 'HEAD'`。
+
+**2. 多仓库工作区**
+
+工作区是「容器目录」（如 `E:\go`，其下每个项目各自是仓库）时：
+
+- Git 面板顶部列出工作区内所有仓库（`ShareNasWorkTool` / `goDemo` / `nas-os` / `ops-go`），
+  点一个即切换该面板操作对象；文件树仍显示整个工作区。
+- **多个仓库时默认不选中任何一个**，必须明确选一个才允许写操作。
+  这是刻意的：自动选第一个会导致 `git add -A` 作用到用户没点选的仓库——开发中真实踩到过。
+- 只有一个仓库时自动选中，无需多一步点击。
+
+测试：223 个（新增 git_ops 15，全部用真实临时仓库跑端到端：
+暂存→提交、空暂存区拒绝提交、丢弃已跟踪/未跟踪文件、建分支/切分支/重名拒绝、
+中文提交信息 roundtrip、空仓库取消暂存）。
 
 ### M9 — Git 面板 + 默认工作区 + 可见尺寸修复（本期）
 
