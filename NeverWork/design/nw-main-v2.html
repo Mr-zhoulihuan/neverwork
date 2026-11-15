@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>NeverWork — UI 设计稿 v2（对话居中）</title>
+<style>
+  :root{
+    --bg:#181818; --surface:#1e1e1e; --panel:#202020; --raised:#252526;
+    --border:#2d2d30; --fg:#d4d4d4; --muted:#8a8a8a; --dim:#5f5f5f;
+    --accent:#3b82f6; --accent-soft:rgba(59,130,246,.14); --accent-line:rgba(59,130,246,.5);
+    --green:#22c55e; --yellow:#eab308; --red:#ef4444; --purple:#a855f7; --orange:#f97316;
+    --radius:10px;
+    --mono:'JetBrains Mono','Cascadia Code',Consolas,monospace;
+    --sans:'Inter',-apple-system,Segoe UI,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d0d0d;font-family:var(--sans);color:var(--fg);padding:28px;display:flex;flex-direction:column;gap:28px;align-items:center}
+  .stage{width:1280px}
+  .label{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);margin-bottom:10px;padding-left:2px}
+  .win{width:1280px;height:800px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;display:grid;grid-template-rows:36px 1fr;box-shadow:0 24px 60px rgba(0,0,0,.5)}
+  .titlebar{display:flex;align-items:center;gap:12px;background:var(--panel);border-bottom:1px solid var(--border);padding:0 12px;user-select:none}
+  .lights{display:flex;gap:8px}
+  .lights i{width:12px;height:12px;border-radius:50%;display:block}
+  .lights i:nth-child(1){background:var(--red)}.lights i:nth-child(2){background:var(--yellow)}.lights i:nth-child(3){background:var(--green)}
+  .tb-title{font-size:12.5px;color:var(--muted)}
+  .tb-title b{color:var(--fg);font-weight:600}
+  .tb-spacer{flex:1}
+  .tb-status{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(34,197,94,.15)}
+  .tb-icons{display:flex;gap:4px;color:var(--dim);font-size:14px}
+  .tb-icons span{width:26px;height:26px;display:grid;place-items:center;border-radius:6px;cursor:pointer}
+  .tb-icons span:hover{background:var(--raised);color:var(--fg)}
+
+  /* 三段：左(导航) | 中(对话主舞台) | 右(文件) */
+  .body{display:grid;grid-template-columns:230px 1fr 300px;overflow:hidden}
+
+  /* ---- 左：会话导航 ---- */
+  .side{background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+  .brand{display:flex;align-items:center;gap:9px;padding:14px 14px 10px}
+  .brand .logo{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,var(--accent),var(--purple));display:grid;place-items:center;font-weight:800;font-size:14px;color:#fff}
+  .brand .nm{font-size:13px;font-weight:700;letter-spacing:.01em}
+  .mode{display:flex;gap:4px;padding:6px 10px 8px}
+  .seg{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;height:30px;border-radius:8px;font-size:12.5px;font-weight:600;color:var(--muted);cursor:pointer;transition:.15s}
+  .seg.on{background:var(--accent-soft);color:var(--accent)}
+  .seg:hover:not(.on){color:var(--fg)}
+  .seg svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2}
+  .side-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px 6px}
+  .side-head span{font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--dim);text-transform:uppercase}
+  .side-head .add{width:20px;height:20px;display:grid;place-items:center;border-radius:5px;color:var(--dim);cursor:pointer;font-size:15px}
+  .side-head .add:hover{background:var(--raised);color:var(--fg)}
+  .list{padding:0 8px 10px;overflow-y:auto;flex:1 1 auto}
+  .item{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border-radius:6px;font-size:12.5px;color:var(--muted);cursor:pointer;white-space:nowrap;overflow:hidden}
+  .item:hover{background:var(--raised);color:var(--fg)}
+  .item.on{background:var(--accent-soft);color:var(--fg);box-shadow:inset 2px 0 0 var(--accent)}
+  .item .ic{color:var(--dim);font-size:13px;flex:0 0 auto}
+  .item .nm{overflow:hidden;text-overflow:ellipsis}
+  .item .mt{margin-left:auto;font-size:10.5px;color:var(--dim);flex:0 0 auto}
+  .newchat{margin:8px 10px 12px;height:36px;border-radius:9px;background:var(--accent);color:#fff;font-size:12.5px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:7px;cursor:pointer}
+  .newchat:hover{filter:brightness(1.08)}
+  .side-foot{border-top:1px solid var(--border);padding:10px 12px;display:flex;align-items:center;gap:9px;font-size:12px;color:var(--muted)}
+  .side-foot .av{width:24px;height:24px;border-radius:6px;background:var(--raised);border:1px solid var(--border);display:grid;place-items:center;font-size:11px;color:var(--fg)}
+
+  /* ---- 中：对话主舞台 ---- */
+  .center{display:grid;grid-template-rows:auto 1fr auto;overflow:hidden;background:var(--surface)}
+  .chat-head{display:flex;align-items:center;gap:10px;height:52px;padding:0 22px;border-bottom:1px solid var(--border);background:var(--surface)}
+  .chat-head .ttl{font-size:14px;font-weight:600}
+  .chat-head .sub{font-size:11px;color:var(--dim);margin-top:1px}
+  .chat-head .sp{flex:1}
+  .model-sel{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px 10px;cursor:pointer}
+  .model-sel:hover{color:var(--fg)}
+  .model-sel .mdot{width:8px;height:8px;border-radius:50%;background:var(--purple)}
+  .chat-scroll{overflow-y:auto;padding:26px 0;min-height:0}
+  .thread{max-width:760px;margin:0 auto;padding:0 26px;display:flex;flex-direction:column;gap:22px}
+  .msg{display:flex;gap:12px}
+  .msg.user{flex-direction:row-reverse}
+  .av{width:30px;height:30px;border-radius:8px;flex:0 0 auto;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff}
+  .msg.ai .av{background:linear-gradient(135deg,var(--purple),var(--accent))}
+  .msg.user .av{background:var(--raised);color:var(--muted);border:1px solid var(--border)}
+  .content{max-width:580px;min-width:0}
+  .role{font-size:11px;color:var(--dim);margin-bottom:5px}
+  .msg.user .role{text-align:right}
+  .bubble{font-size:13px;line-height:1.7;color:#d6d6d6;background:var(--raised);padding:13px 15px;border-radius:12px;border:1px solid var(--border)}
+  .msg.user .bubble{background:var(--accent-soft);border-color:var(--accent-line);color:#dce8ff}
+  .bubble ul{margin:8px 0 0 18px;padding:0;line-height:1.8}
+  .bubble code{font-family:var(--mono);font-size:12px;background:rgba(0,0,0,.35);padding:1px 5px;border-radius:4px;color:#e0c080}
+  .cblock{margin-top:10px;border:1px solid var(--border);border-radius:9px;overflow:hidden;background:#161616}
+  .cblock .ch{display:flex;align-items:center;gap:6px;padding:7px 11px;background:var(--raised);font-family:var(--mono);font-size:11px;color:var(--muted);border-bottom:1px solid var(--border)}
+  .cblock .ch .sp{flex:1}
+  .cblock .ch .add{color:var(--green);font-size:10px}.cblock .ch .del{color:var(--red);font-size:10px}
+  .cblock pre{padding:11px 13px;font-family:var(--mono);font-size:12px;line-height:1.6;color:#cfcfcf;overflow-x:auto;white-space:pre}
+  .tool{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--muted);padding:8px 12px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:9px}
+  .tool .tk{width:16px;height:16px;border-radius:5px;background:rgba(34,197,94,.2);color:var(--green);display:grid;place-items:center;font-size:11px}
+  .tool b{color:var(--fg)}
+  .action-bar{display:flex;gap:6px;margin-top:7px;color:var(--dim);font-size:11px}
+  .action-bar span{display:flex;align-items:center;gap:3px;padding:2px 7px;border-radius:5px;cursor:pointer}
+  .action-bar span:hover{background:var(--raised);color:var(--fg)}
+
+  /* composer（居中主输入） */
+  .composer{padding:14px 0 20px;border-top:1px solid var(--border);background:var(--surface)}
+  .composer-inner{max-width:760px;margin:0 auto;padding:0 26px}
+  .inputbox{border:1px solid var(--border);border-radius:14px;background:var(--panel);padding:12px 14px;transition:.15s;box-shadow:0 6px 20px rgba(0,0,0,.25)}
+  .inputbox:focus-within{border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-soft),0 6px 20px rgba(0,0,0,.25)}
+  .inputbox .ctx{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px}
+  .chip{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);background:var(--raised);border:1px solid var(--border);border-radius:6px;padding:3px 8px}
+  .chip .cic{font-size:10px}.chip .cx{color:var(--dim);font-size:10px;cursor:pointer}
+  .inputbox .ph{font-size:13.5px;color:var(--dim);line-height:1.55;min-height:24px}
+  .inputrow{display:flex;align-items:center;justify-content:space-between;margin-top:10px}
+  .inputrow .left{display:flex;gap:4px}
+  .inputrow .left .ib{width:30px;height:30px;display:grid;place-items:center;border-radius:8px;color:var(--dim);cursor:pointer;font-size:14px}
+  .inputrow .left .ib:hover{background:var(--raised);color:var(--fg)}
+  .inputrow .hlp{font-size:11px;color:var(--dim);margin-left:8px;align-self:center}
+  .inputrow .hlp b{color:var(--muted)}
+  .send{height:32px;padding:0 16px;border-radius:9px;background:var(--accent);display:flex;align-items:center;gap:6px;cursor:pointer;color:#fff;font-size:12.5px;font-weight:600}
+  .send:hover{filter:brightness(1.08)}
+
+  /* ---- 右：文件 ---- */
+  .right{background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+  .rp-head{display:flex;align-items:center;gap:4px;height:52px;padding:0 12px;border-bottom:1px solid var(--border)}
+  .rpt{height:28px;display:flex;align-items:center;padding:0 10px;border-radius:6px;font-size:12px;color:var(--muted);cursor:pointer}
+  .rpt.on{background:var(--raised);color:var(--fg)}
+  .rpt:hover:not(.on){color:var(--fg)}
+  .rp-actions{display:flex;align-items:center;height:36px;padding:0 12px;gap:2px;border-bottom:1px solid var(--border)}
+  .rp-actions span{width:24px;height:24px;display:grid;place-items:center;border-radius:5px;color:var(--dim);cursor:pointer;font-size:13px}
+  .rp-actions span:hover{background:var(--raised);color:var(--fg)}
+  .rp-actions .crumb{flex:1;text-align:right;font-size:11px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ftree{padding:8px 8px;overflow-y:auto;flex:1;font-size:12.5px}
+  .ftrow{display:flex;align-items:center;gap:6px;height:28px;padding:0 8px;border-radius:5px;color:var(--muted);cursor:pointer}
+  .ftrow:hover{background:var(--raised);color:var(--fg)}
+  .ftrow.on{background:var(--raised);color:var(--fg)}
+  .ftrow .chev{width:12px;color:var(--dim);font-size:10px}
+  .ftrow .fic{width:15px;text-align:center;font-size:12px;color:var(--dim)}
+  .ftrow.lvl1{padding-left:26px}.ftrow.lvl2{padding-left:44px}
+  .ftrow .nm{overflow:hidden;text-overflow:ellipsis}
+  .ftrow .mt{margin-left:auto;font-size:10px;color:var(--yellow);font-weight:700}
+  .c-rust{color:var(--orange)}.c-json{color:var(--yellow)}.c-dir{color:#7c9dc4}
+  .rp-foot{border-top:1px solid var(--border);padding:9px 12px;font-size:11px;color:var(--dim);display:flex;justify-content:space-between}
+
+  .notes{display:flex;gap:14px;flex-wrap:wrap;margin-top:14px;font-size:12px;color:var(--muted)}
+  .notes div{display:flex;align-items:center;gap:6px}
+  .notes .sw{width:12px;height:12px;border-radius:3px}
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <div class="label">NeverWork · 主界面 v2 — Agent 对话居中，文件在右</div>
+  <div class="win">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div class="tb-title"><b>NeverWork</b> — my-project</div>
+      <div class="tb-spacer"></div>
+      <div class="tb-status"><span class="dot"></span>Agent 运行中 · Claude Opus</div>
+      <div class="tb-icons"><span>⌘K</span><span>⚙</span></div>
+    </div>
+
+    <div class="body">
+      <!-- ===== 左：会话导航 ===== -->
+      <aside class="side">
+        <div class="brand"><div class="logo">N</div><div class="nm">NeverWork</div></div>
+        <div class="mode">
+          <div class="seg on">
+            <svg viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="12" rx="3"/><circle cx="9" cy="14" r="1.4"/><circle cx="15" cy="14" r="1.4"/><path d="M12 4v4"/></svg>
+            Agent
+          </div>
+          <div class="seg">
+            <svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12z"/></svg>
+            Chat
+          </div>
+        </div>
+        <div class="side-head"><span>会话</span><span class="add">＋</span></div>
+        <div class="list">
+          <div class="item on"><span class="ic">◐</span><span class="nm">重构 auth 模块</span><span class="mt">2m</span></div>
+          <div class="item"><span class="ic">◐</span><span class="nm">修复登录跳转</span><span class="mt">1h</span></div>
+          <div class="item"><span class="ic">◐</span><span class="nm">补充单测</span><span class="mt">昨天</span></div>
+          <div class="item"><span class="ic">◐</span><span class="nm">性能分析：启动慢</span><span class="mt">昨天</span></div>
+          <div class="item"><span class="ic">◐</span><span class="nm">升级依赖到最新</span><span class="mt">3天</span></div>
+        </div>
+        <div class="newchat">＋ 新建会话</div>
+        <div class="side-foot"><div class="av">U</div><div style="flex:1">本地工作区</div><span>⚙</span></div>
+      </aside>
+
+      <!-- ===== 中：对话主舞台 ===== -->
+      <main class="center">
+        <div class="chat-head">
+          <div>
+            <div class="ttl">重构 auth 模块</div>
+            <div class="sub">读取 4 个文件 · 已应用 2 处改动</div>
+          </div>
+          <div class="sp"></div>
+          <div class="model-sel"><span class="mdot"></span>Claude Opus ▾</div>
+        </div>
+
+        <div class="chat-scroll">
+          <div class="thread">
+            <!-- 用户开题 -->
+            <div class="msg user">
+              <div class="av">U</div>
+              <div class="content">
+                <div class="role">你</div>
+                <div class="bubble">帮我看看 <code>agent.rs</code> 里的 <code>run()</code>，<code>start()</code> 现在是同步阻塞的，能改成异步并加上错误处理吗？</div>
+              </div>
+            </div>
+
+            <!-- AI 回复 -->
+            <div class="msg ai">
+              <div class="av">N</div>
+              <div class="content">
+                <div class="role">NeverWork Agent</div>
+                <div class="bubble">
+                  好的。我看到 <code>run()</code> 里 <code>app.start()</code> 是同步调用，且没有错误处理。我会做三处修改：
+                  <ul>
+                    <li><code>start()</code> → <code>async fn start(&amp;mut self) -&gt; AppResult&lt;()&gt;</code></li>
+                    <li>内部 <code>run()</code> 加 <code>.await?</code></li>
+                    <li>调用方补 <code>?</code> 传播</li>
+                  </ul>
+                  <div class="cblock">
+                    <div class="ch"><span style="color:var(--orange)">⬢</span>agent.rs<span class="sp"></span><span class="add">+6</span><span class="del">−2</span></div>
+<pre><span style="color:var(--purple)">pub async fn</span> <span style="color:#dcdcaa">start</span>(&amp;<span style="color:var(--purple)">mut</span> self) -&gt; AppResult&lt;()&gt; {
+    tracing::<span style="color:#dcdcaa">info</span>(<span style="color:#ce9178">"starting"</span>);
+    self.runtime.<span style="color:#dcdcaa">run</span>().<span style="color:#c586c0">await</span>?;
+    <span style="color:#4ec9b0">Ok</span>(())
+}</pre>
+                  </div>
+                </div>
+                <div class="tool"><span class="tk">✓</span>已应用编辑到 <b>agent.rs</b> · 2 处</div>
+                <div class="action-bar"><span>⧉ 复制</span><span>↻ 重新生成</span><span>＋ 插入到文件</span></div>
+              </div>
+            </div>
+
+            <div class="msg user">
+              <div class="av">U</div>
+              <div class="content">
+                <div class="role">你</div>
+                <div class="bubble">顺手把调用 <code>start()</code> 的地方也改一下。</div>
+              </div>
+            </div>
+
+            <div class="msg ai">
+              <div class="av">N</div>
+              <div class="content">
+                <div class="role">NeverWork Agent</div>
+                <div class="bubble">
+                  已完成。<code>main.rs</code> 中的调用已改为 <code>app.start().await?;</code>，现在整条链路是异步且错误可传播的。
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="composer">
+          <div class="composer-inner">
+            <div class="inputbox">
+              <div class="ctx">
+                <span class="chip"><span class="cic" style="color:var(--orange)">⬢</span>agent.rs<span class="cx">✕</span></span>
+                <span class="chip"><span class="cic" style="color:var(--orange)">⬢</span>main.rs<span class="cx">✕</span></span>
+                <span class="chip"><span class="cic">✂</span>选中 L5-L7<span class="cx">✕</span></span>
+              </div>
+              <div class="ph">继续让 Agent 修改，或输入指令…</div>
+              <div class="inputrow">
+                <div class="left">
+                  <div class="ib">＋</div><div class="ib">@</div><div class="ib">/</div>
+                  <div class="hlp"><b>@</b> 文件　<b>/</b> 命令　<b>⏎</b> 发送</div>
+                </div>
+                <div class="send">发送 ↑</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- ===== 右：文件 ===== -->
+      <aside class="right">
+        <div class="rp-head">
+          <div class="rpt on">文件</div>
+          <div class="rpt">改动</div>
+          <div class="rpt">预览</div>
+        </div>
+        <div class="rp-actions">
+          <span>＋</span><span>⌕</span><span>⟳</span>
+          <div class="crumb">my-project / src</div>
+        </div>
+        <div class="ftree">
+          <div class="ftrow"><span class="chev">▾</span><span class="fic c-dir">▣</span><span class="nm">src</span></div>
+          <div class="ftrow lvl1"><span class="fic c-rust">⬢</span><span class="nm">main.rs</span><span class="mt">M</span></div>
+          <div class="ftrow lvl1 on"><span class="fic c-rust">⬢</span><span class="nm">agent.rs</span><span class="mt">M</span></div>
+          <div class="ftrow lvl1"><span class="fic c-rust">⬢</span><span class="nm">ui.rs</span></div>
+          <div class="ftrow"><span class="chev">▾</span><span class="fic c-dir">▣</span><span class="nm">crates</span></div>
+          <div class="ftrow lvl1"><span class="fic c-dir">▣</span><span class="nm">core</span></div>
+          <div class="ftrow lvl1"><span class="fic c-dir">▣</span><span class="nm">agent</span></div>
+          <div class="ftrow lvl1"><span class="fic c-dir">▣</span><span class="nm">ui</span></div>
+          <div class="ftrow"><span class="chev">▸</span><span class="fic c-json">{}</span><span class="nm">Cargo.toml</span></div>
+          <div class="ftrow"><span class="chev"></span><span class="fic">📄</span><span class="nm">README.md</span></div>
+        </div>
+        <div class="rp-foot"><span>⎇ main</span><span>2 处改动</span></div>
+      </aside>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div><span class="sw" style="background:var(--bg)"></span>窗口底 #181818</div>
+    <div><span class="sw" style="background:var(--panel)"></span>面板 #202020</div>
+    <div><span class="sw" style="background:var(--surface)"></span>对话区 #1e1e1e</div>
+    <div><span class="sw" style="background:var(--accent)"></span>强调 #3b82f6</div>
+    <div><span class="sw" style="background:var(--purple)"></span>Agent #a855f7</div>
+  </div>
+</div>
+
+</body>
+</html>

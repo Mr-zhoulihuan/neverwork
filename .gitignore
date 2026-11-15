@@ -1,0 +1,19 @@
+# ===== Rust 构建产物 =====
+# NeverWork/target 约 9.7G，绝对不能提交。
+NeverWork/target/
+target/
+*.pdb
+*.exe
+*.msi
+*.dmp
+*.nw-tmp
+
+# ===== 编辑器 / 系统 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# ===== 运行期临时文件 =====
+*.log

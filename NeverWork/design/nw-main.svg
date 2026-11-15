@@ -1,0 +1,61 @@
+<svg viewBox="0 0 1000 640" xmlns="http://www.w3.org/2000/svg" font-family="Inter, system-ui, sans-serif">
+  <rect x="0" y="0" width="1000" height="640" rx="10" fill="var(--surface)"/>
+  <rect x="0" y="0" width="1000" height="36" rx="10" fill="var(--muted)" opacity="0.18"/>
+  <circle cx="20" cy="18" r="6" fill="var(--error)"/>
+  <circle cx="40" cy="18" r="6" fill="var(--warning)"/>
+  <circle cx="60" cy="18" r="6" fill="var(--success)"/>
+  <text x="500" y="23" text-anchor="middle" font-size="13" fill="var(--muted)">NeverWork — my-project</text>
+  <text x="960" y="23" text-anchor="end" font-size="12" fill="var(--muted)">Agent ●</text>
+
+  <rect x="0" y="36" width="230" height="604" fill="var(--bg, var(--surface))" stroke="var(--border)" stroke-width="1"/>
+  <rect x="12" y="52" width="206" height="30" rx="8" fill="var(--accent)" opacity="0.15" stroke="var(--accent)"/>
+  <text x="24" y="72" font-size="13" fill="var(--accent)">◐ Agent</text>
+  <text x="130" y="72" font-size="13" fill="var(--muted)">Chat</text>
+
+  <text x="18" y="108" font-size="11" fill="var(--muted)">会话</text>
+  <rect x="12" y="118" width="206" height="28" rx="6" fill="var(--border)" opacity="0.45"/>
+  <text x="22" y="137" font-size="12" fill="var(--fg)">重构 auth 模块</text>
+  <text x="22" y="168" font-size="12" fill="var(--muted)">修复登录跳转</text>
+  <text x="22" y="196" font-size="12" fill="var(--muted)">补充单测</text>
+
+  <line x1="0" y1="230" x2="230" y2="230" stroke="var(--border)"/>
+  <text x="18" y="256" font-size="11" fill="var(--muted)">文件</text>
+  <text x="22" y="282" font-size="12" fill="var(--fg)">▾ src</text>
+  <text x="38" y="306" font-size="12" fill="var(--muted)">main.rs</text>
+  <text x="38" y="330" font-size="12" fill="var(--accent)">agent.rs</text>
+  <text x="38" y="354" font-size="12" fill="var(--muted)">ui.rs</text>
+  <text x="22" y="378" font-size="12" fill="var(--fg)">▾ crates</text>
+  <text x="22" y="402" font-size="12" fill="var(--muted)">Cargo.toml</text>
+
+  <rect x="230" y="36" width="510" height="604" fill="var(--surface)"/>
+  <rect x="230" y="36" width="510" height="34" fill="var(--muted)" opacity="0.10"/>
+  <rect x="240" y="42" width="120" height="24" rx="6" fill="var(--surface)" stroke="var(--border)"/>
+  <text x="252" y="58" font-size="12" fill="var(--fg)">agent.rs ●</text>
+  <text x="372" y="58" font-size="12" fill="var(--muted)">ui.rs</text>
+
+  <g font-family="Consolas, monospace" font-size="13">
+    <text x="248" y="100" fill="var(--muted)"> 1</text><text x="280" y="100" fill="var(--accent)">use</text><text x="316" y="100" fill="var(--fg)">crate::{agent, ui};</text>
+    <text x="248" y="124" fill="var(--muted)"> 2</text>
+    <text x="248" y="148" fill="var(--muted)"> 3</text><text x="280" y="148" fill="var(--accent)">pub fn</text><text x="336" y="148" fill="var(--fg)">run() {</text>
+    <text x="248" y="172" fill="var(--muted)"> 4</text><text x="280" y="172" fill="var(--c4)">    let</text><text x="316" y="172" fill="var(--fg)">app = Agent::new();</text>
+    <text x="248" y="196" fill="var(--muted)"> 5</text><text x="280" y="196" fill="var(--c4)">    app</text><text x="316" y="196" fill="var(--fg)">.start();</text>
+    <text x="248" y="220" fill="var(--muted)"> 6</text><text x="280" y="220" fill="var(--fg)">}</text>
+  </g>
+  <rect x="270" y="140" width="330" height="22" fill="var(--accent)" opacity="0.12"/>
+
+  <rect x="740" y="36" width="260" height="604" fill="var(--bg, var(--surface))" stroke="var(--border)" stroke-width="1"/>
+  <text x="756" y="62" font-size="12" fill="var(--muted)">AI 助手</text>
+  <circle cx="752" cy="88" r="10" fill="var(--c1)" opacity="0.6"/>
+  <rect x="770" y="80" width="180" height="46" rx="8" fill="var(--muted)" opacity="0.12"/>
+  <text x="780" y="100" font-size="11" fill="var(--muted)">已读取当前文件上下文</text>
+  <text x="780" y="116" font-size="11" fill="var(--muted)">需要我改哪里？</text>
+
+  <rect x="756" y="140" width="200" height="40" rx="8" fill="var(--accent)" opacity="0.15" stroke="var(--accent)"/>
+  <text x="766" y="158" font-size="11" fill="var(--fg)">把 start() 改成异步</text>
+  <text x="766" y="172" font-size="11" fill="var(--muted)">并加错误处理</text>
+
+  <rect x="756" y="580" width="228" height="44" rx="10" fill="var(--surface)" stroke="var(--border)"/>
+  <text x="768" y="607" font-size="12" fill="var(--muted)">输入指令…  @ 文件  / 命令</text>
+  <rect x="948" y="588" width="28" height="28" rx="8" fill="var(--accent)"/>
+  <text x="962" y="607" text-anchor="middle" font-size="14" fill="var(--surface)">↑</text>
+</svg>

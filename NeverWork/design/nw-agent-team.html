@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>NeverWork — Agent 团队编辑器（自定义角色）</title>
+<style>
+  :root{
+    --bg:#181818; --surface:#1e1e1e; --panel:#202020; --raised:#252526;
+    --border:#2d2d30; --fg:#d4d4d4; --muted:#8a8a8a; --dim:#5f5f5f;
+    --accent:#3b82f6; --accent-soft:rgba(59,130,246,.14); --accent-line:rgba(59,130,246,.5);
+    --green:#22c55e; --yellow:#eab308; --red:#ef4444; --purple:#a855f7; --orange:#f97316; --cyan:#06b6d4; --pink:#ec4899;
+    --radius:10px; --mono:'JetBrains Mono',Consolas,monospace; --sans:'Inter',-apple-system,Segoe UI,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d0d0d;font-family:var(--sans);color:var(--fg);padding:28px;display:flex;flex-direction:column;gap:24px;align-items:center}
+  .stage{width:1280px}
+  .label{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);margin-bottom:10px;padding-left:2px}
+  .win{width:1280px;height:760px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;display:grid;grid-template-rows:36px 1fr;box-shadow:0 24px 60px rgba(0,0,0,.5)}
+  .titlebar{display:flex;align-items:center;gap:12px;background:var(--panel);border-bottom:1px solid var(--border);padding:0 12px}
+  .lights{display:flex;gap:8px}.lights i{width:12px;height:12px;border-radius:50%;display:block}
+  .lights i:nth-child(1){background:var(--red)}.lights i:nth-child(2){background:var(--yellow)}.lights i:nth-child(3){background:var(--green)}
+  .tb-title{font-size:12.5px;color:var(--muted)}.tb-title b{color:var(--fg)}
+  .tb-spacer{flex:1}
+  .dialog{display:grid;grid-template-columns:240px 1fr;overflow:hidden;background:var(--surface)}
+  /* 左侧团队列表 */
+  .team-list{background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column}
+  .tl-head{padding:16px 16px 10px;font-size:14px;font-weight:600;display:flex;align-items:center;justify-content:space-between}
+  .tl-head .new{font-size:11px;color:var(--accent);cursor:pointer;font-weight:600}
+  .tl-sub{padding:0 16px 12px;font-size:11.5px;color:var(--dim)}
+  .tgroup{padding:0 10px}
+  .titem{display:flex;align-items:center;gap:9px;height:40px;padding:0 10px;border-radius:8px;font-size:12.5px;color:var(--muted);cursor:pointer;margin-bottom:3px}
+  .titem:hover{background:var(--raised);color:var(--fg)}
+  .titem.on{background:var(--accent-soft);color:var(--fg)}
+  .titem .tlogo{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff;flex:0 0 auto}
+  .titem .tn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .titem .tc{font-size:10px;color:var(--dim);background:var(--raised);padding:1px 6px;border-radius:5px}
+  .titem.on .tc{background:rgba(59,130,246,.2);color:var(--accent)}
+  /* 右侧编辑区 */
+  .editor{display:flex;flex-direction:column;overflow:hidden}
+  .ed-head{padding:18px 24px 14px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:14px}
+  .ed-head .tbig{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--purple),var(--accent));display:grid;place-items:center;font-size:19px;font-weight:800;color:#fff;flex:0 0 auto}
+  .ed-head .meta{flex:1}
+  .ed-head .nm{font-size:16px;font-weight:700;display:flex;align-items:center;gap:8px}
+  .ed-head .nm .edit{font-size:11px;color:var(--dim);cursor:pointer;font-weight:400}
+  .ed-head .ds{font-size:12px;color:var(--muted);margin-top:3px;line-height:1.5}
+  .ed-head .mode2{font-size:11px;color:var(--muted);background:var(--panel);border:1px solid var(--border);border-radius:7px;padding:6px 10px;cursor:pointer;display:flex;align-items:center;gap:5px}
+  .ed-body{flex:1;overflow-y:auto;padding:18px 24px}
+  .sec-t{font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--dim);text-transform:uppercase;margin:0 0 10px}
+  .sec-t .hint{font-weight:400;letter-spacing:0;text-transform:none;color:var(--dim);margin-left:6px;font-size:11px}
+  /* 编排模式 */
+  .flow-modes{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:22px}
+  .fm{border:1px solid var(--border);border-radius:9px;padding:11px 12px;cursor:pointer;background:var(--panel);transition:.15s}
+  .fm:hover{background:var(--raised)}
+  .fm.on{border-color:var(--accent-line);background:var(--accent-soft)}
+  .fm .fmi{font-size:14px;color:var(--muted);margin-bottom:4px}
+  .fm.on .fmi{color:var(--accent)}
+  .fm .fmn{font-size:12.5px;font-weight:600}
+  .fm .fmd{font-size:10.5px;color:var(--dim);margin-top:2px;line-height:1.4}
+  /* 角色卡列表 */
+  .roles{display:flex;flex-direction:column;gap:10px;margin-bottom:8px}
+  .role-card{border:1px solid var(--border);border-radius:10px;background:var(--panel);padding:12px 14px;display:flex;align-items:center;gap:12px;transition:.15s}
+  .role-card:hover{background:var(--raised)}
+  .role-card.add{border-style:dashed;justify-content:center;color:var(--dim);cursor:pointer;font-size:12.5px;padding:13px}
+  .role-card.add:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+  .role-card .drag{color:var(--dim);font-size:13px;cursor:grab}
+  .rc-av{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-size:13px;font-weight:700;color:#fff;flex:0 0 auto}
+  .rc-info{flex:1;min-width:0}
+  .rc-name{font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px}
+  .rc-name .rt{font-size:9.5px;padding:1px 6px;border-radius:5px;background:var(--raised);color:var(--dim);font-weight:500}
+  .rc-model{font-size:11px;color:var(--muted);margin-top:2px;display:flex;align-items:center;gap:6px}
+  .rc-model .mi{color:var(--accent);font-size:10px}
+  .rc-skill{font-size:10px;color:var(--cyan);background:rgba(6,182,212,.1);border:1px solid rgba(6,182,212,.25);padding:1px 6px;border-radius:5px;margin-left:auto}
+  .rc-actions{display:flex;gap:4px;color:var(--dim)}
+  .rc-actions span{width:26px;height:26px;display:grid;place-items:center;border-radius:6px;cursor:pointer;font-size:13px}
+  .rc-actions span:hover{background:var(--raised);color:var(--fg)}
+  /* 编辑面板（新增角色展开态） */
+  .role-edit{border:1px solid var(--accent-line);border-radius:10px;background:var(--panel);padding:16px;margin-bottom:10px;box-shadow:0 0 0 3px var(--accent-soft)}
+  .role-edit .re-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+  .role-edit .re-head .av-pick{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--pink),var(--purple));display:grid;place-items:center;font-size:13px;font-weight:700;color:#fff;cursor:pointer}
+  .role-edit .re-head input{flex:1;height:34px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0 11px;color:var(--fg);font-size:13px;font-family:var(--sans)}
+  .role-edit .re-head input:focus{outline:none;border-color:var(--accent-line)}
+  .field{margin-bottom:13px}
+  .field label{display:block;font-size:11.5px;font-weight:600;color:var(--muted);margin-bottom:6px}
+  .field .inp{width:100%;height:34px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0 11px;color:var(--fg);font-size:12.5px;display:flex;align-items:center;justify-content:space-between}
+  .field .inp .v{color:var(--muted);font-size:11px}
+  .field textarea{width:100%;min-height:64px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--muted);font-size:12px;font-family:var(--sans);line-height:1.5;resize:none}
+  .field textarea:focus{outline:none;border-color:var(--accent-line)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .color-picks{display:flex;gap:7px}
+  .color-picks i{width:22px;height:22px;border-radius:6px;cursor:pointer;display:block;position:relative}
+  .color-picks i.on::after{content:'✓';position:absolute;inset:0;display:grid;place-items:center;color:#fff;font-size:11px;font-weight:700}
+  .re-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+  .btn{height:32px;padding:0 15px;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;border:1px solid transparent;display:flex;align-items:center;gap:6px}
+  .btn.primary{background:var(--accent);color:#fff}
+  .btn.ghost{background:transparent;border-color:var(--border);color:var(--fg)}
+  .btn.ghost:hover{background:var(--raised)}
+  /* 底部 */
+  .ed-foot{padding:12px 24px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;font-size:11.5px;color:var(--dim)}
+  .ed-foot .r{display:flex;gap:8px}
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <div class="label">NeverWork · Agent 团队编辑器 — 可自定义角色 / 编排 / 模型 / 技能</div>
+  <div class="win">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div class="tb-title"><b>NeverWork</b> — Agent 团队</div>
+      <div class="tb-spacer"></div>
+      <div class="tb-title" style="color:var(--dim)">⌘K · 团队配置</div>
+    </div>
+
+    <div class="dialog">
+      <!-- 左：团队列表 -->
+      <aside class="team-list">
+        <div class="tl-head">Agent 团队<span class="new">＋ 新建</span></div>
+        <div class="tl-sub">一个团队 = 一组可协作的 Agent</div>
+        <div class="tgroup">
+          <div class="titem on"><div class="tlogo" style="background:linear-gradient(135deg,var(--purple),var(--accent))">◈</div><div class="tn">默认协作团队</div><span class="tc">3</span></div>
+          <div class="titem"><div class="tlogo" style="background:linear-gradient(135deg,var(--cyan),var(--accent))">⌁</div><div class="tn">前端专项</div><span class="tc">2</span></div>
+          <div class="titem"><div class="tlogo" style="background:linear-gradient(135deg,var(--orange),var(--pink))">♺</div><div class="tn">安全审计</div><span class="tc">4</span></div>
+          <div class="titem"><div class="tlogo" style="background:linear-gradient(135deg,#64748b,#475569)">◇</div><div class="tn">单人快改</div><span class="tc">1</span></div>
+        </div>
+      </aside>
+
+      <!-- 右：团队编辑 -->
+      <section class="editor">
+        <div class="ed-head">
+          <div class="tbig">◈</div>
+          <div class="meta">
+            <div class="nm">默认协作团队 <span class="edit">✎ 重命名</span></div>
+            <div class="ds">一次会话内多个 Agent 按顺序/并行协作，结果汇入同一对话。</div>
+          </div>
+          <div class="mode2">⇄ 编排：流水线 ▾</div>
+        </div>
+
+        <div class="ed-body">
+          <!-- 编排模式 -->
+          <div class="sec-t">编排模式</div>
+          <div class="flow-modes">
+            <div class="fm on">
+              <div class="fmi">→</div>
+              <div class="fmn">流水线</div>
+              <div class="fmd">按顺序转交：A→B→C</div>
+            </div>
+            <div class="fm">
+              <div class="fmi">⇉</div>
+              <div class="fmn">并行</div>
+              <div class="fmd">多个 Agent 同时跑</div>
+            </div>
+            <div class="fm">
+              <div class="fmi">◇</div>
+              <div class="fmn">主管指派</div>
+              <div class="fmd">由 lead Agent 动态分派</div>
+            </div>
+          </div>
+
+          <!-- 角色 -->
+          <div class="sec-t">角色<span class="hint">可自由增删、改名、选模型、挂技能，拖拽调整顺序</span></div>
+          <div class="roles">
+            <!-- 角色卡 1 -->
+            <div class="role-card">
+              <span class="drag">⠿</span>
+              <div class="rc-av" style="background:linear-gradient(135deg,var(--purple),#6366f1)">P</div>
+              <div class="rc-info">
+                <div class="rc-name">Planner <span class="rt">规划者</span></div>
+                <div class="rc-model"><span class="mi">◆</span>Claude Opus 4.1 <span style="color:var(--dim)">· 负责拆解任务</span></div>
+              </div>
+              <div class="rc-actions"><span>✎</span><span>⧉</span><span>✕</span></div>
+            </div>
+            <!-- 角色卡 2 -->
+            <div class="role-card">
+              <span class="drag">⠿</span>
+              <div class="rc-av" style="background:linear-gradient(135deg,var(--accent),var(--cyan))">C</div>
+              <div class="rc-info">
+                <div class="rc-name">Coder <span class="rt">编码</span></div>
+                <div class="rc-model"><span class="mi">◆</span>GPT-5 <span style="color:var(--dim)">· code agent</span></div>
+              </div>
+              <span class="rc-skill">skills: rust-dev</span>
+              <div class="rc-actions"><span>✎</span><span>⧉</span><span>✕</span></div>
+            </div>
+            <!-- 正在编辑的角色（展开态） -->
+            <div class="role-edit">
+              <div class="re-head">
+                <div class="av-pick">R</div>
+                <input value="Reviewer" />
+                <div class="rc-actions" style="margin-left:auto"><span>✓</span><span>✕</span></div>
+              </div>
+              <div class="grid2">
+                <div class="field">
+                  <label>角色类型</label>
+                  <div class="inp">审查者 <span class="v">▾</span></div>
+                </div>
+                <div class="field">
+                  <label>模型</label>
+                  <div class="inp">GPT-5-mini <span class="v">▾</span></div>
+                </div>
+              </div>
+              <div class="field">
+                <label>系统提示词 / 职责</label>
+                <textarea>你负责审查代码正确性、边界条件与性能问题。发现问题时标注具体行并回传给 Coder。</textarea>
+              </div>
+              <div class="field">
+                <label>身份色</label>
+                <div class="color-picks">
+                  <i class="on" style="background:var(--orange)"></i>
+                  <i style="background:var(--purple)"></i>
+                  <i style="background:var(--accent)"></i>
+                  <i style="background:var(--green)"></i>
+                  <i style="background:var(--pink)"></i>
+                  <i style="background:var(--cyan)"></i>
+                </div>
+              </div>
+              <div class="re-foot">
+                <button class="btn ghost">取消</button>
+                <button class="btn primary">保存角色</button>
+              </div>
+            </div>
+
+            <div class="role-card add">＋ 添加角色</div>
+          </div>
+        </div>
+
+        <div class="ed-foot">
+          <span>3 个角色 · 流水线：Planner → Coder → Reviewer</span>
+          <div class="r">
+            <button class="btn ghost">恢复默认</button>
+            <button class="btn primary">完成</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,20 @@
+[package]
+name = "neverwork"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "neverwork"
+
+[[bin]]
+name = "neverwork"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+neverwork-core = { path = "../core" }
+neverwork-ui = { path = "../ui" }
+neverwork-agent = { path = "../agent" }
+flume = "0.11"
+notify = "8"
+tracing.workspace = true
+tracing-subscriber.workspace = true
