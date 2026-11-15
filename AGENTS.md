@@ -17,7 +17,8 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 
 ## 红线
 
-- **`E:\AI\ide` 及其子目录都不是 git 仓库**（没有 `.git`）。改动没有版本可回退，不要假设可以 `git diff` / `stash` / `restore`，也不要把 git 报错当成项目故障；需要回退只能自己先备份。
+- **仓库根是 `E:\AI\ide`（2026-11-15 起纳入 git，远程 `gitee.com/ZLH1995123/neverwork`）**，`NeverWork/` 是其中的子目录，不是独立仓库。`NeverWork/target`（约 9.7G）已在根 `.gitignore` 中忽略，**不要用 `git add -f` 强行加入**，也不要 `git clean -xfd`（会删构建产物）。
+- 分支：`main` 为开发主线，`master` 是 Gitee 默认分支，两者保持同一提交；`develop/feature/release` 目前同样指向主线。
 - **`NeverWork/target` 约 9.4G**。增量构建只需几秒，但 `target/debug/deps` 被删过，首次全量要重编约 700 个 crate；不要执行 `cargo clean`，也不要把慢构建当故障。
 - 团队配置持久化在 `~/.neverwork/config.json`（临时文件+rename 原子写）。不要删除或手改用户配置，测试请用 `NW_CONFIG_DIR` 指向临时目录。
 - `design/`、`pic/` 是设计交付与运行截图，`message.md` 是历史交付汇报，都不要当作待改代码。
