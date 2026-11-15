@@ -33,6 +33,10 @@ pub enum KeyAction {
     Cut,
     Paste,
     Save,
+    /// Ctrl+F：打开查找。
+    Find,
+    /// Ctrl+H：打开查找并聚焦替换框。
+    Replace,
     /// 回车：对话里是发送，编辑器里是换行。
     Enter,
     /// Tab / Shift+Tab：编辑器里缩进/反缩进。
@@ -49,6 +53,8 @@ pub fn route(ks: &Keystroke) -> Option<KeyAction> {
     if ctrl {
         return match key {
             "s" => Some(KeyAction::Save),
+            "f" => Some(KeyAction::Find),
+            "h" => Some(KeyAction::Replace),
             "a" => Some(KeyAction::SelectAll),
             "z" => Some(if shift { KeyAction::Redo } else { KeyAction::Undo }),
             "y" => Some(KeyAction::Redo),
@@ -114,6 +120,8 @@ mod tests {
         assert_eq!(route(&ks("z", true, true)), Some(KeyAction::Redo));
         assert_eq!(route(&ks("y", true, false)), Some(KeyAction::Redo));
         assert_eq!(route(&ks("c", true, false)), Some(KeyAction::Copy));
+        assert_eq!(route(&ks("f", true, false)), Some(KeyAction::Find));
+        assert_eq!(route(&ks("h", true, false)), Some(KeyAction::Replace));
     }
 
     #[test]

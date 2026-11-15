@@ -81,17 +81,31 @@ impl AppState {
                 ),
         );
 
-        let mut thread = div().flex().flex_col().gap_4().px_6().py_5();
+        let mut thread = div().flex().flex_col().gap_3().px_6().py_5();
         let sidx = self.active_session;
-        for i in 0..session.messages.len() {
-            // 深拷贝这一条，避免同时借用 self 与 methods
+        let total = session.messages.len();
+        let mut i = 0usize;
+        while i < total {
+            // 连续的工具调用聚合成一行，展开才看细节（对齐参考稿的步骤条）
+            if matches!(session.messages[i].kind, MessageKind::ToolCall { .. }) {
+                let mut j = i + 1;
+                while j < total
+                    && matches!(session.messages[j].kind, MessageKind::ToolCall { .. })
+                {
+                    j += 1;
+                }
+                let pending_here = self
+                    .pending
+                    .as_ref()
+                    .map(|p| p.session_idx == sidx && p.msg_idx >= i && p.msg_idx < j)
+                    .unwrap_or(false);
+                thread = thread.child(self.tool_steps_group(i, j, pending_here, cx));
+                i = j;
+                continue;
+            }
             let m = session.messages[i].clone();
-            let pending_here = self
-                .pending
-                .as_ref()
-                .map(|p| p.session_idx == sidx && p.msg_idx == i)
-                .unwrap_or(false);
-            thread = thread.child(self.render_msg(&m, i, pending_here, cx));
+            thread = thread.child(self.render_msg(&m));
+            i += 1;
         }
         if self.streaming {
             thread = thread.child(
@@ -422,13 +436,7 @@ pub(crate) fn flow_step(initial: &str, idx: usize, label: &str, active: bool) ->
 
 impl AppState {
     /// 渲染一条会话消息。`pending_here` 为真时给写操作卡片加上允许/拒绝按钮。
-    pub(crate) fn render_msg(
-        &self,
-        m: &neverwork_core::Message,
-        idx: usize,
-        pending_here: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    pub(crate) fn render_msg(&self, m: &neverwork_core::Message) -> gpui::AnyElement {
         match &m.kind {
             MessageKind::User => user_bubble(&m.body).into_any_element(),
             MessageKind::Agent { participant } => agent_bubble(
@@ -442,7 +450,45 @@ impl AppState {
             MessageKind::Handoff { to, action, .. } => handoff(to, action).into_any_element(),
             MessageKind::Tool { summary, .. } => tool_result(summary).into_any_element(),
             MessageKind::Parallel { items } => parallel_row(items).into_any_element(),
-            MessageKind::ToolCall {
+            // 工具调用统一由 `tool_steps_group` 聚合渲染。
+            MessageKind::ToolCall { .. } => div().into_any_element(),
+        }
+    }
+
+    /// 一组连续的工具调用：折叠成一行，展开看每一步的细节。
+    ///
+    /// 折叠态形态（对齐参考稿）：
+    /// `▸ ● 读取了文件 readme.txt · 1 步`
+    /// 待审批的组永远自动展开，否则用户看不到按钮。
+    fn tool_steps_group(
+        &self,
+        start: usize,
+        end: usize,
+        pending_here: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use neverwork_core::ToolRunStatus;
+
+        let sidx = self.active_session;
+        let session = match self.sessions.get(sidx) {
+            Some(s) => s,
+            None => return div().into_any_element(),
+        };
+
+        struct Step {
+            idx: usize,
+            name: String,
+            summary: String,
+            status: ToolRunStatus,
+            output: String,
+            diff: Vec<neverwork_core::DiffLineView>,
+            added: u32,
+            removed: u32,
+        }
+
+        let mut steps: Vec<Step> = Vec::new();
+        for i in start..end.min(session.messages.len()) {
+            if let MessageKind::ToolCall {
                 name,
                 summary,
                 status,
@@ -450,95 +496,82 @@ impl AppState {
                 diff,
                 added,
                 removed,
-            } => self
-                .tool_call_card(
-                    name,
-                    summary,
-                    *status,
-                    output,
-                    diff,
-                    *added,
-                    *removed,
-                    idx,
-                    pending_here,
-                    cx,
-                )
-                .into_any_element(),
+                ..
+            } = &session.messages[i].kind
+            {
+                steps.push(Step {
+                    idx: i,
+                    name: name.clone(),
+                    summary: summary.clone(),
+                    status: *status,
+                    output: output.clone(),
+                    diff: diff.clone(),
+                    added: *added,
+                    removed: *removed,
+                });
+            }
         }
-    }
+        if steps.is_empty() {
+            return div().into_any_element();
+        }
 
-    /// 工具调用卡片：名字 + 参数摘要 + 状态；写操作展示 diff 与审批按钮。
-    #[allow(clippy::too_many_arguments)]
-    fn tool_call_card(
-        &self,
-        name: &str,
-        summary: &str,
-        status: neverwork_core::ToolRunStatus,
-        output: &str,
-        diff: &[neverwork_core::DiffLineView],
-        added: u32,
-        removed: u32,
-        idx: usize,
-        pending_here: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        use neverwork_core::ToolRunStatus;
+        let expanded = pending_here || self.expand_steps_all || self.expanded_steps.contains(&start);
 
-        let (icon, color) = match name {
-            "read_file" => ("◧", theme::cyan()),
-            "list_dir" => ("▤", theme::cyan()),
-            "search_files" => ("⌕", theme::cyan()),
-            "write_file" => ("✎", theme::orange()),
-            "apply_patch" => ("±", theme::orange()),
-            _ => ("⚒", theme::muted()),
-        };
-        let (status_text, status_color) = match status {
-            ToolRunStatus::Running => ("执行中…", theme::accent()),
-            ToolRunStatus::Awaiting => ("等待你确认", theme::yellow()),
-            ToolRunStatus::Ok => ("完成", theme::green()),
-            ToolRunStatus::Denied => ("已拒绝", theme::dim()),
-            ToolRunStatus::Failed => ("失败", theme::red()),
+        // ---- 折叠行标题 ----
+        let first = &steps[0];
+        let mut title = format!("{} {}", tool_verb(&first.name), first.summary);
+        if steps.len() > 1 {
+            title.push_str(&format!(" 等 {} 步", steps.len()));
+        } else {
+            title.push_str(" · 1 步");
+        }
+        let title = fit_text(&title, 520.0, 12.0);
+
+        let (dot, dot_color) = if pending_here
+            || steps.iter().any(|s| s.status == ToolRunStatus::Awaiting)
+        {
+            ("●", theme::yellow())
+        } else if steps.iter().any(|s| s.status == ToolRunStatus::Failed) {
+            ("●", theme::red())
+        } else if steps.iter().any(|s| s.status.is_pending()) {
+            ("◌", theme::accent())
+        } else if steps.iter().any(|s| s.status == ToolRunStatus::Denied) {
+            ("●", theme::dim())
+        } else {
+            ("●", theme::green())
         };
 
-        let mut card = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .rounded_lg()
-            .border_1()
-            .border_color(if pending_here {
-                theme::with_alpha(0xf59e0b, 0.55)
-            } else {
-                theme::border()
-            })
-            .bg(theme::panel());
+        let total_added: u32 = steps.iter().map(|s| s.added).sum();
+        let total_removed: u32 = steps.iter().map(|s| s.removed).sum();
 
-        // 头部：图标 + 工具名 + 摘要 + 状态
         let mut head = div()
+            .id(SharedString::from(format!("steps-{start}")))
             .flex()
             .items_center()
             .gap_2()
+            .h(px(28.0))
+            .px_2()
+            .rounded_md()
+            .bg(theme::with_alpha(0xffffff, 0.04))
+            .cursor_pointer()
+            .hover(|d| d.bg(theme::with_alpha(0xffffff, 0.07)))
+            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                this.toggle_steps(start, cx);
+            }))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(20.0))
+                    .w(px(10.0))
                     .flex_shrink_0()
-                    .rounded_sm()
-                    .bg(theme::with_alpha(0xffffff, 0.06))
                     .text_xs()
-                    .text_color(color)
-                    .child(SharedString::from(icon)),
+                    .text_color(theme::dim())
+                    .child(if expanded { "▾" } else { "▸" }),
             )
             .child(
                 div()
                     .flex_shrink_0()
                     .text_xs()
-                    .text_color(theme::fg())
-                    .child(SharedString::from(name.to_string())),
+                    .text_color(dot_color)
+                    .child(dot),
             )
             .child(
                 div()
@@ -548,157 +581,279 @@ impl AppState {
                     .whitespace_nowrap()
                     .text_xs()
                     .text_color(theme::muted())
-                    .child(SharedString::from(fit_text(summary, 420.0, 12.0))),
+                    .child(SharedString::from(title)),
             );
 
-        if added > 0 || removed > 0 {
+        if total_added > 0 || total_removed > 0 {
             head = head
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme::green())
-                        .child(SharedString::from(format!("+{added}"))),
+                        .child(SharedString::from(format!("+{total_added}"))),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme::red())
-                        .child(SharedString::from(format!("−{removed}"))),
+                        .child(SharedString::from(format!("−{total_removed}"))),
                 );
         }
 
-        head = head.child(
-            div()
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(status_color)
-                .child(SharedString::from(status_text)),
-        );
-
-        card = card.child(head);
-
-        // diff
-        if !diff.is_empty() {
-            let mut boxel = div()
-                .id(SharedString::from(format!("diff-{idx}")))
-                .flex()
-                .flex_col()
-                .max_h(px(220.0))
-                .overflow_scroll()
-                .rounded_md()
-                .bg(theme::bg())
-                .p_2();
-
-            for line in diff.iter() {
-                let (fg, bg) = match line.marker.as_str() {
-                    "+" => (theme::green(), theme::with_alpha(0x22c55e, 0.10)),
-                    "-" => (theme::red(), theme::with_alpha(0xef4444, 0.10)),
-                    _ => (theme::dim(), theme::with_alpha(0x000000, 0.0)),
-                };
-                boxel = boxel.child(
-                    div()
-                        .flex()
-                        .gap_1()
-                        .px_1()
-                        .rounded_sm()
-                        .bg(bg)
-                        .text_xs()
-                        .child(
-                            div()
-                                .w(px(10.0))
-                                .flex_shrink_0()
-                                .text_color(fg)
-                                .child(SharedString::from(line.marker.clone())),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_color(if line.marker == " " { theme::muted() } else { fg })
-                                .child(SharedString::from(line.text.clone())),
-                        ),
-                );
-            }
-            card = card.child(boxel);
-        }
-
-        // 输出（失败信息或读文件结果摘要）
-        if !output.is_empty() && diff.is_empty() {
-            let first: String = output
-                .lines()
-                .take(4)
-                .collect::<Vec<_>>()
-                .join("
-");
-            card = card.child(
+        if pending_here {
+            head = head.child(
                 div()
-                    .max_h(px(80.0))
-                    .overflow_hidden()
-                    .rounded_md()
-                    .bg(theme::bg())
-                    .p_2()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(theme::with_alpha(0xf59e0b, 0.18))
                     .text_xs()
-                    .text_color(if status == ToolRunStatus::Failed {
-                        theme::red()
-                    } else {
-                        theme::muted()
-                    })
-                    .child(SharedString::from(first)),
+                    .text_color(theme::yellow())
+                    .child("待确认"),
             );
         }
 
-        // 审批按钮
-        if pending_here && status == ToolRunStatus::Awaiting {
-            card = card.child(
+        let mut wrap = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_md()
+            .when(pending_here, |d| {
+                d.p_2()
+                    .border_1()
+                    .border_color(theme::with_alpha(0xf59e0b, 0.5))
+            })
+            .child(head);
+
+        if !expanded {
+            return wrap.into_any_element();
+        }
+
+        // ---- 展开态：每一步一行，写操作带 diff 与审批按钮 ----
+        let mut body = div().flex().flex_col().gap_2().pl(px(14.0));
+
+        for step in &steps {
+            let (icon, color) = tool_icon(&step.name);
+            let (status_text, status_color) = match step.status {
+                ToolRunStatus::Running => ("执行中…", theme::accent()),
+                ToolRunStatus::Awaiting => ("等待你确认", theme::yellow()),
+                ToolRunStatus::Ok => ("完成", theme::green()),
+                ToolRunStatus::Denied => ("已拒绝", theme::dim()),
+                ToolRunStatus::Failed => ("失败", theme::red()),
+            };
+
+            let mut row = div().flex().flex_col().gap_1().child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(18.0))
+                            .flex_shrink_0()
+                            .rounded_sm()
+                            .bg(theme::with_alpha(0xffffff, 0.06))
                             .text_xs()
-                            .text_color(theme::yellow())
-                            .child("这个操作会改文件，确认后才会写入："),
+                            .text_color(color)
+                            .child(SharedString::from(icon)),
                     )
-                    .child(div().flex_1())
                     .child(
                         div()
-                            .id(SharedString::from(format!("deny-{idx}")))
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .bg(theme::raised())
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(theme::fg())
+                            .child(SharedString::from(step.name.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
                             .text_xs()
                             .text_color(theme::muted())
-                            .cursor_pointer()
-                            .hover(|d| d.bg(theme::border()))
-                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
-                                this.answer_approval(false, cx);
-                            }))
-                            .child("拒绝"),
+                            .child(SharedString::from(fit_text(&step.summary, 380.0, 12.0))),
+                    )
+                    .when(step.added > 0 || step.removed > 0, |d| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::green())
+                                .child(SharedString::from(format!("+{}", step.added))),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::red())
+                                .child(SharedString::from(format!("−{}", step.removed))),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(status_color)
+                            .child(SharedString::from(status_text)),
+                    ),
+            );
+
+            if !step.diff.is_empty() {
+                row = row.child(self.diff_box(step.idx, &step.diff));
+            } else if !step.output.is_empty() {
+                let first3: String = step.output.lines().take(3).collect::<Vec<_>>().join("\n");
+                row = row.child(
+                    div()
+                        .max_h(px(64.0))
+                        .overflow_hidden()
+                        .rounded_md()
+                        .bg(theme::bg())
+                        .p_2()
+                        .text_xs()
+                        .text_color(if step.status == ToolRunStatus::Failed {
+                            theme::red()
+                        } else {
+                            theme::dim()
+                        })
+                        .child(SharedString::from(first3)),
+                );
+            }
+
+            let is_pending_step = self
+                .pending
+                .as_ref()
+                .map(|p| p.session_idx == sidx && p.msg_idx == step.idx)
+                .unwrap_or(false);
+            if is_pending_step && step.status == ToolRunStatus::Awaiting {
+                row = row.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::yellow())
+                                .child("这个操作会改文件，确认后才会写入："),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("deny-{}", step.idx)))
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(theme::raised())
+                                .text_xs()
+                                .text_color(theme::muted())
+                                .cursor_pointer()
+                                .hover(|d| d.bg(theme::border()))
+                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                    this.answer_approval(false, cx);
+                                }))
+                                .child("拒绝"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("allow-{}", step.idx)))
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(theme::green())
+                                .text_xs()
+                                .text_color(gpui::rgb(0xffffff))
+                                .cursor_pointer()
+                                .hover(|d| d.opacity(0.88))
+                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                    this.answer_approval(true, cx);
+                                }))
+                                .child("允许并写入"),
+                        ),
+                );
+            }
+
+            body = body.child(row);
+        }
+
+        wrap = wrap.child(body);
+        wrap.into_any_element()
+    }
+
+    /// diff 展示块（`+` 绿 / `-` 红 / 上下文灰）。
+    fn diff_box(&self, key: usize, diff: &[neverwork_core::DiffLineView]) -> impl IntoElement {
+        let mut boxel = div()
+            .id(SharedString::from(format!("diff-{key}")))
+            .flex()
+            .flex_col()
+            .max_h(px(200.0))
+            .overflow_scroll()
+            .rounded_md()
+            .bg(theme::bg())
+            .p_2();
+
+        for line in diff.iter() {
+            let (fg, bg) = match line.marker.as_str() {
+                "+" => (theme::green(), theme::with_alpha(0x22c55e, 0.10)),
+                "-" => (theme::red(), theme::with_alpha(0xef4444, 0.10)),
+                _ => (theme::dim(), theme::with_alpha(0x000000, 0.0)),
+            };
+            boxel = boxel.child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .px_1()
+                    .rounded_sm()
+                    .bg(bg)
+                    .text_xs()
+                    .child(
+                        div()
+                            .w(px(10.0))
+                            .flex_shrink_0()
+                            .text_color(fg)
+                            .child(SharedString::from(line.marker.clone())),
                     )
                     .child(
                         div()
-                            .id(SharedString::from(format!("allow-{idx}")))
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .bg(theme::green())
-                            .text_xs()
-                            .text_color(gpui::rgb(0xffffff))
-                            .cursor_pointer()
-                            .hover(|d| d.opacity(0.88))
-                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
-                                this.answer_approval(true, cx);
-                            }))
-                            .child("允许并写入"),
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_color(if line.marker == " " {
+                                theme::muted()
+                            } else {
+                                fg
+                            })
+                            .child(SharedString::from(line.text.clone())),
                     ),
             );
         }
+        boxel
+    }
+}
 
-        card
+/// 工具图标与配色。
+fn tool_icon(name: &str) -> (&'static str, gpui::Rgba) {
+    match name {
+        "read_file" => ("◧", theme::cyan()),
+        "list_dir" => ("▤", theme::cyan()),
+        "search_files" => ("⌕", theme::cyan()),
+        "write_file" => ("✎", theme::orange()),
+        "apply_patch" => ("±", theme::orange()),
+        _ => ("⚒", theme::muted()),
+    }
+}
+
+/// 折叠行里的动作词。
+fn tool_verb(name: &str) -> &'static str {
+    match name {
+        "read_file" => "读取了文件",
+        "list_dir" => "浏览了目录",
+        "search_files" => "搜索了",
+        "write_file" => "写入了文件",
+        "apply_patch" => "修改了文件",
+        _ => "执行了",
     }
 }
 

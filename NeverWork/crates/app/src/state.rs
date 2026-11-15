@@ -109,6 +109,10 @@ pub enum FormField {
     ImportPath,
     /// 模型选择器里的搜索框。
     ModelSearch,
+    /// 编辑器查找框。
+    FindQuery,
+    /// 编辑器替换框。
+    FindReplace,
 }
 
 impl FormField {
@@ -228,6 +232,17 @@ pub struct AppState {
     pub pending: Option<PendingApproval>,
     /// 自动批准写操作（仅供自动化验证，`NW_AUTO_APPROVE=1` 开启）。
     pub auto_approve: bool,
+    /// 展开的工具步骤组（键 = 该组第一条消息的下标）。
+    pub expanded_steps: std::collections::HashSet<usize>,
+    /// 右侧栏是否收起。
+    pub right_collapsed: bool,
+    /// 新出现的工具步骤组默认展开（仅 `NW_EXPAND_STEPS=1` 时打开）。
+    pub expand_steps_all: bool,
+    /// 编辑器查找 / 替换状态。
+    pub find: crate::find::FindState,
+    /// 查找 / 替换输入框的缓冲区。
+    pub find_query_buf: TextBuffer,
+    pub find_replace_buf: TextBuffer,
     /// 最近一次操作的结果提示（设置页内显示）。
     pub action_msg: Option<String>,
     /// 升级检查结果。
@@ -372,6 +387,12 @@ impl AppState {
             tools_enabled: true,
             pending: None,
             auto_approve: false,
+            expanded_steps: std::collections::HashSet::new(),
+            right_collapsed: false,
+            expand_steps_all: false,
+            find: crate::find::FindState::default(),
+            find_query_buf: TextBuffer::single_line(),
+            find_replace_buf: TextBuffer::single_line(),
             action_msg: None,
             update_status: None,
             layout_w: std::rc::Rc::new(std::cell::Cell::new(1200.0)),
@@ -409,6 +430,26 @@ impl AppState {
                     me.model_picker = Some(i);
                     me.active_field = Some(FormField::ModelSearch);
                 }
+            }
+        }
+        // 验证用：展开所有工具步骤组 / 收起右栏 / 预置查找词，
+        // 便于在无法点击的环境（高 DPI 远程桌面）下截图核对界面。
+        if std::env::var("NW_EXPAND_STEPS").map(|v| v == "1").unwrap_or(false) {
+            for (i, m) in me.sessions[me.active_session].messages.iter().enumerate() {
+                if matches!(m.kind, MessageKind::ToolCall { .. }) {
+                    me.expanded_steps.insert(i);
+                }
+            }
+            me.expand_steps_all = true;
+        }
+        if std::env::var("NW_RIGHT_COLLAPSED").map(|v| v == "1").unwrap_or(false) {
+            me.right_collapsed = true;
+        }
+        // 验证用：打开编辑器并预置查找词。
+        if let Ok(q) = std::env::var("NW_FIND") {
+            if me.open_path.is_some() {
+                me.open_find(cx);
+                me.set_find_query(q, cx);
             }
         }
         // 自动化验证用：`NW_AUTO_APPROVE=1` 时自动批准写操作（仅供本机验证，正常使用别开）。
@@ -795,6 +836,12 @@ impl AppState {
                         }
                     }
                     KeyAction::Save => self.save_file(cx),
+            KeyAction::Find => self.open_find(cx),
+            KeyAction::Replace => {
+                self.open_find(cx);
+                self.find.replace_focused = true;
+                cx.notify();
+            }
                     _ => {}
                 }
                 // 实时同步到模型，让输入框内容立刻可见。
@@ -908,6 +955,12 @@ impl AppState {
                 }
             }
             KeyAction::Save => self.save_file(cx),
+            KeyAction::Find => self.open_find(cx),
+            KeyAction::Replace => {
+                self.open_find(cx);
+                self.find.replace_focused = true;
+                cx.notify();
+            }
             KeyAction::Enter => match target {
                 InputTarget::Chat => self.send_message(cx),
                 InputTarget::Editor => {
@@ -1007,91 +1060,116 @@ impl AppState {
         self.chat_scroll_dirty.set(true);
         cx.notify();
 
-        // 开启工具 → 由团队的第一个角色带着工具干活（一次一个 Agent，改动才能被逐个批准）；
-        // 关闭工具 → 多角色团队按原编排轮流发言。
+        // 开启工具 → 团队成员**串行**带工具干活：前一个角色的产出作为后一个的上下文，
+        //   写操作逐个弹审批（并发写同一文件只会互相覆盖，所以不做并行）。
+        // 关闭工具 → 多角色团队按原编排轮流发言（无工具、纯文本）。
         if self.tools_enabled {
-            // 用团队第一个角色的人格（提示词），但**模型与厂商一律以设置里的当前选择为准**。
-            // 不能用 role.model 反推厂商：团队里那些名字（Claude Opus / GPT-5）只是展示用的
-            // 标签，按名字切厂商会把 DeepSeek 的 Key 发到 Anthropic 去。
-            let role = team
-                .roles
-                .first()
-                .cloned()
-                .unwrap_or_else(|| neverwork_core::Role::new("agent", "Assistant", "A"));
-            self.spawn_agent(session_idx, text, role, provider_id, config, cx);
+            let mut roles = team.roles.clone();
+            if roles.is_empty() {
+                roles.push(neverwork_core::Role::new("agent", "Assistant", "A"));
+            }
+            // 模型与厂商一律以设置里的当前选择为准：role.model 只是展示标签。
+            self.spawn_agents_chain(session_idx, text, roles, provider_id, config, cx);
         } else {
             self.spawn_team(session_idx, text, team, provider_id, config, cx);
         }
     }
 
-    /// 带工具的 Agent：跑在后台线程，事件经 flume 回到 UI 线程。
-    fn spawn_agent(
+    /// 带工具的 Agent 链：按角色顺序串行执行，事件经 flume 回到 UI 线程。
+    ///
+    /// 每个角色一次完整的「模型 → 工具 → 回填」循环；某个角色的产出会作为下一个角色的
+    /// 上下文，这样流水线（规划 → 编码 → 审查）在带工具时依然成立。
+    fn spawn_agents_chain(
         &mut self,
         session_idx: usize,
         text: String,
-        role: neverwork_core::Role,
+        roles: Vec<neverwork_core::Role>,
         provider: String,
         config: neverwork_agent::ProviderConfig,
         cx: &mut Context<Self>,
     ) {
         let cancel = self.cancel.clone();
         let root = self.root.clone();
-        let (tx, rx) = flume::unbounded::<neverwork_agent::AgentEvent>();
+        // 线程里用一份，UI 侧留一份（角色名/颜色要用来渲染气泡）
+        let roles_for_ui = roles.clone();
+        // (角色下标, 事件)
+        let (tx, rx) = flume::unbounded::<(usize, neverwork_agent::AgentEvent)>();
 
         std::thread::spawn(move || {
-            let mut emit = |ev: neverwork_agent::AgentEvent| {
-                let _ = tx.send(ev);
-            };
-            neverwork_agent::run_agent(
-                &provider,
-                config,
-                &role.prompt,
-                Vec::new(),
-                &text,
-                root,
-                &mut emit,
-                cancel,
-            );
+            // 跨角色累积的对话上下文
+            let mut history: Vec<neverwork_agent::ChatMessage> = Vec::new();
+            for (ri, role) in roles.iter().enumerate() {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let mut collected = String::new();
+                {
+                    let mut emit = |ev: neverwork_agent::AgentEvent| {
+                        if let neverwork_agent::AgentEvent::TextDelta(d) = &ev {
+                            collected.push_str(d);
+                        }
+                        let _ = tx.send((ri, ev));
+                    };
+                    neverwork_agent::run_agent(
+                        &provider,
+                        config.clone(),
+                        &role.prompt,
+                        history.clone(),
+                        &text,
+                        root.clone(),
+                        &mut emit,
+                        cancel.clone(),
+                    );
+                }
+                if !collected.trim().is_empty() {
+                    // 下一个角色能看到前面角色说了什么
+                    history.push(neverwork_agent::ChatMessage::assistant(format!(
+                        "[{}] {}",
+                        role.name, collected
+                    )));
+                }
+            }
         });
 
-        let participant = neverwork_core::Participant {
-            role_id: role.id.clone(),
-            role_name: role.name.clone(),
-            color_index: role.color_index,
-            initial: role.initial.clone(),
-        };
-
         cx.spawn(async move |weak, async_cx| {
-            // 当前正在追加文本的 Agent 消息下标（第一条文本增量时创建）。
-            let mut agent_msg: Option<usize> = None;
-            // 当前正在进行的工具卡片下标。
-            let mut tool_msg: Option<usize> = None;
+            // 每个角色当前正在追加文本的 Agent 消息下标
+            let mut agent_msg: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::new();
+            // 每个角色当前正在进行的工具卡片下标
+            let mut tool_msg: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::new();
 
             loop {
                 let ev = rx.recv_async().await;
-                let Ok(ev) = ev else { break };
+                let Ok((ri, ev)) = ev else { break };
 
                 match ev {
                     neverwork_agent::AgentEvent::TextDelta(d) => {
-                        let p = participant.clone();
-                        let _ = weak.update(async_cx, |this, cx| {
-                            if agent_msg.is_none() {
-                                let idx = this.sessions[session_idx].messages.len();
-                                this.sessions[session_idx].messages.push(Message {
-                                    kind: MessageKind::Agent {
-                                        participant: p.clone(),
-                                    },
-                                    body: String::new(),
-                                    code: None,
-                                });
-                                agent_msg = Some(idx);
+                        let participant = roles_for_ui.get(ri).map(|r| {
+                            neverwork_core::Participant {
+                                role_id: r.id.clone(),
+                                role_name: r.name.clone(),
+                                color_index: r.color_index,
+                                initial: r.initial.clone(),
                             }
-                            if let Some(idx) = agent_msg {
-                                if let Some(m) =
-                                    this.sessions[session_idx].messages.get_mut(idx)
-                                {
-                                    m.body.push_str(&d);
+                        });
+                        let _ = weak.update(async_cx, |this, cx| {
+                            let Some(p) = participant else { return };
+                            let idx = match agent_msg.get(&ri).copied() {
+                                Some(i) => i,
+                                None => {
+                                    let i = this.sessions[session_idx].messages.len();
+                                    this.sessions[session_idx].messages.push(Message {
+                                        kind: MessageKind::Agent { participant: p },
+                                        body: String::new(),
+                                        code: None,
+                                    });
+                                    agent_msg.insert(ri, i);
+                                    i
                                 }
+                            };
+                            if let Some(m) = this.sessions[session_idx].messages.get_mut(idx) {
+                                m.body.push_str(&d);
                             }
                             this.chat_scroll_dirty.set(true);
                             cx.notify();
@@ -1107,6 +1185,7 @@ impl AppState {
                             this.sessions[session_idx].messages.push(Message {
                                 kind: MessageKind::ToolCall {
                                     name: call.name.clone(),
+                                    path: call.path_arg(),
                                     summary: call.summary(),
                                     status: if requires_approval {
                                         ToolRunStatus::Awaiting
@@ -1127,25 +1206,26 @@ impl AppState {
                                 body: String::new(),
                                 code: None,
                             });
-                            tool_msg = Some(idx);
+                            tool_msg.insert(ri, idx);
                             this.chat_scroll_dirty.set(true);
                             cx.notify();
                         });
                     }
                     neverwork_agent::AgentEvent::NeedApproval {
                         call,
-                        preview: _,
                         respond,
+                        ..
                     } => {
                         let tool = call.name.clone();
                         let summary = call.summary();
+                        let tmsg = tool_msg.get(&ri).copied();
                         let _ = weak.update(async_cx, |this, cx| {
                             if this.auto_approve {
                                 let _ = respond.send(true);
                             } else {
                                 this.pending = Some(crate::state::PendingApproval {
                                     session_idx,
-                                    msg_idx: tool_msg.unwrap_or(usize::MAX),
+                                    msg_idx: tmsg.unwrap_or(usize::MAX),
                                     tool,
                                     summary,
                                     respond,
@@ -1156,8 +1236,9 @@ impl AppState {
                         });
                     }
                     neverwork_agent::AgentEvent::ToolFinished { result } => {
+                        let tmsg = tool_msg.get(&ri).copied();
                         let _ = weak.update(async_cx, |this, cx| {
-                            if let Some(idx) = tool_msg {
+                            if let Some(idx) = tmsg {
                                 if let Some(m) = this.sessions[session_idx].messages.get_mut(idx) {
                                     if let MessageKind::ToolCall {
                                         status,
@@ -1165,7 +1246,6 @@ impl AppState {
                                         diff,
                                         added,
                                         removed,
-                                        summary,
                                         ..
                                     } = &mut m.kind
                                     {
@@ -1187,20 +1267,19 @@ impl AppState {
                                                 })
                                                 .collect();
                                         }
-                                        let _ = summary;
                                     }
                                 }
                             }
                             this.pending = None;
-                            // 文件可能被改了，刷新文件树与最近改动。
                             this.refresh_tree(cx);
                             this.chat_scroll_dirty.set(true);
                             cx.notify();
                         });
                     }
                     neverwork_agent::AgentEvent::Denied { .. } => {
+                        let tmsg = tool_msg.get(&ri).copied();
                         let _ = weak.update(async_cx, |this, cx| {
-                            if let Some(idx) = tool_msg {
+                            if let Some(idx) = tmsg {
                                 if let Some(m) = this.sessions[session_idx].messages.get_mut(idx) {
                                     if let MessageKind::ToolCall { status, .. } = &mut m.kind {
                                         *status = ToolRunStatus::Denied;
@@ -1214,7 +1293,7 @@ impl AppState {
                     neverwork_agent::AgentEvent::RoundLimit => {
                         let _ = weak.update(async_cx, |this, cx| {
                             this.notice =
-                                Some("已达到单轮工具调用上限（8 轮），先停下来等你的指示".into());
+                                Some("某个角色已达到单轮工具调用上限（8 轮），已停下".into());
                             cx.notify();
                         });
                     }
@@ -1224,7 +1303,7 @@ impl AppState {
                             cx.notify();
                         });
                     }
-                    neverwork_agent::AgentEvent::Done => break,
+                    neverwork_agent::AgentEvent::Done => {}
                 }
             }
 
@@ -1318,6 +1397,192 @@ impl AppState {
         .detach();
     }
 
+    /// 本次会话里 Agent 改动过的文件汇总（按路径合并）。
+    pub(crate) fn session_changes(&self) -> Vec<neverwork_core::FileChange> {
+        match self.sessions.get(self.active_session) {
+            Some(session) => neverwork_core::aggregate_changes(&session.messages),
+            None => Vec::new(),
+        }
+    }
+
+    /// 展开 / 收起一个工具步骤组。
+    pub(crate) fn toggle_steps(&mut self, key: usize, cx: &mut Context<Self>) {
+        if !self.expanded_steps.remove(&key) {
+            self.expanded_steps.insert(key);
+        }
+        cx.notify();
+    }
+
+    // ===== 查找 / 替换 =====
+
+    /// 打开查找栏（Ctrl+F 或按钮）。带上当前选区作为初始查找词。
+    pub(crate) fn open_find(&mut self, cx: &mut Context<Self>) {
+        self.find.open = true;
+        self.find.replace_focused = false;
+        self.active_field = None;
+        self.input_target = InputTarget::Field(FormField::FindQuery);
+        if let Some(sel) = self.editor.selected_text() {
+            if !sel.contains('\n') && sel.chars().count() <= 80 {
+                self.find.query = sel.to_string();
+            }
+        }
+        self.find.refresh(self.editor.text());
+        self.focus_current_match();
+        self.find_query_buf.reset(self.find.query.clone());
+        self.find_replace_buf.reset(self.find.replace.clone());
+        cx.notify();
+    }
+
+    /// 点进查找框 / 替换框。
+    pub(crate) fn begin_find_field(&mut self, field: FormField, cx: &mut Context<Self>) {
+        self.active_field = Some(field);
+        self.input_target = InputTarget::Field(field);
+        self.marked_range = None;
+        match field {
+            FormField::FindQuery => {
+                self.find_query_buf.reset(self.find.query.clone());
+                self.find_query_buf.move_doc_end(false);
+            }
+            FormField::FindReplace => {
+                self.find.replace_focused = true;
+                self.find_replace_buf.reset(self.find.replace.clone());
+                self.find_replace_buf.move_doc_end(false);
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// 查找框 / 替换框的键盘处理。
+    pub(crate) fn on_find_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = ev.keystroke.key.as_str();
+        let shift = ev.keystroke.modifiers.shift;
+        match key {
+            "escape" => {
+                self.close_find(cx);
+                return;
+            }
+            "enter" => {
+                if shift {
+                    self.find_prev(cx);
+                } else {
+                    self.find_next(cx);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        let Some(field) = self.active_field else { return };
+        let Some(action) = keymap::route(&ev.keystroke) else {
+            // 可打印字符由 IME 写入 field_buf，写完后同步到 find 状态
+            return;
+        };
+        let buf = match field {
+            FormField::FindQuery => &mut self.find_query_buf,
+            FormField::FindReplace => &mut self.find_replace_buf,
+            _ => return,
+        };
+        match action {
+            KeyAction::Motion { motion, extend } => match motion {
+                Motion::Left => buf.move_left(extend),
+                Motion::Right => buf.move_right(extend),
+                Motion::Home | Motion::DocStart => buf.move_home(extend),
+                Motion::End | Motion::DocEnd => buf.move_end(extend),
+                _ => {}
+            },
+            KeyAction::Backspace => buf.backspace(),
+            KeyAction::Delete => buf.delete_forward(),
+            KeyAction::SelectAll => buf.select_all(),
+            KeyAction::Undo => {
+                buf.undo();
+            }
+            KeyAction::Paste => {
+                if let Some(t) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                    buf.insert(&t);
+                }
+            }
+            _ => {}
+        }
+        self.sync_find_bufs(field, cx);
+    }
+
+    /// 把输入框内容同步到查找状态。
+    pub(crate) fn sync_find_bufs(&mut self, field: FormField, cx: &mut Context<Self>) {
+        match field {
+            FormField::FindQuery => {
+                let q = self.find_query_buf.text().to_string();
+                self.set_find_query(q, cx);
+            }
+            FormField::FindReplace => {
+                self.find.replace = self.find_replace_buf.text().to_string();
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn close_find(&mut self, cx: &mut Context<Self>) {
+        self.find.open = false;
+        self.find.matches.clear();
+        cx.notify();
+    }
+
+    /// 跳到下一个 / 上一个命中，并把选区落上去。
+    pub(crate) fn find_next(&mut self, cx: &mut Context<Self>) {
+        self.find.next();
+        self.focus_current_match();
+        cx.notify();
+    }
+
+    pub(crate) fn find_prev(&mut self, cx: &mut Context<Self>) {
+        self.find.prev();
+        self.focus_current_match();
+        cx.notify();
+    }
+
+    fn focus_current_match(&mut self) {
+        if let Some(r) = self.find.current_range() {
+            crate::find::select_match(&mut self.editor, &r);
+            self.scroll_editor_to_cursor();
+        }
+    }
+
+    /// 查找词变化后重算命中。
+    pub(crate) fn set_find_query(&mut self, q: String, cx: &mut Context<Self>) {
+        self.find.query = q;
+        self.find.refresh(self.editor.text());
+        self.focus_current_match();
+        cx.notify();
+    }
+
+    pub(crate) fn replace_current_match(&mut self, cx: &mut Context<Self>) {
+        if crate::find::replace_current(&mut self.editor, &mut self.find) {
+            self.dirty = true;
+            self.schedule_auto_save();
+            self.focus_current_match();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn replace_all_matches(&mut self, cx: &mut Context<Self>) {
+        let n = crate::find::replace_all(&mut self.editor, &mut self.find);
+        if n > 0 {
+            self.dirty = true;
+            self.schedule_auto_save();
+            self.notice = Some(format!("已替换 {n} 处"));
+        } else {
+            self.notice = Some("没有可替换的匹配".into());
+        }
+        cx.notify();
+    }
+
+    /// 收起 / 展开右侧栏。
+    pub(crate) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
+        self.right_collapsed = !self.right_collapsed;
+        cx.notify();
+    }
+
     /// 用户对写操作的决定。
     pub(crate) fn answer_approval(&mut self, allow: bool, cx: &mut Context<Self>) {
         if let Some(p) = self.pending.take() {
@@ -1362,6 +1627,16 @@ impl Render for AppState {
         let full_page = matches!(self.center, CenterView::Settings | CenterView::Skills);
         let hide_right = visible_w < 1080.0 || full_page;
         let hide_list = visible_w < 620.0 || full_page;
+        if std::env::var("NW_LAYOUT_DEBUG").is_ok() {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                tracing::info!(
+                    "layout: w={visible_w:.0} scale={:.1} center={:?} hide_sides={hide_sides} hide_right={hide_right} hide_list={hide_list}",
+                    window.scale_factor(),
+                    self.center
+                );
+            });
+        }
         let mut root = div()
             .relative()
             .size_full()

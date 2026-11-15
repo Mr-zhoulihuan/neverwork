@@ -14,6 +14,41 @@ use crate::state::{AppState, RightTab};
 
 impl AppState {
     pub(crate) fn right_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 收起态：只留一条窄边，点一下重新展开。
+        // 这样在窄窗口里也能腾出宽度给中栏，而不是只能靠「专注模式」全收起。
+        if self.right_collapsed {
+            return div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .w(px(16.0))
+                .flex_shrink_0()
+                .h_full()
+                .pt_2()
+                .bg(theme::panel())
+                .border_l_1()
+                .border_color(theme::border())
+                .child(
+                    div()
+                        .id("expand-right")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(14.0))
+                        .h(px(44.0))
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                            this.toggle_right_panel(cx);
+                        }))
+                        .child("◀"),
+                )
+                .into_any_element();
+        }
+
         let mut col = div()
             .flex()
             .flex_col()
@@ -36,7 +71,25 @@ impl AppState {
                 .border_color(theme::border())
                 .child(self.tab_button("文件", RightTab::Files, cx))
                 .child(self.tab_button("改动", RightTab::Changes, cx))
-                .child(self.tab_button("预览", RightTab::Preview, cx)),
+                .child(self.tab_button("预览", RightTab::Preview, cx))
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .id("collapse-right")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(22.0))
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(theme::dim())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                            this.toggle_right_panel(cx);
+                        }))
+                        .child("▶"),
+                ),
         );
 
         col = col.child(match self.right_tab {
@@ -61,7 +114,7 @@ impl AppState {
                 .child(SharedString::from(format!("{} 项", self.files.len()))),
         );
 
-        col
+        col.into_any_element()
     }
 
     fn tab_button(
@@ -257,6 +310,127 @@ impl AppState {
             .p_2()
             .flex_1()
             .overflow_scroll();
+
+        // ===== Agent 在本次会话里的改动（补丁清单） =====
+        let changes = self.session_changes();
+        if !changes.is_empty() {
+            let total_add: u32 = changes.iter().map(|c| c.added).sum();
+            let total_del: u32 = changes.iter().map(|c| c.removed).sum();
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_1()
+                    .pb_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::fg())
+                            .child(SharedString::from(format!(
+                                "Agent 改动 · {} 个文件",
+                                changes.len()
+                            ))),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::green())
+                            .child(SharedString::from(format!("+{total_add}"))),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::red())
+                            .child(SharedString::from(format!("−{total_del}"))),
+                    ),
+            );
+
+            for c in &changes {
+                let abs = self.root.join(&c.path);
+                let is_open = self.open_path.as_deref() == Some(abs.as_path());
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("chg-agent-{}", c.path)))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .h(px(26.0))
+                        .px_2()
+                        .rounded_sm()
+                        .text_sm()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::raised()))
+                        .when(is_open, |d| d.bg(theme::raised()).text_color(theme::fg()))
+                        .when(!is_open, |d| d.text_color(theme::muted()))
+                        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                            if abs.is_file() {
+                                this.open_file(abs.clone(), cx);
+                            } else {
+                                this.notice =
+                                    Some(format!("文件不存在：{}", abs.display()));
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(if c.denied { theme::dim() } else { theme::orange() })
+                                .child(if c.denied { "⊘" } else { "±" }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(SharedString::from(crate::views::text_fit::fit_text(
+                                    &c.path, 150.0, 12.0,
+                                ))),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(if c.denied { theme::dim() } else { theme::green() })
+                                .child(SharedString::from(format!("+{}", c.added))),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(if c.denied { theme::dim() } else { theme::red() })
+                                .child(SharedString::from(format!("−{}", c.removed))),
+                        )
+                        .when(c.denied, |d| {
+                            d.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .text_color(theme::dim())
+                                    .child("已拒绝"),
+                            )
+                        }),
+                );
+            }
+
+            list = list.child(
+                div()
+                    .h(px(1.0))
+                    .my_1()
+                    .bg(theme::border()),
+            );
+            list = list.child(
+                div()
+                    .px_1()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .child("最近修改"),
+            );
+        }
 
         if self.recent.is_empty() {
             list = list.child(

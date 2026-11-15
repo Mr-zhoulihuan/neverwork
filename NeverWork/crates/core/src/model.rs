@@ -183,6 +183,9 @@ pub enum MessageKind {
     ToolCall {
         /// 工具名，如 `write_file`。
         name: String,
+        /// 目标文件（相对工作区），只读工具也可能为空。
+        #[serde(default)]
+        path: String,
         /// 参数摘要，如 `src/main.rs（写入 12 行）`。
         summary: String,
         status: ToolRunStatus,
@@ -327,6 +330,51 @@ pub enum SessionAction {
     Failed,
 }
 
+/// 会话内某文件被 Agent 改动过的汇总。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    pub added: u32,
+    pub removed: u32,
+    /// 是否被拒绝（拒绝了就不算真改动）。
+    pub denied: bool,
+}
+
+/// 把会话里的工具调用聚合成「每个文件改了多少行」。
+///
+/// 抽成纯函数是为了能脱离 UI 单测：同一文件多次改动会累加，
+/// 只要有一次被拒绝就标记为 `denied`（说明并非所有改动都落地了）。
+pub fn aggregate_changes(messages: &[Message]) -> Vec<FileChange> {
+    use std::collections::BTreeMap;
+
+    let mut map: BTreeMap<String, FileChange> = BTreeMap::new();
+    for m in messages {
+        if let MessageKind::ToolCall {
+            path,
+            status,
+            added,
+            removed,
+            ..
+        } = &m.kind
+        {
+            if path.is_empty() || (*added == 0 && *removed == 0) {
+                continue;
+            }
+            let denied = *status == ToolRunStatus::Denied;
+            let e = map.entry(path.clone()).or_insert(FileChange {
+                path: path.clone(),
+                added: 0,
+                removed: 0,
+                denied: false,
+            });
+            e.added += added;
+            e.removed += removed;
+            e.denied = denied;
+        }
+    }
+    map.into_values().collect()
+}
+
 /// 文件树节点。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileNode {
@@ -342,4 +390,76 @@ pub struct FileNode {
     /// 现在用它精确定位。旧配置反序列化时为空。
     #[serde(default)]
     pub path: String,
+}
+
+#[cfg(test)]
+mod aggregate_tests {
+    use super::*;
+
+    fn tool(path: &str, added: u32, removed: u32, status: ToolRunStatus) -> Message {
+        Message {
+            kind: MessageKind::ToolCall {
+                name: "write_file".into(),
+                path: path.into(),
+                summary: String::new(),
+                status,
+                output: String::new(),
+                diff: Vec::new(),
+                added,
+                removed,
+            },
+            body: String::new(),
+            code: None,
+        }
+    }
+
+    #[test]
+    fn aggregates_per_file() {
+        let msgs = vec![
+            tool("a.rs", 3, 1, ToolRunStatus::Ok),
+            tool("a.rs", 2, 0, ToolRunStatus::Ok),
+            tool("b.rs", 0, 5, ToolRunStatus::Ok),
+        ];
+        let out = aggregate_changes(&msgs);
+        assert_eq!(out.len(), 2);
+        let a = out.iter().find(|c| c.path == "a.rs").unwrap();
+        assert_eq!((a.added, a.removed), (5, 1), "同一文件应累加");
+        let b = out.iter().find(|c| c.path == "b.rs").unwrap();
+        assert_eq!((b.added, b.removed), (0, 5));
+    }
+
+    #[test]
+    fn denied_marks_file() {
+        let msgs = vec![
+            tool("a.rs", 3, 0, ToolRunStatus::Ok),
+            tool("a.rs", 9, 0, ToolRunStatus::Denied),
+        ];
+        let out = aggregate_changes(&msgs);
+        assert!(out[0].denied, "有被拒绝的改动时要标出来");
+    }
+
+    #[test]
+    fn skips_noise() {
+        let msgs = vec![
+            tool("", 3, 0, ToolRunStatus::Ok),          // 无路径
+            tool("a.rs", 0, 0, ToolRunStatus::Ok),      // 无增删
+            Message {
+                kind: MessageKind::User,
+                body: "hi".into(),
+                code: None,
+            },
+        ];
+        assert!(aggregate_changes(&msgs).is_empty());
+    }
+
+    #[test]
+    fn sorted_by_path() {
+        let msgs = vec![
+            tool("z.rs", 1, 0, ToolRunStatus::Ok),
+            tool("a.rs", 1, 0, ToolRunStatus::Ok),
+        ];
+        let out = aggregate_changes(&msgs);
+        assert_eq!(out[0].path, "a.rs");
+        assert_eq!(out[1].path, "z.rs");
+    }
 }

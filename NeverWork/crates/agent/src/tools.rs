@@ -57,6 +57,15 @@ impl ToolCall {
         serde_json::from_str(t).unwrap_or_else(|_| json!({}))
     }
 
+    /// 目标文件（相对路径）；没有 path 参数的工具返回空串。
+    pub fn path_arg(&self) -> String {
+        self.args()
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
     /// 参数的一行摘要，用于界面展示。
     pub fn summary(&self) -> String {
         let a = self.args();

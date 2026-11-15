@@ -105,7 +105,51 @@ design/   设计稿（HTML/PNG）与设计规范 DESIGN-SPEC.md
 - **响应式 + 专注模式**：窗口较窄或高 DPI 时自动收起侧栏，
   标题栏「◧ 专注」可手动切换。
 
-测试：113 个。app 侧 text_buffer 11 / text_fit 5 / model_picker 10 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2；agent 侧 tools 17 / diff 12 / team role_provider 5 / sse 2；core 侧 settings 13 + config 5；ui 3。另有 3 条打真实 DeepSeek API 的集成测试（需密钥，默认跳过）。
+测试：129 个。app 侧 text_buffer 11 / text_fit 5 / model_picker 10 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2；agent 侧 tools 17 / diff 12 / team role_provider 5 / sse 2；core 侧 settings 13 + config 5；ui 3。另有 3 条打真实 DeepSeek API 的集成测试（需密钥，默认跳过）。
+
+### M7 — 步骤折叠 / 右栏收起 / 查找替换 / 团队带工具（本期）
+
+**1. 工具步骤折叠成一行（对齐参考稿）**
+
+连续的工具调用不再一人一张大卡片，而是聚合成一条紧凑的步骤条：
+
+```
+▸ ● 读取了文件 readme.txt 等 3 步        +2 −1
+▾ ● 浏览了目录 · 1 步
+    ▤ list_dir
+      目录（1 项）
+      readme.txt
+```
+
+- 折叠态一行：箭头 + 状态点（绿完成 / 黄待确认 / 红失败 / 灰拒绝）+ 人话标题 + 增删行数。
+- 点一下展开，逐步显示工具名、参数、状态、diff 或输出。
+- **待审批的组永远自动展开**，否则用户看不到「允许 / 拒绝」按钮。
+
+**2. 右栏可收起**
+
+右栏头部右侧 `▶` 收起成 16px 窄条，窄条上的 `◀` 再展开。与「专注模式」的区别：
+专注模式连左栏一起收起，这里只让出右栏，适合「要宽一点但还要看会话」。
+
+**3. 编辑器查找 / 替换**
+
+`Ctrl+F` 查找、`Ctrl+H` 查找并聚焦替换框：
+
+- `Aa` 开关区分大小写；输入即搜，右侧显示 `当前/总数`。
+- Enter 下一个、Shift+Enter 上一个、Esc 关闭；命中会真的选中并滚动到位。
+- 「替换」只替换当前命中，「全部替换」一次改完并提示次数。
+- 匹配逻辑抽在 `app/src/find.rs`，纯函数 + 12 个单测（含中文与大小写）。
+
+**4. 多角色团队也能用工具**
+
+开启工具后团队成员**串行**执行：前一个角色的产出作为后一个的上下文，
+这样「规划 → 编码 → 审查」在带工具时依然成立。串行是刻意的——
+并发写同一个文件只会互相覆盖，无法逐个审批。
+
+**5. 补丁清单**
+
+右栏「改动」页顶部新增「Agent 改动 · N 个文件」，按文件合并增删行数、
+标出被拒绝的文件，点一下直接打开该文件。聚合逻辑抽成
+`core::aggregate_changes`（纯函数，4 个单测）。
 
 ### M6 — Agent 工具调用（真读、真写、真 diff）
 

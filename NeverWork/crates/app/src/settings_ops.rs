@@ -136,6 +136,8 @@ impl AppState {
             FormField::ProviderName(i) => self.provider_at(i).map(|p| p.name.clone()).unwrap_or_default(),
             FormField::ImportPath => self.import_path.clone(),
             FormField::ModelSearch => self.model_query.clone(),
+            FormField::FindQuery => self.find.query.clone(),
+            FormField::FindReplace => self.find.replace.clone(),
         }
     }
 
@@ -158,6 +160,15 @@ impl AppState {
             FormField::ModelSearch => {
                 self.model_query = value;
                 self.model_highlight = 0;
+                cx.notify();
+                return;
+            }
+            FormField::FindQuery => {
+                self.set_find_query(value, cx);
+                return;
+            }
+            FormField::FindReplace => {
+                self.find.replace = value;
                 cx.notify();
                 return;
             }

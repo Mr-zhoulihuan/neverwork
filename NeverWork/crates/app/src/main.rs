@@ -2,6 +2,7 @@
 
 mod data;
 mod filesystem;
+mod find;
 mod highlight;
 mod input_handler;
 mod keymap;

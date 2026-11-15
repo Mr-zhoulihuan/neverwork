@@ -127,6 +127,11 @@ impl AppState {
                 ),
         );
 
+        // ===== 查找 / 替换栏 =====
+        if self.find.open {
+            col = col.child(self.find_bar(cx));
+        }
+
         // ===== 行列表 =====
         let lines = self.line_cache.borrow_mut().sync(self.editor.text(), lang);
         let cursor = self.editor.cursor();
@@ -216,6 +221,235 @@ impl AppState {
         );
 
         col
+    }
+
+    /// 查找 / 替换栏：贴在编辑器标签栏下面。
+    ///
+    /// 键盘：Enter 下一个、Shift+Enter 上一个、Esc 关闭。
+    /// 输入框复用 `field_buf` + `InputTarget::Field`，因此中文输入法可用。
+    fn find_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::state::FormField;
+
+        let find_editing = self.active_field == Some(FormField::FindQuery);
+        let repl_editing = self.active_field == Some(FormField::FindReplace);
+        let count = self.find.count();
+        let cur = if count == 0 { 0 } else { self.find.current + 1 };
+
+        let mut bar = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .bg(theme::panel())
+            .border_b_1()
+            .border_color(theme::border());
+
+        // ---- 查找行 ----
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().text_xs().text_color(theme::dim()).child("⌕"))
+            .child(
+                div()
+                    .id("find-query")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_1()
+                    .min_w(px(80.0))
+                    .h(px(26.0))
+                    .px_2()
+                    .rounded_md()
+                    .bg(theme::raised())
+                    .border_1()
+                    .border_color(if find_editing {
+                        theme::accent_line()
+                    } else {
+                        theme::border()
+                    })
+                    .cursor(gpui::CursorStyle::IBeam)
+                    .when(find_editing, |d| d.track_focus(&self.editor_focus))
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                        this.begin_find_field(FormField::FindQuery, cx);
+                        window.focus(&this.editor_focus);
+                        cx.notify();
+                    }))
+                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
+                        this.on_find_key(ev, cx);
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if self.find.query.is_empty() {
+                                theme::dim()
+                            } else {
+                                theme::fg()
+                            })
+                            .child(SharedString::from(if self.find.query.is_empty() {
+                                "查找".to_string()
+                            } else {
+                                self.find.query.clone()
+                            })),
+                    )
+                    .when(find_editing, |d| {
+                        d.child(div().text_color(theme::accent()).child("▏"))
+                    }),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .min_w(px(56.0))
+                    .text_xs()
+                    .text_color(if count == 0 { theme::dim() } else { theme::muted() })
+                    .child(SharedString::from(if self.find.query.is_empty() {
+                        "—".to_string()
+                    } else if count == 0 {
+                        "无结果".to_string()
+                    } else {
+                        format!("{cur}/{count}")
+                    })),
+            );
+
+        let icon_btn = |id: &'static str,
+                        glyph: &'static str,
+                        cx: &mut Context<AppState>,
+                        f: fn(&mut AppState, &mut Context<AppState>)| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(22.0))
+                .rounded_sm()
+                .text_xs()
+                .text_color(theme::muted())
+                .cursor_pointer()
+                .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
+                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| f(this, cx)))
+                .child(glyph)
+        };
+
+        row = row
+            .child(icon_btn("find-prev", "↑", cx, |this, cx| this.find_prev(cx)))
+            .child(icon_btn("find-next", "↓", cx, |this, cx| this.find_next(cx)));
+
+        // 区分大小写开关
+        row = row.child(
+            div()
+                .id("find-case")
+                .px_1p5()
+                .py_0p5()
+                .rounded_sm()
+                .text_xs()
+                .cursor_pointer()
+                .when(self.find.case_sensitive, |d| {
+                    d.bg(theme::accent_soft()).text_color(theme::accent())
+                })
+                .when(!self.find.case_sensitive, |d| {
+                    d.text_color(theme::dim()).hover(|d| d.bg(theme::raised()))
+                })
+                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                    this.find.case_sensitive = !this.find.case_sensitive;
+                    let q = this.find.query.clone();
+                    this.set_find_query(q, cx);
+                }))
+                .child("Aa"),
+        );
+
+        row = row.child(div().flex_1());
+        row = row.child(icon_btn("find-close", "✕", cx, |this, cx| this.close_find(cx)));
+        bar = bar.child(row);
+
+        // ---- 替换行 ----
+        let mut row2 = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().text_xs().text_color(theme::dim()).child("⇄"))
+            .child(
+                div()
+                    .id("find-replace")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_1()
+                    .min_w(px(80.0))
+                    .h(px(26.0))
+                    .px_2()
+                    .rounded_md()
+                    .bg(theme::raised())
+                    .border_1()
+                    .border_color(if repl_editing {
+                        theme::accent_line()
+                    } else {
+                        theme::border()
+                    })
+                    .cursor(gpui::CursorStyle::IBeam)
+                    .when(repl_editing, |d| d.track_focus(&self.editor_focus))
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                        this.begin_find_field(FormField::FindReplace, cx);
+                        window.focus(&this.editor_focus);
+                        cx.notify();
+                    }))
+                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
+                        this.on_find_key(ev, cx);
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if self.find.replace.is_empty() {
+                                theme::dim()
+                            } else {
+                                theme::fg()
+                            })
+                            .child(SharedString::from(if self.find.replace.is_empty() {
+                                "替换为".to_string()
+                            } else {
+                                self.find.replace.clone()
+                            })),
+                    )
+                    .when(repl_editing, |d| {
+                        d.child(div().text_color(theme::accent()).child("▏"))
+                    }),
+            )
+            .child(
+                div()
+                    .id("replace-one")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::raised())
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                        this.replace_current_match(cx);
+                    }))
+                    .child("替换"),
+            )
+            .child(
+                div()
+                    .id("replace-all")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::accent())
+                    .text_xs()
+                    .text_color(gpui::rgb(0xffffff))
+                    .cursor_pointer()
+                    .hover(|d| d.opacity(0.88))
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                        this.replace_all_matches(cx);
+                    }))
+                    .child("全部替换"),
+            );
+        row2 = row2.child(div().flex_1());
+        bar = bar.child(row2);
+
+        bar
     }
 
     /// 打开文件后同步缓存与光标。
