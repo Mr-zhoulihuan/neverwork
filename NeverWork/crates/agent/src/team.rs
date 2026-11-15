@@ -43,6 +43,9 @@ pub fn run_team(
 ///
 /// `history` 是同一会话里之前聊过的正文：不传就退化成只看得见本次提问，
 /// 用户在同一个会话里追问上一轮的事必然答不出。
+///
+/// 这条路径**不给模型 tools**（走 `stream_chat`），所以历史里的工具对会先被
+/// `flatten_tool_history` 压成普通正文。
 #[allow(clippy::too_many_arguments)]
 pub fn run_team_with_history(
     team: &Team,
@@ -53,6 +56,10 @@ pub fn run_team_with_history(
     cancel: Arc<AtomicBool>,
 ) {
     let provider_id = std::env::var("NW_PROVIDER").unwrap_or_else(|_| "openai".into());
+    // 纯文本编排：历史里的 tool_calls / tool 对必须先压平，否则
+    // Anthropic 会因为空正文的 assistant 整轮 400、OpenAI 也会让模型
+    // 以为自己还能调工具。
+    let history = flatten_tool_history(&history);
     match team.flow {
         FlowMode::Pipeline => run_pipeline(team, &history, user_text, base_config, emit, cancel),
         FlowMode::Parallel => run_parallel(team, &history, user_text, base_config, emit, cancel),
@@ -70,6 +77,69 @@ pub fn run_team_with_history(
         }
     }
     emit(TeamEvent::AllDone);
+}
+
+/// 纯文本编排用的历史：把工具调用压成普通正文。
+///
+/// 这条路径不给模型 tools（走 `stream_chat` 而非 `stream_chat_with_tools`），
+/// 但同一会话里可能存在上一轮单 Agent 留下的 `assistant.tool_calls` + `tool` 对。
+/// 原样发出去有两处会坏：
+/// - Anthropic 的正文是纯字符串，空正文的 assistant 直接整轮 400；
+/// - 它还会把 `Role::Tool` 当成 `user`，工具输出变成「用户说的话」。
+///
+/// 压成「调用过什么 + 读到了什么」的 assistant 正文：信息不丢，协议也安全。
+/// 已经压过的历史原样返回，重复调用无副作用。
+pub(crate) fn flatten_tool_history(history: &[ChatMessage]) -> Vec<ChatMessage> {
+    use std::collections::HashMap;
+
+    /// 把挂起的工具结果合成一条正文
+    fn flush(pending: &mut Vec<String>, out: &mut Vec<ChatMessage>) {
+        if pending.is_empty() {
+            return;
+        }
+        out.push(ChatMessage::assistant(format!(
+            "（上一轮工具输出）\n{}",
+            pending.join("\n\n")
+        )));
+        pending.clear();
+    }
+
+    // call_id → 工具名：工具结果消息自己不带名字
+    let mut names: HashMap<&str, &str> = HashMap::new();
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(history.len());
+    let mut pending: Vec<String> = Vec::new();
+    for m in history {
+        match m.role {
+            crate::Role::Assistant if !m.tool_calls.is_empty() => {
+                flush(&mut pending, &mut out);
+                for c in &m.tool_calls {
+                    names.insert(c.id.as_str(), c.name.as_str());
+                }
+                let called: Vec<&str> = m.tool_calls.iter().map(|c| c.name.as_str()).collect();
+                if !m.content.trim().is_empty() {
+                    out.push(ChatMessage::assistant(m.content.clone()));
+                }
+                out.push(ChatMessage::assistant(format!(
+                    "（调用工具：{}）",
+                    called.join("、")
+                )));
+            }
+            crate::Role::Tool => {
+                let name = m
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|id| names.get(id).copied())
+                    .unwrap_or("工具");
+                pending.push(format!("[{name}]\n{}", m.content));
+            }
+            _ => {
+                flush(&mut pending, &mut out);
+                out.push(m.clone());
+            }
+        }
+    }
+    flush(&mut pending, &mut out);
+    out
 }
 
 /// 解析角色模型名，若看起来是跨 provider 的模型（如 claude*）则切换到 anthropic。
@@ -228,6 +298,52 @@ pub(crate) fn role_system_prompt(role: &Role) -> String {
         )
     } else {
         role.prompt.clone()
+    }
+}
+
+#[cfg(test)]
+mod flatten_tests {
+    use super::flatten_tool_history;
+    use crate::{ChatMessage, ToolCall};
+
+    #[test]
+    fn tool_pairs_become_plain_text() {
+        let history = vec![
+            ChatMessage::user("读一下 a.rs"),
+            ChatMessage::assistant_with_tools(
+                "",
+                vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "FILE_BODY"),
+            ChatMessage::user("那 b.rs 呢"),
+        ];
+        let out = flatten_tool_history(&history);
+        // 协议字段一个不留
+        assert!(out.iter().all(|m| m.tool_calls.is_empty()));
+        assert!(out.iter().all(|m| m.tool_call_id.is_none()));
+        // 也不能留下空正文（Anthropic 会直接 400）
+        assert!(out.iter().all(|m| !m.content.trim().is_empty()));
+        // 但工具名与输出不能丢：模型要记得上一轮读过什么
+        let joined: Vec<&str> = out.iter().map(|m| m.content.as_str()).collect();
+        let joined = joined.join("\n");
+        assert!(joined.contains("read_file"), "{joined}");
+        assert!(joined.contains("FILE_BODY"), "{joined}");
+        // 顺序不能乱
+        assert_eq!(out[0].content, "读一下 a.rs");
+        assert_eq!(out.last().unwrap().content, "那 b.rs 呢");
+    }
+
+    #[test]
+    fn already_plain_history_is_unchanged() {
+        let history = vec![ChatMessage::user("q"), ChatMessage::assistant("a")];
+        let out = flatten_tool_history(&history);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].content, "q");
+        assert_eq!(out[1].content, "a");
     }
 }
 

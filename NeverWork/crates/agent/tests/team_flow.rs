@@ -206,3 +206,43 @@ fn session_history_reaches_the_model() {
     );
     assert!(req.contains("那 bar 呢？"), "请求里没带本次提问：{req}");
 }
+
+#[test]
+fn plain_team_flattens_tool_history() {
+    // 团队纯文本路径不传 tools：历史里的 tool_calls / tool 对必须压成正文。
+    // 真实踩过：从单 Agent 切到团队（关工具）后，Anthropic 会因
+    // 空正文的 assistant 整轮 400。
+    let (port, rx, server) = spawn_capturing_server();
+    let team = team_with_roles(FlowMode::Pipeline, &[("P", "P")]);
+    let cfg = ProviderConfig {
+        api_key: "k".into(),
+        base_url: format!("http://127.0.0.1:{port}"),
+        model: "gpt-4o".into(),
+        temperature: 0.7,
+    };
+    let history = vec![
+        neverwork_agent::ChatMessage::user("读一下 a.rs"),
+        neverwork_agent::ChatMessage::assistant_with_tools(
+            "",
+            vec![neverwork_agent::ToolCall {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+            }],
+        ),
+        neverwork_agent::ChatMessage::tool_result("call_1", "FILE_BODY_SURVIVES"),
+    ];
+    let cancel = Arc::new(AtomicBool::new(false));
+    neverwork_agent::run_team_with_history(&team, history, "那 b.rs 呢", cfg, &mut |_| {}, cancel);
+    server.join().unwrap();
+
+    let req = rx.recv().unwrap();
+    // 协议字段一个都不能留
+    assert!(!req.contains("\"tool_calls\""), "还在发 tool_calls：{req}");
+    assert!(!req.contains("\"tool_call_id\""), "还在发 tool_call_id：{req}");
+    assert!(!req.contains("\"role\":\"tool\""), "还在发 tool 角色：{req}");
+    assert!(!req.contains("\"content\":null"), "还有空正文：{req}");
+    // 内容不能丢：模型仍要知道上一轮读过什么
+    assert!(req.contains("FILE_BODY_SURVIVES"), "工具输出被丢了：{req}");
+    assert!(req.contains("read_file"), "工具名被丢了：{req}");
+}

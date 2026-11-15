@@ -35,7 +35,6 @@ enum RailAction {
     Editor,
     Skills,
     Settings,
-    Palette,
 }
 
 impl AppState {
@@ -97,8 +96,7 @@ impl AppState {
             .child(self.rail_button("rail-chat", "◐", "对话", is_chat, RailAction::Chat, cx))
             .child(self.rail_button("rail-team", "◈", "团队", is_team, RailAction::Team, cx))
             .child(self.rail_button("rail-editor", "▤", "编辑器", is_editor, RailAction::Editor, cx))
-            .child(self.rail_button("rail-skills", "✦", "技能", is_skills, RailAction::Skills, cx))
-            .child(self.rail_button("rail-cmd", "⌘", "命令", self.palette_open, RailAction::Palette, cx));
+            .child(self.rail_button("rail-skills", "✦", "技能", is_skills, RailAction::Skills, cx));
 
         // 底部：设置 + AI 状态 + 用户头像
         rail = rail
@@ -204,7 +202,6 @@ impl AppState {
             RailAction::Settings => {
                 self.open_settings(crate::state::SettingsTab::General, cx)
             }
-            RailAction::Palette => self.toggle_palette(cx),
         }
     }
 

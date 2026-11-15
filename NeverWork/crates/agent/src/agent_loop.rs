@@ -16,16 +16,21 @@ use crate::tools::{self, wrap_untrusted, ToolCall, ToolContext, ToolResult};
 use crate::trace::Trace;
 use crate::{build_provider, ChatMessage, ProviderConfig, Role, StreamEvent, TokenUsage};
 
-/// 单次请求最多跑几轮工具（一轮 = 一次模型调用 + 若干工具执行）。
+/// 单次运行的硬上限。三个字段都给 `0` = 不设限，让模型自己决定什么时候停。
 ///
-/// 8 轮对「阅读这个项目」这类任务不够：模型每轮读一个文件，
-/// 十几轮就用完了，用户只看到一堆读文件然后什么都没答。
-const MAX_ROUNDS: usize = 16;
-/// 单次运行的最长墙钟时间（含模型思考与工具执行）。
-///
-/// 轮数上限挡不住「一轮里模型吐了 10 分钟」：provider 半死不活、
-/// 流式连接挂在半路时，用户只能看着转圈。到点就停，并基于已有内容收尾。
-const MAX_DURATION: Duration = Duration::from_secs(180);
+/// 这里以前写死 16 轮 / 180 秒：读一个中型项目（几十个文件）必然触顶，
+/// 用户看到的是「读了一堆文件然后被掐断，只基于已读内容作答」。
+/// 现在限制交给调用方配；防失控改由循环内的重复动作检测兜底
+/// （同一工具 + 同一参数最多 `MAX_REPEAT` 次），另有用户随时可按的停止。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RunLimits {
+    /// 全轮输入 + 输出 token 上限。
+    pub tokens: u64,
+    /// 最多几轮（一轮 = 一次模型调用 + 若干工具执行）。
+    pub rounds: u32,
+    /// 最长墙钟秒数（含模型思考与工具执行）。
+    pub seconds: u64,
+}
 /// 同一「工具 + 参数」允许出现的次数。
 ///
 /// 第 N 次之后结果不会再变，只是烧 token。之前用户的抱怨「一直在读取」
@@ -350,8 +355,8 @@ pub fn run_agent(
     user_text: &str,
     root: PathBuf,
     enable_tools: bool,
-    // 全轮输入+输出 token 的上限，`0` 表示不限。
-    max_tokens: u64,
+    // 单次运行的硬上限；字段为 `0` 表示该项不限。
+    limits: RunLimits,
     emit: &mut dyn FnMut(AgentEvent),
     cancel: Arc<AtomicBool>,
 ) {
@@ -390,13 +395,19 @@ pub fn run_agent(
     // 本次运行是否已做过滚动摘要（只做一次，避免反复摘要本身烧 token）。
     let mut summarized = false;
 
-    for round in 0..MAX_ROUNDS {
+    // `rounds == 0` 表示不限：拿 usize::MAX 当上界，实际不可能跑到。
+    let max_rounds = if limits.rounds == 0 {
+        usize::MAX
+    } else {
+        limits.rounds as usize
+    };
+    for round in 0..max_rounds {
         if cancel.load(Ordering::Relaxed) {
             emit(AgentEvent::Done);
             return;
         }
         rounds_done = round + 1;
-        if started.elapsed() > MAX_DURATION {
+        if limits.seconds > 0 && started.elapsed() > Duration::from_secs(limits.seconds) {
             emit(AgentEvent::TimeLimit);
             trace.step(round, "time_limit", serde_json::json!({}));
             finish_with_summary(&*provider, &mut messages, emit);
@@ -485,15 +496,15 @@ pub fn run_agent(
 
         // 成本上限：token 是唯一拿得到真实值的成本口径（单价随模型变化，
         // 写死汇率只会算错）。超了就停止调工具，让模型基于已读内容作答。
-        if max_tokens > 0 && usage_total.total() > max_tokens {
+        if limits.tokens > 0 && usage_total.total() > limits.tokens {
             emit(AgentEvent::CostLimit {
                 used: usage_total.total(),
-                limit: max_tokens,
+                limit: limits.tokens,
             });
             trace.step(
                 round,
                 "cost_limit",
-                serde_json::json!({ "used": usage_total.total(), "limit": max_tokens }),
+                serde_json::json!({ "used": usage_total.total(), "limit": limits.tokens }),
             );
             finish_with_summary(&*provider, &mut messages, emit);
             emit(usage_event(

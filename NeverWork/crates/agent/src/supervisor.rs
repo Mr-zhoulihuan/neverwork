@@ -118,6 +118,9 @@ pub fn run_supervisor(
     if team.roles.is_empty() {
         return;
     }
+    // 与 run_team_with_history 一致：这条路径走 stream_chat（不传 tools），
+    // 历史里的 tool_calls / tool 对必须先压平，否则 Anthropic 会因空正文 400。
+    let history = crate::team::flatten_tool_history(history);
     // Lead 优先取名字/id 带 lead/supervisor 的角色，否则用第一个
     let lead_idx = team
         .roles

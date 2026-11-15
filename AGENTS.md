@@ -34,7 +34,8 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - **多光标是 `TextBuffer` 独立层**（`extra_cursors`），只有 `*_multi` 系列碰它。
 - **折叠不重排文本**：只跳过隐藏行，真实行号映射回光标/选区。**`multi_patch` 必须先全量校验再写**，失败回滚。
 - **文字截断别只靠 `.truncate()`**：gpui 首帧没确定宽度就不生效，`flex_1` 嵌套下会硬裁且无省略号。要省略号用 `views::text_fit::fit_text(text, 预算px, 字号)` + `.whitespace_nowrap()`。
-- **布局优先级**：中栏 > 会话栏 > 右栏。窄窗口把右栏收成 16px 窄条（<1080），极窄（<620）才隐藏会话列表，图标栏永远保留。宽度判据用「可见尺寸」（见环境特性）。
+- **布局优先级**：中栏 > 会话栏 > 右栏。窄窗口把右栏收成 16px 窄条（<1080），极窄（<620）才隐藏会话列表，图标栏永远保留。**设置页、技能页、编辑器页收起整列会话列表**（编辑器仍保留右栏文件树，切文件靠它）；`CenterView::Team` 是对话的变体，会话列表照常显示。宽度判据用「可见尺寸」（见环境特性）。
+- 图标栏只有对话/团队/编辑器/技能 + 底部设置；**命令面板不再占图标**，入口是标题栏「⌘K 命令」、头像、会话面板「⋯」。
 
 ## 左侧栏（`views/sidebar.rs`）
 
@@ -52,6 +53,7 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - 工具在 `agent/src/tools.rs`。**所有路径走 `ToolContext::resolve`**（挡 `..`、跨盘绝对路径、符号链接逃逸）。
 - **写操作必须 `requires_approval = true`**，经 `NeedApproval` → 用户允许后才执行；不要在工具内部直接落盘。不新增 shell。
 - 团队角色的 `model` 是**展示标签**（`Claude Opus`），不能当模型 id 或据此切厂商——只有全小写真实 id 才算。
+- **运行上限默认全不设限**：`RunLimits { tokens, rounds, seconds }` 三项都从 settings 读（`max_tokens_per_run` / `max_rounds_per_run` / `max_run_seconds`），`0` = 不限，默认就是 0。以前写死 16 轮 / 180 秒 / 20 万 token，读中型项目（几十个文件）必然被提前掐断。防失控靠 `MAX_REPEAT = 3`（同工具同参数）与用户手动停止；**不要把常量上限加回去**。
 
 ## Git 写操作（改这里前必读）
 
@@ -66,7 +68,7 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 ## 代码现状与已知缺口
 
 - 编辑器：光标、多光标、选区、撤销重做、剪贴板、按字符点击、行号、高亮、虚拟滚动、保存、查找替换、折叠、括号匹配。
-- `Supervisor` 是真分派（Lead 逐轮决定下一角色）。Team 多角色编排仍是"轮流发言"、不调工具；带工具的是单 Agent 路径。
+- `Supervisor` 是真分派（Lead 逐轮决定下一角色）。Team 开工具走 `spawn_agents_chain`（多角色串行、每角色都带工具，与单 Agent 同一套历史）；关工具走 `run_team_with_history`（纯文本轮流、不传 tools，历史里的工具对由 `flatten_tool_history` 压平，否则 Anthropic 空正文整轮 400）。
 - Provider：OpenAI 兼容 / Anthropic / Gemini 原生；Gemini 工具调用未接。
 - 无 LSP / tree-sitter / 终端 / 全局搜索。Git 有暂存/提交/丢弃/切分支，**无 push/pull、无冲突合并**。单文件 512KB、文件树 8000 节点上限。
 

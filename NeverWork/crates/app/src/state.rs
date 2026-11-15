@@ -332,6 +332,7 @@ pub struct AppState {
 fn initial_view() -> CenterView {
     match std::env::var("NW_VIEW").unwrap_or_default().to_lowercase().as_str() {
         "team" => CenterView::Team,
+        "file" | "editor" => CenterView::File,
         "skills" => CenterView::Skills,
         "settings" => CenterView::Settings,
         _ => CenterView::Chat,
@@ -1757,8 +1758,12 @@ impl AppState {
     ) {
         // 关工具时把 false 传下去，模型连工具清单都看不到。
         let with_tools = self.tools_enabled;
-        // 单次运行的 token 预算（0 = 不限），随设置走。
-        let max_tokens = self.settings.max_tokens_per_run;
+        // 单次运行的硬上限（三项都为 0 = 不限），随设置走。
+        let limits = neverwork_agent::RunLimits {
+            tokens: self.settings.max_tokens_per_run,
+            rounds: self.settings.max_rounds_per_run,
+            seconds: self.settings.max_run_seconds,
+        };
         let cancel = self.cancel.clone();
         let root = self.root.clone();
         // 线程里用一份，UI 侧留一份（角色名/颜色要用来渲染气泡）
@@ -1792,7 +1797,7 @@ impl AppState {
                         &text,
                         root.clone(),
                         with_tools,
-                        max_tokens,
+                        limits,
                         &mut emit,
                         cancel.clone(),
                     );
@@ -2630,7 +2635,11 @@ impl Render for AppState {
             CenterView::Settings | CenterView::Skills
         );
         let hide_right = visible_w < 1080.0 || full_page;
-        let hide_list = visible_w < 620.0 || full_page;
+        // 编辑器是「单文件」视图：会话列表让给正文，但右栏文件树留着
+        // （切文件靠它，一起隐藏了就没法在这页换文件）。
+        let hide_list = visible_w < 620.0
+            || full_page
+            || matches!(self.center, CenterView::File);
         // 中栏可用宽度：左栏（图标栏 + 会话列表）与右栏（面板或 16px 窄条）
         // 都是定宽，减掉就是正文真实可用的宽度（`chat_pane` 据此折行）。
         let left_w = if hide_sides {

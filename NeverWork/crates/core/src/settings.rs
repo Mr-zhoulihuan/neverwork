@@ -533,8 +533,14 @@ pub struct Settings {
     /// 成本口径用 token 而不是货币：单价随模型与折扣变化，硬编码汇率
     /// 只会算出一个看起来很专业但错得离谱的数字。用量由各 Provider
     /// 从协议自带的 usage 字段解析，拿不到时按 0 计。
-    #[serde(default = "default_agent_token_budget")]
+    #[serde(default)]
     pub max_tokens_per_run: u64,
+    /// 单次运行最多几轮工具调用（一轮 = 一次模型调用 + 若干工具执行），`0` 表示不限。
+    #[serde(default)]
+    pub max_rounds_per_run: u32,
+    /// 单次运行的最长墙钟秒数（含模型思考与工具执行），`0` 表示不限。
+    #[serde(default)]
+    pub max_run_seconds: u64,
 
     // ---- 技能 ----
     #[serde(default)]
@@ -574,12 +580,6 @@ fn default_tab_width() -> u8 {
     4
 }
 
-/// 默认单次运行 token 预算。20 万足够一次正常的「读几个文件 + 改几处」，
-/// 又能拦住失控循环；用户可在设置里改，`0` 表示不限。
-fn default_agent_token_budget() -> u64 {
-    200_000
-}
-
 fn default_providers() -> Vec<ProviderEntry> {
     // 预置主流厂商，都是未填 Key 的状态；用户填一个即可用。
     ProviderPreset::all()
@@ -607,7 +607,11 @@ impl Default for Settings {
             word_wrap: false,
             providers,
             active_provider_id: active,
-            max_tokens_per_run: default_agent_token_budget(),
+            // 三项运行上限默认全为 0（不限）：读项目这类任务会被固定预算掐断，
+            // 限制留给需要控制成本的人自己配。
+            max_tokens_per_run: 0,
+            max_rounds_per_run: 0,
+            max_run_seconds: 0,
             skills: Vec::new(),
             last_workspace: String::new(),
             sync_enabled: false,

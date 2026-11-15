@@ -19,7 +19,7 @@ pub mod trace;
 #[cfg(test)]
 mod tests;
 
-pub use agent_loop::{run_agent, AgentEvent};
+pub use agent_loop::{run_agent, AgentEvent, RunLimits};
 pub use openai::OpenAiProvider;
 pub use anthropic::AnthropicProvider;
 pub use gemini::GeminiProvider;

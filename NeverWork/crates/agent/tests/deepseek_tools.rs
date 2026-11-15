@@ -115,7 +115,8 @@ fn run(
         prompt,
         dir.clone(),
         true,
-        0, // 测试里不限预算；成本上限由 agent_loop 的单元测试覆盖
+        // 测试里不设运行上限；上限判定由 RunLimits 的调用方负责。
+        neverwork_agent::RunLimits::default(),
         &mut emit,
         cancel,
     );
