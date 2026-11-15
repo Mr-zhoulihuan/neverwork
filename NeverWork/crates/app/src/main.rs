@@ -6,6 +6,8 @@ mod highlight;
 mod input_handler;
 mod keymap;
 mod line_cache;
+mod settings_ops;
+mod skills_catalog;
 mod state;
 mod text_buffer;
 mod views;

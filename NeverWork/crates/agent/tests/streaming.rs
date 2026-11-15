@@ -27,6 +27,7 @@ fn openai_streaming_end_to_end() {
         api_key: "test-key".into(),
         base_url: format!("http://{addr}"),
         model: "test-model".into(),
+        temperature: 0.7,
     };
     let provider = build_provider("openai", config);
     let messages = vec![ChatMessage::user("hi")];

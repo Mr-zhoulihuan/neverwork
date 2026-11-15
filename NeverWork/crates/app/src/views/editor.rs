@@ -21,6 +21,7 @@ use crate::highlight::{self, Lang};
 use crate::line_cache::EditorLines;
 use crate::state::{AppState, InputTarget};
 
+/// 默认行高（会被设置里的字号覆盖）。
 pub(crate) const LINE_H: f32 = 20.0;
 const GUTTER_W: f32 = 46.0;
 /// 选区底色。
@@ -134,6 +135,11 @@ impl AppState {
         let scroll = self.editor_scroll.clone();
         let for_list = lines.clone();
 
+        let line_h = self.line_height();
+        let font_px = self.editor_font_size();
+        let show_numbers = self.settings.show_line_numbers;
+        let gutter_w = if show_numbers { GUTTER_W } else { 8.0 };
+
         let list = uniform_list("editor-lines", count, move |range, _window, _cx| {
             let mut out: Vec<AnyElement> = Vec::with_capacity(range.len());
             for i in range {
@@ -144,6 +150,10 @@ impl AppState {
                     &for_list,
                     cursor,
                     sel.clone(),
+                    line_h,
+                    font_px,
+                    show_numbers,
+                    gutter_w,
                 ));
             }
             out
@@ -156,6 +166,26 @@ impl AppState {
         }));
 
         col = col.child(list);
+
+        // 自动保存：有挂起的改动时启动一个 800ms 的计时，超时若无新改动就落盘。
+        if self.auto_save_pending && self.settings.auto_save {
+            let gen = self.auto_save_gen.clone();
+            let target = gen.get();
+            cx.spawn(async move |weak, async_cx| {
+                async_cx
+                    .background_executor()
+                    .timer(std::time::Duration::from_millis(800))
+                    .await;
+                // 期间又改过，就让那一轮的计时器负责保存。
+                if gen.get() != target {
+                    return;
+                }
+                let _ = weak.update(async_cx, |this, cx| {
+                    this.flush_auto_save(cx);
+                });
+            })
+            .detach();
+        }
 
         // ===== 底部状态栏 =====
         col = col.child(
@@ -201,6 +231,7 @@ impl AppState {
 }
 
 /// 渲染一行。每个字符都是独立的可点击单元，因此点击可以精确落到字符上。
+#[allow(clippy::too_many_arguments)]
 fn render_line(
     entity: Entity<AppState>,
     focus: FocusHandle,
@@ -208,6 +239,10 @@ fn render_line(
     lines: &EditorLines,
     cursor: usize,
     sel: Option<Range<usize>>,
+    line_h: f32,
+    font_px: f32,
+    show_numbers: bool,
+    gutter_w: f32,
 ) -> AnyElement {
     let start = lines.line_start(idx);
     let text: &str = &lines.texts[idx];
@@ -242,7 +277,15 @@ fn render_line(
                 .as_ref()
                 .map(|r| abs >= r.start && abs < r.end)
                 .unwrap_or(false);
-            text_el = text_el.child(char_cell(entity.clone(), focus.clone(), ch, color, selected, abs));
+            text_el = text_el.child(char_cell(
+                entity.clone(),
+                focus.clone(),
+                ch,
+                color,
+                selected,
+                abs,
+                font_px,
+            ));
         }
         offset += span.text.len();
     }
@@ -275,20 +318,22 @@ fn render_line(
         .flex()
         .flex_row()
         .items_center()
-        .h(px(LINE_H))
+        .h(px(line_h))
         .w_full()
-        .when(active_line, |d| d.bg(gpui::rgb(0x232323)))
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .w(px(GUTTER_W))
-                .flex_shrink_0()
-                .pr_2()
-                .text_xs()
-                .text_color(theme::dim())
-                .child(SharedString::from(format!("{}", idx + 1))),
-        )
+        .when(active_line, |d| d.bg(theme::with_alpha(0xffffff, 0.035)))
+        .when(show_numbers, |d| {
+            d.child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .w(px(gutter_w))
+                    .flex_shrink_0()
+                    .pr_2()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .child(SharedString::from(format!("{}", idx + 1))),
+            )
+        })
         .child(text_el)
         .into_any_element()
 }
@@ -297,7 +342,7 @@ fn caret(entity: Entity<AppState>, focus: FocusHandle, active: bool) -> AnyEleme
     let color = if active { theme::accent() } else { theme::muted() };
     div()
         .w(px(2.0))
-        .h(px(14.0))
+        .h(px(15.0))
         .flex_shrink_0()
         .bg(color)
         .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
@@ -320,6 +365,7 @@ fn char_cell(
     color: Rgba,
     selected: bool,
     abs: usize,
+    font_px: f32,
 ) -> AnyElement {
     let display: SharedString = match ch {
         ' ' => SharedString::from("\u{00A0}"),
@@ -327,7 +373,7 @@ fn char_cell(
         _ => SharedString::from(ch.to_string()),
     };
     let cell = div()
-        .text_xs()
+        .text_size(px(font_px))
         .flex_shrink_0()
         .text_color(color)
         .when(selected, |d| d.bg(gpui::rgb(SEL_BG)))

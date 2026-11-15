@@ -60,6 +60,8 @@ pub struct ProviderConfig {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
+    /// 采样温度（0.0–2.0）。
+    pub temperature: f32,
 }
 
 impl Default for ProviderConfig {
@@ -68,6 +70,7 @@ impl Default for ProviderConfig {
             api_key: String::new(),
             base_url: "https://api.openai.com/v1".into(),
             model: "gpt-4o".into(),
+            temperature: 0.7,
         }
     }
 }
@@ -100,7 +103,12 @@ pub fn config_from_env() -> Option<(String, ProviderConfig)> {
     let model = std::env::var("NW_MODEL").unwrap_or_else(|_| default_model.into());
     Some((
         provider,
-        ProviderConfig { api_key, base_url, model },
+        ProviderConfig {
+            api_key,
+            base_url,
+            model,
+            temperature: 0.7,
+        },
     ))
 }
 

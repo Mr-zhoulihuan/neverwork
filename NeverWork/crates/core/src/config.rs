@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AppError, AppResult, Team};
+use crate::{AppError, AppResult, Settings, Team};
 
 /// 持久化的配置根。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,4 +68,72 @@ impl Config {
     pub fn active_team(&self) -> Option<&Team> {
         self.teams.iter().find(|t| t.id == self.active_team_id).or_else(|| self.teams.first())
     }
+}
+
+// ============ 设置（settings.json） ============
+
+fn settings_path() -> PathBuf {
+    config_dir().join("settings.json")
+}
+
+/// 加载设置；文件不存在或损坏时返回默认值。
+pub fn load_settings() -> Settings {
+    match std::fs::read_to_string(settings_path()) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        Err(_) => Settings::default(),
+    }
+}
+
+/// 原子保存设置。
+pub fn save_settings(settings: &Settings) -> AppResult<()> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).map_err(AppError::Io)?;
+    let path = settings_path();
+    let tmp = path.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(settings)
+        .map_err(|e| AppError::Config(e.to_string()))?;
+    std::fs::write(&tmp, text).map_err(AppError::Io)?;
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+    std::fs::rename(&tmp, &path).map_err(AppError::Io)?;
+    Ok(())
+}
+
+/// 导出全部配置（团队 + 设置）为一段 JSON，用于同步/备份。
+pub fn export_all(config: &Config, settings: &Settings) -> AppResult<String> {
+    #[derive(serde::Serialize)]
+    struct Bundle<'a> {
+        version: &'a str,
+        exported_at: u64,
+        config: &'a Config,
+        settings: &'a Settings,
+    }
+    serde_json::to_string_pretty(&Bundle {
+        version: crate::APP_VERSION,
+        exported_at: now_secs(),
+        config,
+        settings,
+    })
+    .map_err(|e| AppError::Config(e.to_string()))
+}
+
+/// 从导出的 JSON 恢复；返回 (config, settings)。
+pub fn import_all(text: &str) -> AppResult<(Config, Settings)> {
+    #[derive(serde::Deserialize)]
+    struct Bundle {
+        #[serde(default)]
+        config: Option<Config>,
+        #[serde(default)]
+        settings: Option<Settings>,
+    }
+    let b: Bundle = serde_json::from_str(text).map_err(|e| AppError::Config(e.to_string()))?;
+    Ok((b.config.unwrap_or_default(), b.settings.unwrap_or_default()))
+}
+
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

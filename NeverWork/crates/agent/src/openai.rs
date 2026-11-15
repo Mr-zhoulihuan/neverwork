@@ -30,6 +30,7 @@ struct WireRequest<'a> {
     model: &'a str,
     messages: Vec<WireMessage<'a>>,
     stream: bool,
+    temperature: f32,
 }
 
 fn wire_role(role: Role) -> &'static str {
@@ -61,6 +62,7 @@ impl LlmProvider for OpenAiProvider {
                 .map(|m| WireMessage { role: wire_role(m.role), content: &m.content })
                 .collect(),
             stream: true,
+            temperature: self.config.temperature.clamp(0.0, 2.0),
         };
 
         let resp = match ureq::post(&url)

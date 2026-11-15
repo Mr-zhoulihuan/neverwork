@@ -105,7 +105,7 @@ design/   设计稿（HTML/PNG）与设计规范 DESIGN-SPEC.md
 - **响应式 + 专注模式**：窗口较窄或高 DPI 时自动收起侧栏，
   标题栏「◧ 专注」可手动切换。
 
-测试：40 个（app 侧 text_buffer 11 / text_fit 5 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2，其余在 agent 与 core）。
+测试：61 个（app 侧 text_buffer 11 / text_fit 5 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2，core 侧 settings 9，其余在 agent 与 ui）。
 
 ### M4 — 左侧栏重做（对齐 pic/ 参考稿）
 
@@ -127,6 +127,33 @@ design/   设计稿（HTML/PNG）与设计规范 DESIGN-SPEC.md
 
 `Session` 相应扩展了 `preview / status / meta / accent / icon / badge / action` 字段（均带 serde 默认值），新增 `SessionStatus`（Idle/Working/Done/Dropped）与 `SessionAction`（None/Resume/Replay/Done/Failed）两个枚举。
 
+### M5 — 设置 / 技能市场 / 多厂商 / 同步升级（本期）
+
+- **设置页**（图标栏 ⚙ 或 ⌘K）：五个分区，全部即时生效并自动落盘到 `~/.neverwork/settings.json`。
+  - **常规**：主题（深色 / 浅色 / 跟随系统，运行时切换整套色板）、界面缩放、编辑器字号、
+    缩进宽度、行号显示、自动保存（停止输入 800ms 落盘）、配置目录、恢复默认。
+  - **模型与厂商**：内置 10 家主流厂商（OpenAI / Anthropic / Gemini / DeepSeek / 通义千问 /
+    智谱 GLM / Moonshot / 豆包 / 百川 / Ollama 本地），每家预填基址与模型列表；
+    填 API Key 即可用，可设当前厂商、启用停用、切换模型、调温度；支持添加自定义厂商
+    （任意 OpenAI 兼容端点，如公司中转）。
+  - **技能**：已安装技能列表，可卸载，一键跳到市场。
+  - **同步与升级**：对比远端仓库新提交（`git rev-list HEAD..origin/main`）、一键
+    `git pull --ff-only`；配置导出成带时间戳的 JSON 快照、按路径导入恢复。
+  - **关于**：版本、依赖、仓库、统计。
+- **技能市场**（图标栏 ✦ 或 ⌘K）：
+  - 顶部「技能 / Agent 模板」两个 Tab；搜索框按名称、id、简介、作者过滤。
+  - 分类预览卡（办公效率 / 知识管理 / 开发编程 / 内容创作 / 设计多媒体），各显示安装量最高的 4 个。
+  - 11 个分类筛选 + 三种排序（综合评分 / 安装量 / 星标），45 个内置技能，卡片网格。
+  - 安装/卸载即时写入设置；Agent 模板可一键套用为当前团队（流水线三人组 / 并行探索团 / 单人对练）。
+- **多协议**：`neverwork-agent` 的 `ProviderConfig` 增加 `temperature`，OpenAI 兼容与
+  Anthropic 都带上；对话优先用设置里的当前厂商，未配置时提示去设置页，仍兼容 `NW_API_KEY` 等环境变量。
+- **主题运行时切换**：`theme::set_theme_mode()` 写全局原子量，所有 `theme::xxx()`
+  立刻返回新色板的颜色，视图代码零改动。
+
+新增/扩展：`core/settings.rs`、`app/settings_ops.rs`、`app/skills_catalog.rs`、
+`views/settings.rs`、`views/skills.rs`；`Session` 之外新增 `Settings` / `ProviderEntry` /
+`ProviderPreset` / `Protocol` / `Skill` / `SkillCategory` / `ThemeMode`。
+
 ## 运行
 
 ```bash
@@ -147,6 +174,8 @@ set NW_VIEW=team && cargo run -p neverwork
 set NW_OPEN=path\to\file.rs && cargo run -p neverwork
 # 覆盖窗口尺寸（异常 DPI 环境下有用）；NW_MAXIMIZE=0 可关闭自动最大化
 set NW_WIN_W=1200 && set NW_WIN_H=740 && cargo run -p neverwork
+# 启动直达某页：chat|team|skills|settings（配合 NW_SETTINGS_TAB=general|models|skills|sync|about）
+set NW_VIEW=settings && set NW_SETTINGS_TAB=models && cargo run -p neverwork
 ```
 
 ## 技术说明

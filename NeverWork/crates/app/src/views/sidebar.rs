@@ -33,6 +33,8 @@ enum RailAction {
     Chat,
     Team,
     Editor,
+    Skills,
+    Settings,
     Palette,
 }
 
@@ -58,6 +60,8 @@ impl AppState {
         let is_chat = self.center == CenterView::Chat;
         let is_team = self.center == CenterView::Team;
         let is_editor = self.center == CenterView::File;
+        let is_skills = self.center == CenterView::Skills;
+        let is_settings = self.center == CenterView::Settings;
 
         let mut rail = div()
             .flex()
@@ -93,11 +97,20 @@ impl AppState {
             .child(self.rail_button("rail-chat", "◐", "对话", is_chat, RailAction::Chat, cx))
             .child(self.rail_button("rail-team", "◈", "团队", is_team, RailAction::Team, cx))
             .child(self.rail_button("rail-editor", "▤", "编辑器", is_editor, RailAction::Editor, cx))
+            .child(self.rail_button("rail-skills", "✦", "技能", is_skills, RailAction::Skills, cx))
             .child(self.rail_button("rail-cmd", "⌘", "命令", self.palette_open, RailAction::Palette, cx));
 
-        // 底部：AI 状态 + 用户头像
+        // 底部：设置 + AI 状态 + 用户头像
         rail = rail
             .child(div().flex_1())
+            .child(self.rail_button(
+                "rail-settings",
+                "⚙",
+                "设置",
+                is_settings,
+                RailAction::Settings,
+                cx,
+            ))
             .child(
                 div()
                     .flex()
@@ -142,6 +155,7 @@ impl AppState {
         rail
     }
 
+    /// 图标栏按钮：纯图标（参考稿就是图标栏），悬停显示名称提示。
     fn rail_button(
         &self,
         id: &'static str,
@@ -154,31 +168,23 @@ impl AppState {
         div()
             .id(id)
             .flex()
-            .flex_col()
             .items_center()
             .justify_center()
-            .gap_0p5()
-            .w(px(38.0))
-            .py_1()
+            .size(px(34.0))
             .rounded_lg()
+            .text_sm()
             .cursor_pointer()
-            .when(active, |d| d.bg(theme::raised()))
-            .when(!active, |d| d.hover(|d| d.bg(theme::panel())))
+            .when(active, |d| d.bg(theme::raised()).text_color(theme::fg()))
+            .when(!active, |d| {
+                d.text_color(theme::muted()).hover(|d| {
+                    d.bg(theme::panel()).text_color(theme::fg())
+                })
+            })
             .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                 this.run_rail(action, cx);
             }))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(if active { theme::fg() } else { theme::muted() })
-                    .child(SharedString::from(glyph)),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(if active { theme::fg() } else { theme::dim() })
-                    .child(SharedString::from(label)),
-            )
+            .child(SharedString::from(glyph))
+            .when(false, |d| d.child(SharedString::from(label)))
     }
 
     fn run_rail(&mut self, action: RailAction, cx: &mut Context<Self>) {
@@ -193,6 +199,10 @@ impl AppState {
                     self.notice = Some("先在右侧文件树里打开一个文件".into());
                     cx.notify();
                 }
+            }
+            RailAction::Skills => self.open_skills(cx),
+            RailAction::Settings => {
+                self.open_settings(crate::state::SettingsTab::General, cx)
             }
             RailAction::Palette => self.toggle_palette(cx),
         }

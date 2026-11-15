@@ -9,18 +9,19 @@
 
 ```bash
 cargo run -p neverwork          # 主界面
-cargo test --workspace          # 全部测试（40 个）
+cargo test --workspace          # 全部测试（61 个）
 cargo build -p neverwork        # 只编应用（增量约 6s）
 ```
 
-运行期环境变量：`NW_ROOT`（工作区根）、`NW_API_KEY` / `NW_PROVIDER=openai|anthropic` / `NW_BASE_URL` / `NW_MODEL`（AI 配置）、`NW_VIEW=team`、`NW_OPEN=<path>`（启动即开文件）、`NW_WIN_W` / `NW_WIN_H`（覆盖窗口逻辑尺寸）、`NW_CONFIG_DIR`（覆盖 `~/.neverwork`）。
+运行期环境变量：`NW_ROOT`（工作区根）、`NW_API_KEY` / `NW_PROVIDER=openai|anthropic` / `NW_BASE_URL` / `NW_MODEL`（AI 配置）、`NW_VIEW=chat|team|skills|settings`、`NW_SETTINGS_TAB=general|models|skills|sync|about`、`NW_OPEN=<path>`（启动即开文件）、`NW_WIN_W` / `NW_WIN_H`（覆盖窗口逻辑尺寸）、`NW_CONFIG_DIR`（覆盖 `~/.neverwork`）。
 
 ## 红线
 
 - **仓库根是 `E:\AI\ide`（2026-11-15 起纳入 git，远程 `gitee.com/ZLH1995123/neverwork`）**，`NeverWork/` 是其中的子目录，不是独立仓库。`NeverWork/target`（约 9.7G）已在根 `.gitignore` 中忽略，**不要用 `git add -f` 强行加入**，也不要 `git clean -xfd`（会删构建产物）。
 - 分支：`main` 为开发主线，`master` 是 Gitee 默认分支，两者保持同一提交；`develop/feature/release` 目前同样指向主线。
 - **`NeverWork/target` 约 9.4G**。增量构建只需几秒，但 `target/debug/deps` 被删过，首次全量要重编约 700 个 crate；不要执行 `cargo clean`，也不要把慢构建当故障。
-- 团队配置持久化在 `~/.neverwork/config.json`（临时文件+rename 原子写）。不要删除或手改用户配置，测试请用 `NW_CONFIG_DIR` 指向临时目录。
+- 团队配置持久化在 `~/.neverwork/config.json`（临时文件+rename 原子写），偏好设置在同目录 `settings.json`（含 API Key 明文，别提交、别外传）。不要删除或手改用户配置，测试请用 `NW_CONFIG_DIR` 指向临时目录。
+- **主题必须走 `theme::set_theme_mode()`**，不要在视图里直接写死颜色代码——深浅两套色板由全局原子量切换，直接写 `rgb(0x…)` 的元素在浅色主题下会不可读。
 - `design/`、`pic/` 是设计交付与运行截图，`message.md` 是历史交付汇报，都不要当作待改代码。
 - 顶层三份计划文档是历史演进：`rust-ide-plan.md` → `gpui-ide-plan.md` → `gpui-ide-plan-v2.md`（最新口径）。冲突时以 v2 和 README 为准。
 

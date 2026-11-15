@@ -36,6 +36,50 @@ pub enum CenterView {
     Chat,
     File,
     Team,
+    Settings,
+    Skills,
+}
+
+/// 设置页的分区。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SettingsTab {
+    General,
+    Models,
+    Skills,
+    Sync,
+    About,
+}
+
+impl SettingsTab {
+    pub fn all() -> [SettingsTab; 5] {
+        [
+            SettingsTab::General,
+            SettingsTab::Models,
+            SettingsTab::Skills,
+            SettingsTab::Sync,
+            SettingsTab::About,
+        ]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SettingsTab::General => "常规",
+            SettingsTab::Models => "模型与厂商",
+            SettingsTab::Skills => "技能",
+            SettingsTab::Sync => "同步与升级",
+            SettingsTab::About => "关于",
+        }
+    }
+
+    pub fn glyph(&self) -> &'static str {
+        match self {
+            SettingsTab::General => "⚙",
+            SettingsTab::Models => "◆",
+            SettingsTab::Skills => "✦",
+            SettingsTab::Sync => "⟳",
+            SettingsTab::About => "ⓘ",
+        }
+    }
 }
 
 /// 当前接收文本输入的目标。
@@ -44,6 +88,37 @@ pub enum InputTarget {
     Chat,
     Editor,
     Workspace,
+    /// 设置页 / 技能页里的某个表单字段。
+    Field(FormField),
+}
+
+/// 可编辑的表单字段。索引指向 `settings.providers` 的下标。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FormField {
+    /// 技能市场搜索框。
+    SkillSearch,
+    /// 厂商 API Key。
+    ProviderKey(u8),
+    /// 厂商 API 基址。
+    ProviderUrl(u8),
+    /// 厂商模型名。
+    ProviderModel(u8),
+    /// 厂商显示名。
+    ProviderName(u8),
+    /// 导入配置的路径。
+    ImportPath,
+}
+
+impl FormField {
+    pub fn index(self) -> Option<u8> {
+        match self {
+            FormField::ProviderKey(i)
+            | FormField::ProviderUrl(i)
+            | FormField::ProviderModel(i)
+            | FormField::ProviderName(i) => Some(i),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -64,6 +139,8 @@ pub enum Command {
     Preview,
     SwitchWorkspace,
     FocusMode,
+    Settings,
+    Skills,
 }
 
 impl Command {
@@ -78,6 +155,8 @@ impl Command {
             (Command::Preview, "预览当前文件", ""),
             (Command::SwitchWorkspace, "切换工作区…", ""),
             (Command::FocusMode, "专注模式（隐藏侧栏）", ""),
+            (Command::Settings, "打开设置", ""),
+            (Command::Skills, "技能市场", ""),
         ]
     }
 }
@@ -113,6 +192,33 @@ pub struct AppState {
     pub line_cache: RefCell<LineCache>,
     pub editor_scroll: gpui::UniformListScrollHandle,
 
+    // ===== 设置 =====
+    pub settings: neverwork_core::Settings,
+    pub settings_tab: SettingsTab,
+    /// 设置页表单当前编辑的字段与它的缓冲区。
+    pub active_field: Option<FormField>,
+    pub field_buf: TextBuffer,
+    /// 技能市场：分类过滤（None = 全部）。
+    pub skill_filter: Option<neverwork_core::SkillCategory>,
+    /// 技能市场排序：0=综合 1=安装量 2=星标。
+    pub skill_sort: u8,
+    /// 技能页顶部 Tab：0=技能 1=Agent 模板。
+    pub skills_tab: u8,
+    /// 技能搜索关键词。
+    pub skill_search: String,
+    /// 导入配置的路径。
+    pub import_path: String,
+    /// 最近一次操作的结果提示（设置页内显示）。
+    pub action_msg: Option<String>,
+    /// 升级检查结果。
+    pub update_status: Option<String>,
+    /// 当前窗口的可用逻辑宽度（render 时写入，供网格类视图算列数）。
+    pub layout_w: std::rc::Rc<std::cell::Cell<f32>>,
+    /// 自动保存计时代数（每次改动 +1，用于判定"最后一次改动"）。
+    pub auto_save_gen: std::rc::Rc<std::cell::Cell<u64>>,
+    /// 是否有待保存的自动保存。
+    pub auto_save_pending: bool,
+
     // ===== AI / 团队 =====
     pub streaming: bool,
     pub ai_ready: bool,
@@ -126,6 +232,31 @@ pub struct AppState {
     pub ws_focus: FocusHandle,
     /// 输入区在窗口中的位置（IME 候选框定位用）。
     pub input_area_bounds: std::rc::Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+/// 启动直达视图：`NW_VIEW=chat|team|file|skills|settings`。
+fn initial_view() -> CenterView {
+    match std::env::var("NW_VIEW").unwrap_or_default().to_lowercase().as_str() {
+        "team" => CenterView::Team,
+        "skills" => CenterView::Skills,
+        "settings" => CenterView::Settings,
+        _ => CenterView::Chat,
+    }
+}
+
+/// `NW_SETTINGS_TAB=general|models|skills|sync|about`。
+fn initial_settings_tab() -> SettingsTab {
+    match std::env::var("NW_SETTINGS_TAB")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "models" => SettingsTab::Models,
+        "skills" => SettingsTab::Skills,
+        "sync" => SettingsTab::Sync,
+        "about" => SettingsTab::About,
+        _ => SettingsTab::General,
+    }
 }
 
 fn resolve_root() -> PathBuf {
@@ -162,8 +293,12 @@ impl AppState {
             remote_url: None,
             online: true,
         };
-        let ai_ready = neverwork_agent::config_from_env().is_some();
         let config = neverwork_core::config::load();
+        let settings = neverwork_core::config::load_settings();
+        // 主题立即生效，首次渲染就是用户上次选的颜色。
+        neverwork_ui::theme::set_theme_mode(settings.theme);
+        let ai_ready = settings.usable_provider_count() > 0
+            || neverwork_agent::config_from_env().is_some();
         let sessions = data::demo_sessions();
 
         let mut me = Self {
@@ -172,11 +307,8 @@ impl AppState {
             files,
             expanded,
             recent: Vec::new(),
-            center: if std::env::var("NW_VIEW").map(|v| v == "team").unwrap_or(false) {
-                CenterView::Team
-            } else {
-                CenterView::Chat
-            },
+            center: initial_view(),
+            settings_tab: initial_settings_tab(),
             right_tab: RightTab::Files,
             palette_open: false,
             focus_mode: false,
@@ -192,6 +324,19 @@ impl AppState {
             dirty: false,
             line_cache: RefCell::new(LineCache::new()),
             editor_scroll: gpui::UniformListScrollHandle::new(),
+            settings,
+            active_field: None,
+            field_buf: TextBuffer::single_line(),
+            skill_filter: None,
+            skill_sort: 0,
+            skills_tab: 0,
+            skill_search: String::new(),
+            import_path: String::new(),
+            action_msg: None,
+            update_status: None,
+            layout_w: std::rc::Rc::new(std::cell::Cell::new(1200.0)),
+            auto_save_gen: std::rc::Rc::new(std::cell::Cell::new(0)),
+            auto_save_pending: false,
             streaming: false,
             ai_ready,
             notice: None,
@@ -215,6 +360,10 @@ impl AppState {
         }
 
         start_watcher(me.root.clone(), cx);
+        // 用 NW_VIEW 直达同步页时也自动查一次版本。
+        if me.settings_tab == SettingsTab::Sync && me.center == CenterView::Settings {
+            me.check_update(cx);
+        }
         cx.notify();
         me
     }
@@ -340,6 +489,7 @@ impl AppState {
 
     /// 在当前行插入 4 空格缩进；有选区时整块缩进。
     pub(crate) fn insert_indent(&mut self, cx: &mut Context<Self>) {
+        let indent = self.indent_str();
         match self.editor.selection() {
             Some(sel) => {
                 // 选中多行时逐行缩进。
@@ -354,7 +504,7 @@ impl AppState {
                         indented.push('\n');
                     }
                     if !line.trim().is_empty() || i == 0 {
-                        indented.push_str("    ");
+                        indented.push_str(&indent);
                     }
                     indented.push_str(line);
                 }
@@ -363,7 +513,7 @@ impl AppState {
                 self.editor.insert(&indented);
             }
             None => {
-                self.editor.insert("    ");
+                self.editor.insert(&indent);
             }
         }
         self.dirty = true;
@@ -457,6 +607,8 @@ impl AppState {
                 self.focus_mode = !self.focus_mode;
                 cx.notify();
             }
+            Command::Settings => self.open_settings(SettingsTab::General, cx),
+            Command::Skills => self.open_skills(cx),
         }
     }
 
@@ -467,6 +619,7 @@ impl AppState {
             InputTarget::Chat => &self.chat,
             InputTarget::Editor => &self.editor,
             InputTarget::Workspace => &self.ws_input,
+            InputTarget::Field(_) => &self.field_buf,
         }
     }
 
@@ -475,13 +628,40 @@ impl AppState {
             InputTarget::Chat => &mut self.chat,
             InputTarget::Editor => &mut self.editor,
             InputTarget::Workspace => &mut self.ws_input,
+            InputTarget::Field(_) => &mut self.field_buf,
         }
     }
 
     fn note_edit(&mut self, target: InputTarget) {
         if target == InputTarget::Editor {
             self.dirty = true;
+            self.schedule_auto_save();
         }
+    }
+
+    /// 自动保存：开启时每次改动重新计时 800ms，超时后写盘。
+    /// 每次新改动会推进 `auto_save_gen`，只有最后一次计时器真正落盘。
+    pub(crate) fn schedule_auto_save(&mut self) {
+        if !self.settings.auto_save || self.open_path.is_none() {
+            return;
+        }
+        let gen = self.auto_save_gen.get() + 1;
+        self.auto_save_gen.set(gen);
+        self.auto_save_pending = true;
+    }
+
+    /// 由渲染侧的定时器调用：若期间没有新改动则保存。
+    pub(crate) fn flush_auto_save(&mut self, cx: &mut Context<Self>) {
+        if !self.auto_save_pending || !self.dirty {
+            return;
+        }
+        self.auto_save_pending = false;
+        if let Some(path) = self.open_path.clone() {
+            if crate::filesystem::write_file(&path, self.editor.text()).is_ok() {
+                self.dirty = false;
+            }
+        }
+        cx.notify();
     }
 
     pub(crate) fn on_chat_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -496,6 +676,92 @@ impl AppState {
         if let Some(action) = keymap::route(&ev.keystroke) {
             self.apply_action(InputTarget::Editor, action, cx);
         }
+    }
+
+    /// 表单字段的按键处理：只走非文本按键，文本由 IME 注入 `field_buf`。
+    pub(crate) fn on_field_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(field) = self.active_field else {
+            return;
+        };
+        self.input_target = InputTarget::Field(field);
+        let Some(action) = keymap::route(&ev.keystroke) else {
+            // 可打印字符：IME 会调用 replace_text_in_range 写入 field_buf，
+            // 写完后触发 notify（见 input_handler）。
+            return;
+        };
+        match action {
+            KeyAction::Enter => self.commit_field(cx),
+            KeyAction::Escape => {
+                self.active_field = None;
+                self.action_msg = None;
+                cx.notify();
+            }
+            KeyAction::Tab { .. } => self.commit_field(cx),
+            other => {
+                let buf = &mut self.field_buf;
+                match other {
+                    KeyAction::Motion { motion, extend } => match motion {
+                        Motion::Left => buf.move_left(extend),
+                        Motion::Right => buf.move_right(extend),
+                        Motion::WordLeft => buf.move_word_left(extend),
+                        Motion::WordRight => buf.move_word_right(extend),
+                        Motion::Home | Motion::DocStart => buf.move_home(extend),
+                        Motion::End | Motion::DocEnd => buf.move_end(extend),
+                        Motion::Up => buf.move_up(extend),
+                        Motion::Down => buf.move_down(extend),
+                    },
+                    KeyAction::Backspace => buf.backspace(),
+                    KeyAction::Delete => buf.delete_forward(),
+                    KeyAction::SelectAll => buf.select_all(),
+                    KeyAction::Undo => {
+                        buf.undo();
+                    }
+                    KeyAction::Redo => {
+                        buf.redo();
+                    }
+                    KeyAction::Copy => {
+                        if let Some(t) = buf.selected_text().map(|s| s.to_string()) {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(t));
+                        }
+                    }
+                    KeyAction::Cut => {
+                        if let Some(t) = buf.take_selection() {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(t));
+                        }
+                    }
+                    KeyAction::Paste => {
+                        if let Some(t) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                            buf.insert(&t);
+                        }
+                    }
+                    KeyAction::Save => self.save_file(cx),
+                    _ => {}
+                }
+                // 实时同步到模型，让输入框内容立刻可见。
+                let value = self.field_buf.text().to_string();
+                self.apply_field_live(field, value, cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// 字段编辑过程中直接写回（不走落盘，避免每次按键都写文件）。
+    pub(crate) fn apply_field_live(
+        &mut self,
+        field: FormField,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        match field {
+            FormField::SkillSearch => {
+                self.skill_search = value;
+            }
+            FormField::ImportPath => {
+                self.import_path = value;
+            }
+            _ => {}
+        }
+        cx.notify();
     }
 
     pub(crate) fn on_workspace_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -591,20 +857,22 @@ impl AppState {
                     cx.notify();
                 }
                 InputTarget::Workspace => self.apply_workspace_input(cx),
+                InputTarget::Field(_) => self.commit_field(cx),
             },
             KeyAction::Tab { shift } => {
                 if target == InputTarget::Editor {
                     if shift {
-                        // Shift+Tab：去掉行首 4 空格（简化版反缩进）。
+                        // Shift+Tab：按设置里的缩进宽度去掉行首空白。
+                        let indent = self.indent_str();
                         let start = self.editor.line_start_of(self.editor.cursor());
                         let text = self.editor.text().to_string();
                         let rest = &text[start..];
-                        let strip = if rest.starts_with("    ") {
-                            4
-                        } else if rest.starts_with("  ") {
-                            2
+                        let w = indent.len();
+                        let strip = if w > 0 && rest.starts_with(&indent) {
+                            w
                         } else {
-                            0
+                            // 容忍实际缩进少于设置宽度的情况
+                            rest.chars().take_while(|c| *c == ' ').count().min(w)
                         };
                         if strip > 0 {
                             self.editor.move_to(start, false);
@@ -639,9 +907,9 @@ impl AppState {
         if text.is_empty() || self.streaming {
             return;
         }
-        let Some((provider_id, config)) = neverwork_agent::config_from_env() else {
+        let Some((provider_id, config)) = self.active_provider_config() else {
             self.notice = Some(
-                "未配置 AI：请设置环境变量 NW_API_KEY 后重启（可选 NW_PROVIDER=openai|anthropic、NW_BASE_URL、NW_MODEL）".into(),
+                "还没有可用的模型：打开「设置 → 模型与厂商」填入 API Key 即可开始对话".into(),
             );
             cx.notify();
             return;
@@ -763,9 +1031,12 @@ impl Render for AppState {
         // 布局优先级：中栏 > 左侧会话栏 > 右侧文件栏，窄窗口先牺牲右栏，
         // 极窄时才隐藏会话列表（图标栏始终保留，否则没有任何全局入口）。
         let visible_w: f32 = window.bounds().size.width.into();
+        self.layout_w.set(visible_w);
         let hide_sides = self.focus_mode;
-        let hide_right = visible_w < 1080.0;
-        let hide_list = visible_w < 620.0;
+        // 设置页与技能市场是"全页"视图，会话列表和右栏都让出来。
+        let full_page = matches!(self.center, CenterView::Settings | CenterView::Skills);
+        let hide_right = visible_w < 1080.0 || full_page;
+        let hide_list = visible_w < 620.0 || full_page;
         let mut root = div()
             .relative()
             .size_full()

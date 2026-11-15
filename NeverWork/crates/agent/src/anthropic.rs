@@ -28,6 +28,7 @@ struct WireRequest<'a> {
     model: &'a str,
     max_tokens: u32,
     stream: bool,
+    temperature: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
     messages: Vec<WireMessage<'a>>,
@@ -56,6 +57,7 @@ impl LlmProvider for AnthropicProvider {
             model: &self.config.model,
             max_tokens: 4096,
             stream: true,
+            temperature: self.config.temperature.clamp(0.0, 2.0),
             system,
             messages: messages
                 .iter()

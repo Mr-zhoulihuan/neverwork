@@ -19,5 +19,7 @@ pub type AppResult<T> = Result<T, AppError>;
 
 pub mod config;
 pub mod model;
+pub mod settings;
 pub use config::Config;
 pub use model::*;
+pub use settings::{Settings, ThemeMode, ProviderPreset, ProviderEntry, Protocol, Skill, SkillCategory, APP_VERSION};

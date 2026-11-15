@@ -62,6 +62,7 @@ fn pipeline_runs_roles_in_order() {
         api_key: "k".into(),
         base_url: format!("http://127.0.0.1:{port}"),
         model: "gpt-4o".into(),
+        temperature: 0.7,
     };
     let cancel = Arc::new(AtomicBool::new(false));
     let mut starts = Vec::new();
@@ -91,6 +92,7 @@ fn pipeline_cancel_stops_early() {
         api_key: "k".into(),
         base_url: format!("http://127.0.0.1:{port}"),
         model: "gpt-4o".into(),
+        temperature: 0.7,
     };
     let cancel = Arc::new(AtomicBool::new(true));
     let mut starts = 0;

@@ -6,7 +6,9 @@ pub(crate) mod chat;
 pub(crate) mod editor;
 pub(crate) mod files;
 pub(crate) mod palette;
+pub(crate) mod settings;
 pub(crate) mod sidebar;
+pub(crate) mod skills;
 pub(crate) mod text_fit;
 pub(crate) mod team;
 
@@ -23,6 +25,8 @@ impl AppState {
             CenterView::Chat => self.chat_pane(cx).into_any_element(),
             CenterView::File => self.editor_pane(cx).into_any_element(),
             CenterView::Team => self.team_pane(cx).into_any_element(),
+            CenterView::Settings => self.settings_pane(cx).into_any_element(),
+            CenterView::Skills => self.skills_pane(cx).into_any_element(),
         }
     }
 }
