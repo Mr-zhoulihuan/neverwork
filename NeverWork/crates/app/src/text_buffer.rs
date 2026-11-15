@@ -23,6 +23,9 @@ pub struct TextBuffer {
     cursor: usize,
     /// 选区锚点；存在且不等于 cursor 时构成选区。
     anchor: Option<usize>,
+    /// 额外光标（多光标）。主光标仍是 `cursor`，这里只存"附加点"。
+    /// 所有编辑操作在 `*_multi` 系列里统一处理，单光标路径完全不受影响。
+    extra_cursors: Vec<usize>,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     multiline: bool,
@@ -52,6 +55,39 @@ pub fn next_boundary(s: &str, idx: usize) -> usize {
     i.min(s.len())
 }
 
+/// 取 `pos` 所在「词」的字节区间。
+///
+/// 中文等非 ASCII 字符也当作词字符，这样 Ctrl+D 对中文同样有效。
+pub fn word_bounds(s: &str, pos: usize) -> (usize, usize) {
+    let pos = pos.min(s.len());
+    let pos = {
+        let mut p = pos;
+        while p > 0 && !s.is_char_boundary(p) {
+            p -= 1;
+        }
+        p
+    };
+    let mut start = pos;
+    while start > 0 {
+        let prev = prev_boundary(s, start);
+        let ch = s[prev..start].chars().next().unwrap_or(' ');
+        if !is_word_char(ch) {
+            break;
+        }
+        start = prev;
+    }
+    let mut end = pos;
+    while end < s.len() {
+        let next = next_boundary(s, end);
+        let ch = s[end..next].chars().next().unwrap_or(' ');
+        if !is_word_char(ch) {
+            break;
+        }
+        end = next;
+    }
+    (start, end)
+}
+
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -76,6 +112,7 @@ impl TextBuffer {
             text,
             cursor,
             anchor: None,
+            extra_cursors: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             multiline,
@@ -124,6 +161,7 @@ impl TextBuffer {
         self.text = text.into();
         self.cursor = self.text.len();
         self.anchor = None;
+        self.extra_cursors.clear();
         self.undo_stack.clear();
         self.redo_stack.clear();
     }
@@ -324,6 +362,166 @@ impl TextBuffer {
     pub fn select_all(&mut self) {
         self.anchor = Some(0);
         self.cursor = self.text.len();
+    }
+
+    // ===== 多光标 =====
+
+    /// 全部光标（含主光标），已排序去重。
+    pub fn cursors(&self) -> Vec<usize> {
+        let mut v = self.extra_cursors.clone();
+        v.push(self.cursor);
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    pub fn cursor_count(&self) -> usize {
+        self.cursors().len()
+    }
+
+    pub fn has_multi_cursor(&self) -> bool {
+        !self.extra_cursors.is_empty()
+    }
+
+    /// 在 `pos` 加一个光标（已存在则忽略）。
+    pub fn add_cursor(&mut self, pos: usize) {
+        let p = self.clamp(pos);
+        if p != self.cursor && !self.extra_cursors.contains(&p) {
+            self.extra_cursors.push(p);
+        }
+    }
+
+    /// 清掉额外光标，只留主光标。
+    pub fn clear_extra_cursors(&mut self) {
+        self.extra_cursors.clear();
+        self.anchor = None;
+    }
+
+    /// 每个光标独立左右移动一个字符。返回是否有变化。
+    pub fn move_all(&mut self, forward: bool) {
+        if self.extra_cursors.is_empty() {
+            if forward {
+                self.move_right(false);
+            } else {
+                self.move_left(false);
+            }
+            return;
+        }
+        let mut next: Vec<usize> = Vec::new();
+        for p in self.cursors() {
+            let np = if forward {
+                next_boundary(&self.text, p)
+            } else {
+                prev_boundary(&self.text, p)
+            };
+            if !next.contains(&np) {
+                next.push(np);
+            }
+        }
+        // 第一个作为主光标，其余作为额外光标
+        next.sort_unstable();
+        self.cursor = next[0];
+        self.extra_cursors = next[1..].to_vec();
+        self.anchor = None;
+    }
+
+    /// 在所有光标处插入同一段文本。
+    ///
+    /// 从后往前插，前面的偏移就不会被后续插入影响；
+    /// 整批只记一次撤销快照，撤销时一次全撤（符合直觉）。
+    pub fn insert_multi(&mut self, s: &str) {
+        if self.extra_cursors.is_empty() {
+            self.insert(s);
+            return;
+        }
+        let s: String = if self.multiline {
+            s.to_string()
+        } else {
+            s.replace(['\n', '\r'], " ")
+        };
+        if s.is_empty() {
+            return;
+        }
+        let mut cursors = self.cursors();
+        cursors.sort_unstable();
+        cursors.dedup();
+        self.record();
+
+        // 从后往前插，前面的偏移不受影响
+        for &p in cursors.iter().rev() {
+            self.text.insert_str(p, &s);
+        }
+        // 原第 i 个光标（升序下标）最终落在 p + i*len + len：
+        // 它前面有 i 段插入，再加上自己这段。
+        let new_cursors: Vec<usize> = cursors
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| p + i * s.len() + s.len())
+            .collect();
+        self.cursor = *new_cursors.last().unwrap_or(&self.cursor);
+        self.extra_cursors = new_cursors[..new_cursors.len().saturating_sub(1)].to_vec();
+        self.anchor = None;
+    }
+
+    /// 在所有光标处退格（删前一个字符）。
+    pub fn backspace_multi(&mut self) {
+        if self.extra_cursors.is_empty() {
+            self.backspace();
+            return;
+        }
+        let mut cursors = self.cursors();
+        cursors.sort_unstable();
+        self.record();
+
+        // 先算出每个光标要删的区间（基于原始文本），再一次性从后往前删。
+        // 直接边删边算会读到已被改动的位置，导致删错字符。
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        for &p in &cursors {
+            if p == 0 {
+                continue;
+            }
+            let prev = prev_boundary(&self.text, p);
+            ranges.push((prev, p));
+        }
+        ranges.sort_unstable();
+        // 区间可能重叠（光标挨得很近），合并后用「删除点」记录新光标位置
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (s, e) in ranges {
+            match merged.last_mut() {
+                // 只有真正重叠才合并；相邻（s == last.1）是两段独立删除
+                Some(last) if s < last.1 => last.1 = last.1.max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+
+        let mut new_cursors: Vec<usize> = Vec::new();
+        for &p in &cursors {
+            if p == 0 {
+                new_cursors.push(0);
+                continue;
+            }
+            // 该光标删掉的是它前面那段；新位置 = 该段起点 - 前面已删的量
+            let prev = prev_boundary(&self.text, p);
+            let removed_before: usize = merged
+                .iter()
+                .filter(|(_rs, re)| *re <= prev)
+                .map(|(rs, re)| re - rs)
+                .sum();
+            new_cursors.push(prev - removed_before);
+        }
+
+        for (s, e) in merged.iter().rev() {
+            self.text.replace_range(*s..*e, "");
+        }
+
+        new_cursors.sort_unstable();
+        new_cursors.dedup();
+        if new_cursors.is_empty() {
+            return;
+        }
+        self.cursor = *new_cursors.last().unwrap();
+        self.extra_cursors = new_cursors[..new_cursors.len() - 1].to_vec();
+        self.anchor = None;
     }
 
     // ===== 编辑 =====
@@ -552,5 +750,142 @@ mod tests {
         assert!(b.text().is_char_boundary(b.cursor()));
         b.insert("X");
         assert_eq!(b.text(), "aX中b");
+    }
+}
+
+#[cfg(test)]
+mod multi_cursor_tests {
+    use super::*;
+
+    fn buf(s: &str) -> TextBuffer {
+        TextBuffer::from_text(s, true)
+    }
+
+    #[test]
+    fn single_cursor_by_default() {
+        let b = buf("abc");
+        assert_eq!(b.cursor_count(), 1);
+        assert!(!b.has_multi_cursor());
+    }
+
+    #[test]
+    fn add_cursor_dedups() {
+        let mut b = buf("abcdef");
+        b.move_to(1, false);
+        b.add_cursor(3);
+        b.add_cursor(3); // 重复
+        assert_eq!(b.cursor_count(), 2);
+        b.add_cursor(1); // 与主光标相同
+        assert_eq!(b.cursor_count(), 2);
+    }
+
+    #[test]
+    fn insert_at_all_cursors() {
+        let mut b = buf("aaa");
+        b.move_to(0, false);
+        b.add_cursor(1);
+        b.add_cursor(2);
+        b.insert_multi("X");
+        // 三个位置各插一个 X，从后往前
+        assert_eq!(b.text(), "XaXaXa");
+        assert_eq!(b.cursor_count(), 3);
+    }
+
+    #[test]
+    fn insert_multi_undo_once() {
+        let mut b = buf("aaa");
+        b.move_to(0, false);
+        b.add_cursor(1);
+        b.add_cursor(2);
+        b.insert_multi("X");
+        assert_eq!(b.text(), "XaXaXa");
+        assert!(b.undo(), "应能撤销");
+        assert_eq!(b.text(), "aaa", "一次撤销应撤掉全部插入");
+    }
+
+    #[test]
+    fn backspace_at_all_cursors() {
+        // "abc"，光标分别停在 a、b、c 之后 → 三个字符都该被删掉
+        let mut b = buf("abc");
+        b.move_to(3, false);
+        b.add_cursor(2);
+        b.add_cursor(1);
+        b.backspace_multi();
+        assert_eq!(b.text(), "");
+        // 都退到 0 附近
+        for c in b.cursors() {
+            assert_eq!(c, 0);
+        }
+    }
+
+    #[test]
+    fn backspace_multi_handles_position_zero() {
+        let mut b = buf("ab");
+        b.move_to(0, false);
+        b.add_cursor(2);
+        b.backspace_multi();
+        // 位置 0 不动，位置 2 删掉 b
+        assert_eq!(b.text(), "a");
+        assert_eq!(b.cursor_count(), 2);
+    }
+
+    #[test]
+    fn move_all_keeps_relative_order() {
+        let mut b = buf("abcdef");
+        b.move_to(1, false);
+        b.add_cursor(4);
+        b.move_all(true);
+        let cs = b.cursors();
+        assert_eq!(cs, vec![2, 5]);
+    }
+
+    #[test]
+    fn move_all_backward_stops_at_zero() {
+        let mut b = buf("abc");
+        b.move_to(0, false);
+        b.add_cursor(2);
+        b.move_all(false);
+        let cs = b.cursors();
+        assert_eq!(cs[0], 0, "0 不会再往前");
+        assert_eq!(cs[1], 1);
+    }
+
+    #[test]
+    fn clear_extra_keeps_primary() {
+        let mut b = buf("abcdef");
+        b.move_to(4, false);
+        b.add_cursor(1);
+        b.clear_extra_cursors();
+        assert_eq!(b.cursor_count(), 1);
+        assert_eq!(b.cursor(), 4, "主光标保持不动");
+    }
+
+    #[test]
+    fn single_cursor_falls_back_to_normal_insert() {
+        let mut b = buf("ab");
+        b.move_to(1, false);
+        b.insert_multi("X");
+        assert_eq!(b.text(), "aXb");
+    }
+
+    #[test]
+    fn multi_cursor_cjk_safe() {
+        let mut b = buf("中文测试");
+        b.move_to(0, false);
+        b.add_cursor(6); // "中" 之后是 "文"
+        b.insert_multi("-");
+        assert_eq!(b.text(), "-中文-测试");
+        // 每个光标都应在 char boundary 上
+        for c in b.cursors() {
+            assert!(b.text().is_char_boundary(c), "光标 {c} 不在字符边界");
+        }
+    }
+
+    #[test]
+    fn reset_clears_extra_cursors() {
+        let mut b = buf("abc");
+        b.add_cursor(1);
+        b.reset("new");
+        assert_eq!(b.cursor_count(), 1);
     }
 }

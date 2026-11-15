@@ -89,6 +89,29 @@ impl ToolCall {
                 .and_then(|v| v.as_str())
                 .unwrap_or("?")
                 .to_string(),
+            "multi_patch" => {
+                let n = a
+                    .get("edits")
+                    .and_then(|v| v.as_array())
+                    .map(|x| x.len())
+                    .unwrap_or(0);
+                let names: Vec<String> = a
+                    .get("edits")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .take(3)
+                            .filter_map(|e| e.get("path").and_then(|p| p.as_str()))
+                            .map(|s| s.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if names.len() < n {
+                    format!("{n} 个文件（{} 等）", names.join("、"))
+                } else {
+                    format!("{n} 个文件（{}）", names.join("、"))
+                }
+            }
             "search_files" => {
                 let q = a.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
                 format!("\"{q}\"")
@@ -267,6 +290,31 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             requires_approval: true,
         },
         ToolSpec {
+            name: "multi_patch",
+            description: "一次性修改多个文件（跨文件重构用）。整批作为事务：全部校验通过才写，中途失败会回滚。一次审批即可。edits 里每项用 content 整文件覆盖，或用 old_string/new_string 局部替换（二选一）。",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "edits": {
+                        "type": "array",
+                        "description": "要改的文件列表，同一文件只能出现一次",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "相对工作区根的路径" },
+                                "content": { "type": "string", "description": "整文件新内容（与 old_string 二选一）" },
+                                "old_string": { "type": "string", "description": "要被替换的原文，必须在文件中恰好出现一次" },
+                                "new_string": { "type": "string", "description": "替换后的文本" }
+                            },
+                            "required": ["path"]
+                        }
+                    }
+                },
+                "required": ["edits"]
+            }),
+            requires_approval: true,
+        },
+        ToolSpec {
             name: "apply_patch",
             description: "把文件中一段唯一存在的原文替换成新文本。适合小改动，比整文件重写更安全。需要用户批准。",
             parameters: json!({
@@ -303,6 +351,7 @@ pub fn preview(call: &ToolCall, ctx: &ToolContext) -> Result<Vec<DiffLine>, Stri
             let old = fs::read_to_string(&path).unwrap_or_default();
             Ok(diff::with_context(&diff::diff_lines(&old, content), 3))
         }
+        "multi_patch" => crate::multi_patch::preview_preview(call, ctx),
         "apply_patch" => {
             let rel = a.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let old_s = a.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
@@ -327,6 +376,7 @@ pub fn execute(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
         "search_files" => search_files(call, &a, ctx),
         "write_file" => write_file(call, &a, ctx),
         "apply_patch" => apply_patch(call, &a, ctx),
+        "multi_patch" => crate::multi_patch::execute(call, ctx),
         other => ToolResult::err(call, format!("未知工具 `{other}`")),
     }
 }
@@ -615,7 +665,7 @@ fn replace_once(text: &str, old: &str, new: &str) -> Result<String, String> {
 }
 
 /// 原子写：临时文件 + rename，避免写一半把文件弄坏。
-fn write_atomic(path: &Path, content: &str) -> AppResult<()> {
+pub(crate) fn write_atomic(path: &Path, content: &str) -> AppResult<()> {
     let tmp = path.with_extension("nw-tool-tmp");
     fs::write(&tmp, content)?;
     if path.exists() {
@@ -654,7 +704,14 @@ mod tests {
     #[test]
     fn specs_cover_all_tools() {
         let names: Vec<&str> = tool_specs().iter().map(|t| t.name).collect();
-        for n in ["read_file", "list_dir", "search_files", "write_file", "apply_patch"] {
+        for n in [
+            "read_file",
+            "list_dir",
+            "search_files",
+            "write_file",
+            "apply_patch",
+            "multi_patch",
+        ] {
             assert!(names.contains(&n), "缺少工具 {n}");
         }
     }
@@ -666,6 +723,7 @@ mod tests {
         assert!(!requires_approval("search_files"));
         assert!(requires_approval("write_file"));
         assert!(requires_approval("apply_patch"));
+        assert!(requires_approval("multi_patch"));
         // 未知工具按最严格处理
         assert!(requires_approval("rm_rf"));
     }

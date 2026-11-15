@@ -3,6 +3,7 @@
 mod data;
 mod filesystem;
 mod find;
+mod folding;
 mod highlight;
 mod input_handler;
 mod keymap;

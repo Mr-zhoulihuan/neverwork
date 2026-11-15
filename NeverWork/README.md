@@ -105,7 +105,53 @@ design/   设计稿（HTML/PNG）与设计规范 DESIGN-SPEC.md
 - **响应式 + 专注模式**：窗口较窄或高 DPI 时自动收起侧栏，
   标题栏「◧ 专注」可手动切换。
 
-测试：129 个。app 侧 text_buffer 11 / text_fit 5 / model_picker 10 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2；agent 侧 tools 17 / diff 12 / team role_provider 5 / sse 2；core 侧 settings 13 + config 5；ui 3。另有 3 条打真实 DeepSeek API 的集成测试（需密钥，默认跳过）。
+测试：185 个。app 侧 text_buffer 11 / text_fit 5 / model_picker 10 / settings_ops 3 / skills 1 / input_handler 4 / keymap 3 / line_cache 3 / filesystem 2；agent 侧 tools 17 / diff 12 / team role_provider 5 / sse 2；core 侧 settings 13 + config 5；ui 3。另有 3 条打真实 DeepSeek API 的集成测试（需密钥，默认跳过）。
+
+### M8 — 多光标 / 代码折叠 / 跨文件补丁 / 真主管分派 / Gemini 原生（本期）
+
+**1. 多光标**
+
+- `Alt/Option + 点击` 增加一个光标；`Ctrl+D` 把光标处的词连同下一个相同词一起选中（再按继续扩）。
+- 主光标用实色、额外光标用半透明细线，同屏能一眼分出有几个。
+- 多处同时输入、同时退格：`insert_multi` / `backspace_multi` 从后往前处理，
+  **整批只记一次撤销**——撤销时一次全撤，符合直觉。
+- 实现上多光标是 `TextBuffer` 里独立的一层（`extra_cursors`），
+  单光标路径完全没动，因此既有的光标/选区/撤销行为零回归。
+
+**2. 代码折叠**
+
+- 行号左侧出现 `▾/▸`，点一下折叠/展开；`Ctrl+Shift+[` 全折、`Ctrl+Shift+]` 全展。
+- 折叠判定用「花括号配平优先、缩进兜底」：`{}`/`()`/`[]` 收尾的行按括号配对找结尾，
+  其余按缩进找。Python / YAML 这类无括号语言同样可用。
+- 折叠后**不重排文本**，只是渲染时跳过隐藏行，所以光标、选区、保存全部不受影响。
+- 编辑后自动清理失效的折叠点（`reconcile`），不会折到错位置。
+
+**3. 跨文件批量补丁 `multi_patch`**
+
+- 一次调用改多个文件，**整批作为一个事务**：先全量校验（路径/唯一性/体积），
+  任何一项不通过就整批不动；写入中途失败会把已写的回滚。
+- 于是用户只看到一次合并 diff、点一次允许。跨文件重构（改签名、重命名、批量替换）
+  从"十几次审批"变成"一次审批"。
+- 单批上限 20 个文件；同一文件重复出现、`content` 与 `old_string` 混用都会直接报错。
+
+**4. Supervisor 真正分派**
+
+- 之前 `主管指派` 等同并行，现在是真分派：Lead 每轮看当前进展，输出下一个该谁做。
+- 决策是一次极短调用（只要角色名或 `DONE`），解析容忍多说几句
+  （取最早出现的角色名；说了「完成」且没点名才收尾）。
+- 解析失败按「还没干过活的角色」兜底，保证能推进；同一角色连续两次以上、
+  或达到 6 步上限就收尾，避免空转烧 token。
+
+**5. Gemini 原生协议**
+
+- 新 `GeminiProvider`：`/models/{model}:streamGenerateContent?alt=sse`，
+  `contents[{role,parts[{text}]}]` + 独立 `systemInstruction`，认证走 query `key`。
+- `role` 映射 `user`/`model`；空文本的 assistant 轮次（纯工具调用）自动跳过。
+- 选 Google Gemini 厂商不再走 OpenAI 兼容路径。
+- 工具调用暂不接：Gemini 的 function calling 结构与 OpenAI 不同，
+  混着做容易让模型行为不可预期，留给单独一轮。
+
+测试：185 个（新增 folding 11 / multi_patch 13 / supervisor 9 / gemini 13 / 多光标 12）。
 
 ### M7 — 步骤折叠 / 右栏收起 / 查找替换 / 团队带工具（本期）
 

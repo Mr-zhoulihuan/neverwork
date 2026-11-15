@@ -4,10 +4,13 @@
 //! 使用 `ureq`（阻塞 + 流式读取）在后台线程运行，避免与 GPUI 的异步执行器冲突。
 
 mod agent_loop;
+pub mod multi_patch;
 mod anthropic;
+mod gemini;
 pub mod diff;
 mod openai;
 mod sse;
+mod supervisor;
 mod team;
 pub mod tools;
 #[cfg(test)]
@@ -16,6 +19,8 @@ mod tests;
 pub use agent_loop::{run_agent, AgentEvent};
 pub use openai::OpenAiProvider;
 pub use anthropic::AnthropicProvider;
+pub use gemini::GeminiProvider;
+pub use supervisor::{parse_decision, Decision};
 pub use team::{run_team, TeamEvent};
 pub use tools::{ToolCall, ToolResult, ToolSpec};
 
@@ -168,6 +173,7 @@ pub fn config_from_env() -> Option<(String, ProviderConfig)> {
 pub fn build_provider(provider: &str, config: ProviderConfig) -> Box<dyn LlmProvider> {
     match provider {
         "anthropic" => Box::new(AnthropicProvider::new(config)),
+        "gemini" => Box::new(GeminiProvider::new(config)),
         _ => Box::new(OpenAiProvider::new(config)),
     }
 }

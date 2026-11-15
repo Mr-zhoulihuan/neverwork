@@ -243,6 +243,8 @@ pub struct AppState {
     /// 查找 / 替换输入框的缓冲区。
     pub find_query_buf: TextBuffer,
     pub find_replace_buf: TextBuffer,
+    /// 已折叠的块（键 = 起始行号，0 基）。
+    pub folds: std::collections::BTreeSet<usize>,
     /// 最近一次操作的结果提示（设置页内显示）。
     pub action_msg: Option<String>,
     /// 升级检查结果。
@@ -393,6 +395,7 @@ impl AppState {
             find: crate::find::FindState::default(),
             find_query_buf: TextBuffer::single_line(),
             find_replace_buf: TextBuffer::single_line(),
+            folds: std::collections::BTreeSet::new(),
             action_msg: None,
             update_status: None,
             layout_w: std::rc::Rc::new(std::cell::Cell::new(1200.0)),
@@ -444,6 +447,40 @@ impl AppState {
         }
         if std::env::var("NW_RIGHT_COLLAPSED").map(|v| v == "1").unwrap_or(false) {
             me.right_collapsed = true;
+        }
+        // 验证用：预置多光标（逗号分隔的字节偏移），便于截图确认渲染。
+        if let Ok(v) = std::env::var("NW_CURSORS") {
+            if me.open_path.is_some() {
+                let mut first = true;
+                for part in v.split(',').filter(|x| !x.trim().is_empty()) {
+                    if let Ok(p) = part.trim().parse::<usize>() {
+                        if first {
+                            me.editor.move_to(p, false);
+                            first = false;
+                        } else {
+                            me.editor.add_cursor(p);
+                        }
+                    }
+                }
+            }
+        }
+        // 验证用：在所有光标处插入同一段文本，确认多光标编辑生效。
+        if let Ok(t) = std::env::var("NW_TYPE") {
+            if me.open_path.is_some() && me.editor.has_multi_cursor() {
+                me.editor.insert_multi(&t);
+                me.dirty = true;
+            }
+        }
+        // 验证用：折叠前 N 个可折叠块。
+        if let Ok(n) = std::env::var("NW_FOLD") {
+            if let Ok(n) = n.parse::<usize>() {
+                if me.open_path.is_some() {
+                    me.fold_all(cx);
+                    let keep: std::collections::BTreeSet<usize> =
+                        me.folds.iter().copied().take(n).collect();
+                    me.folds = keep;
+                }
+            }
         }
         // 验证用：打开编辑器并预置查找词。
         if let Ok(q) = std::env::var("NW_FIND") {
@@ -737,6 +774,7 @@ impl AppState {
         if target == InputTarget::Editor {
             self.dirty = true;
             self.schedule_auto_save();
+            self.reconcile_folds();
         }
     }
 
@@ -837,6 +875,9 @@ impl AppState {
                     }
                     KeyAction::Save => self.save_file(cx),
             KeyAction::Find => self.open_find(cx),
+            KeyAction::FoldAll => self.fold_all(cx),
+            KeyAction::SelectNextOccurrence => self.select_next_occurrence(cx),
+            KeyAction::UnfoldAll => self.unfold_all(cx),
             KeyAction::Replace => {
                 self.open_find(cx);
                 self.find.replace_focused = true;
@@ -900,7 +941,11 @@ impl AppState {
                 cx.notify();
             }
             KeyAction::Backspace => {
-                self.buffer_mut(target).backspace();
+                if target == InputTarget::Editor && self.editor.has_multi_cursor() {
+                    self.editor.backspace_multi();
+                } else {
+                    self.buffer_mut(target).backspace();
+                }
                 self.note_edit(target);
                 if target == InputTarget::Editor {
                     self.scroll_editor_to_cursor();
@@ -956,6 +1001,9 @@ impl AppState {
             }
             KeyAction::Save => self.save_file(cx),
             KeyAction::Find => self.open_find(cx),
+            KeyAction::FoldAll => self.fold_all(cx),
+            KeyAction::SelectNextOccurrence => self.select_next_occurrence(cx),
+            KeyAction::UnfoldAll => self.unfold_all(cx),
             KeyAction::Replace => {
                 self.open_find(cx);
                 self.find.replace_focused = true;
@@ -1411,6 +1459,98 @@ impl AppState {
             self.expanded_steps.insert(key);
         }
         cx.notify();
+    }
+
+    // ===== 多光标 =====
+
+    /// 给一段字节区间补上「额外光标」（Alt+点击用）。
+    pub(crate) fn add_cursor_at(&mut self, pos: usize, cx: &mut Context<Self>) {
+        if self.editor.has_selection() {
+            self.editor.clear_extra_cursors();
+        }
+        self.editor.add_cursor(pos);
+        cx.notify();
+    }
+
+    pub(crate) fn clear_multi_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.editor.has_multi_cursor() {
+            self.editor.clear_extra_cursors();
+            cx.notify();
+        }
+    }
+
+    /// Ctrl+D：把光标处的词连同「下一个相同词」一起选中。
+    ///
+    /// 第一次按下选当前词，之后每按一次再选下一个出现位置。
+    pub(crate) fn select_next_occurrence(&mut self, cx: &mut Context<Self>) {
+        let text = self.editor.text().to_string();
+
+        // 已经有选区：把它当作要复制的词
+        let word = match self.editor.selected_text() {
+            Some(w) if !w.is_empty() && !w.contains('\n') => w.to_string(),
+            _ => {
+                // 没有选区：选中光标所在的词
+                let cursor = self.editor.cursor();
+                let (s, e) = crate::text_buffer::word_bounds(&text, cursor);
+                if s == e {
+                    return;
+                }
+                self.editor.move_to(s, false);
+                self.editor.move_to(e, true);
+                cx.notify();
+                return;
+            }
+        };
+
+        // 找当前选区之后的下一个同词
+        let from = self.editor.selection().map(|r| r.end).unwrap_or(0);
+        let Some(pos) = text[from..].find(&word).map(|i| from + i) else {
+            self.notice = Some(format!("没有更多「{word}」"));
+            cx.notify();
+            return;
+        };
+        if let Some(sel) = self.editor.selection() {
+            // 把已有选区的起点作为额外光标锚点，再扩出新区间
+            let _ = sel;
+        }
+        self.editor.add_cursor(pos);
+        self.editor.move_to(pos + word.len(), true);
+        self.notice = Some(format!("已选中 {} 处「{word}」", self.editor.cursor_count()));
+        cx.notify();
+    }
+
+    // ===== 代码折叠 =====
+
+    /// 折叠 / 展开第 `line` 行开始的块。
+    pub(crate) fn toggle_fold(&mut self, line: usize, cx: &mut Context<Self>) {
+        if !self.folds.remove(&line) {
+            self.folds.insert(line);
+        }
+        cx.notify();
+    }
+
+    /// 全部折叠（只折最外层）。
+    pub(crate) fn fold_all(&mut self, cx: &mut Context<Self>) {
+        let text = self.editor.text().to_string();
+        let lines: Vec<&str> = text.split('\n').collect();
+        let starts = crate::folding::foldable_starts(&lines);
+        self.folds = starts.into_iter().collect();
+        cx.notify();
+    }
+
+    pub(crate) fn unfold_all(&mut self, cx: &mut Context<Self>) {
+        self.folds.clear();
+        cx.notify();
+    }
+
+    /// 内容变化后清理失效的折叠点。
+    pub(crate) fn reconcile_folds(&mut self) {
+        if self.folds.is_empty() {
+            return;
+        }
+        let text = self.editor.text().to_string();
+        let lines: Vec<&str> = text.split('\n').collect();
+        crate::folding::reconcile(&mut self.folds, &lines);
     }
 
     // ===== 查找 / 替换 =====

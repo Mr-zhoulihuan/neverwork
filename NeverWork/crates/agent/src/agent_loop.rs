@@ -206,10 +206,13 @@ fn build_system_prompt(persona: &str, root: &std::path::Path) -> String {
 - search_files(pattern, path?)：按文本搜索，定位改动位置
 - write_file(path, content)：整体写入（新建或覆盖）
 - apply_patch(path, old_string, new_string)：把一段**唯一存在**的原文替换掉
+- multi_patch(edits[])：一次改多个文件，整批当作事务（全部校验通过才写，失败回滚），
+  只弹一次审批。跨文件重构（改签名、重命名、批量替换）优先用它，而不是逐个 apply_patch
 
 工作方式要求：
 1. 改文件之前先用 read_file 看真实内容，不要凭猜测写代码。
-2. 小改动优先用 apply_patch，old_string 要带足够上下文保证唯一。
+2. 小改动优先用 apply_patch；要动 2 个以上文件时用 multi_patch 一次提交，
+   old_string 都要带足够上下文保证唯一。
 3. 写操作会弹给用户批准，批准后才会落盘；被拒绝就换方案，不要重复同样的写入。
 4. 回答简洁，说清「改了什么、为什么」，不要复述整个文件。
 5. 不确定的事实不要编造；需要更多信息就继续调用工具。"

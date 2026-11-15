@@ -135,6 +135,7 @@ impl AppState {
         // ===== 行列表 =====
         let lines = self.line_cache.borrow_mut().sync(self.editor.text(), lang);
         let cursor = self.editor.cursor();
+        let all_cursors: std::rc::Rc<Vec<usize>> = std::rc::Rc::new(self.editor.cursors());
         let sel = self.editor.selection();
         let count = lines.line_count();
         let entity = cx.entity();
@@ -146,20 +147,41 @@ impl AppState {
         let show_numbers = self.settings.show_line_numbers;
         let gutter_w = if show_numbers { GUTTER_W } else { 8.0 };
 
-        let list = uniform_list("editor-lines", count, move |range, _window, _cx| {
+        // 折叠：先算出「真实行号 → 是否可见」，再让列表只渲染可见行。
+        // 用真实行号做映射（而不是重排文本），这样光标/选区/保存全都无需改动。
+        let raw_text = self.editor.text();
+        let raw_lines: Vec<&str> = raw_text.split('\n').collect();
+        let foldable: Vec<usize> = crate::folding::foldable_starts(&raw_lines);
+        let ranges = crate::folding::collapsed_ranges(&self.folds, &raw_lines);
+        let mut visible: Vec<usize> = Vec::with_capacity(count);
+        for i in 0..count {
+            if !crate::folding::is_hidden(i, &ranges) {
+                visible.push(i);
+            }
+        }
+        let vis_count = visible.len();
+        let visible_rc = std::rc::Rc::new(visible);
+        let foldable_rc = std::rc::Rc::new(foldable);
+        let folds_rc = std::rc::Rc::new(self.folds.clone());
+
+        let list = uniform_list("editor-lines", vis_count, move |range, _window, _cx| {
             let mut out: Vec<AnyElement> = Vec::with_capacity(range.len());
-            for i in range {
+            for vi in range {
+                let Some(&i) = visible_rc.get(vi) else { continue };
                 out.push(render_line(
                     entity.clone(),
                     focus.clone(),
                     i,
                     &for_list,
                     cursor,
+                    all_cursors.clone(),
                     sel.clone(),
                     line_h,
                     font_px,
                     show_numbers,
                     gutter_w,
+                    foldable_rc.binary_search(&i).is_ok(),
+                    folds_rc.contains(&i),
                 ));
             }
             out
@@ -207,11 +229,16 @@ impl AppState {
                 .text_xs()
                 .text_color(theme::dim())
                 .child(SharedString::from(format!(
-                    "行 {} · 列 {}　{}　{} 行",
+                    "行 {} · 列 {}　{}　{} 行{}",
                     self.editor.line_index() + 1,
                     self.editor.column() + 1,
                     lang_name(lang),
-                    count
+                    vis_count,
+                    if self.folds.is_empty() {
+                        String::new()
+                    } else {
+                        format!("（折叠 {} 处）", self.folds.len())
+                    }
                 )))
                 .child(SharedString::from(if self.dirty {
                     "未保存 · Ctrl+S 保存"
@@ -473,21 +500,31 @@ fn render_line(
     idx: usize,
     lines: &EditorLines,
     cursor: usize,
+    all_cursors: std::rc::Rc<Vec<usize>>,
     sel: Option<Range<usize>>,
     line_h: f32,
     font_px: f32,
     show_numbers: bool,
     gutter_w: f32,
+    foldable: bool,
+    folded: bool,
 ) -> AnyElement {
     let start = lines.line_start(idx);
     let text: &str = &lines.texts[idx];
     let end = start + text.len();
+    // 本行内所有光标（多光标时可能不止一个）
+    let cursors_in_line: Vec<usize> = all_cursors
+        .iter()
+        .copied()
+        .filter(|c| *c >= start && *c <= end)
+        .map(|c| c - start)
+        .collect();
     let cursor_here = if cursor >= start && cursor <= end {
         Some(cursor - start)
     } else {
         None
     };
-    let active_line = cursor_here.is_some();
+    let active_line = !cursors_in_line.is_empty() || cursor_here.is_some();
 
     let mut text_el = div()
         .flex()
@@ -503,8 +540,16 @@ fn render_line(
         let color = highlight::color_for(span.tok);
         for (byte_in_span, ch) in span.text.char_indices() {
             let inner = offset + byte_in_span;
-            if cursor_here == Some(inner) {
-                text_el = text_el.child(caret(entity.clone(), focus.clone(), active_line));
+            if let Some(pos) = cursors_in_line.iter().position(|p| *p == inner) {
+                // 主光标用强调色，额外光标用次强调色，一眼能区分
+                let primary = cursor_here == Some(inner);
+                text_el = text_el.child(caret_colored(
+                    entity.clone(),
+                    focus.clone(),
+                    active_line,
+                    primary,
+                    pos,
+                ));
                 caret_drawn = true;
             }
             let abs = start + inner;
@@ -524,8 +569,17 @@ fn render_line(
         }
         offset += span.text.len();
     }
-    if !caret_drawn && cursor_here == Some(text.len()) {
-        text_el = text_el.child(caret(entity.clone(), focus.clone(), active_line));
+    if !caret_drawn {
+        if let Some(pos) = cursors_in_line.iter().position(|p| *p == text.len()) {
+            let primary = cursor_here == Some(text.len());
+            text_el = text_el.child(caret_colored(
+                entity.clone(),
+                focus.clone(),
+                active_line,
+                primary,
+                pos,
+            ));
+        }
     }
 
     // 行尾空白：点击定位到行末。
@@ -557,26 +611,80 @@ fn render_line(
         .w_full()
         .when(active_line, |d| d.bg(theme::with_alpha(0xffffff, 0.035)))
         .when(show_numbers, |d| {
+            // 行号栏：可折叠的行在行号左边显示箭头，点箭头折叠 / 展开。
+            let mut gutter = div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .w(px(gutter_w))
+                .flex_shrink_0()
+                .pr_2();
+
+            if foldable {
+                let e2 = entity.clone();
+                let f2 = focus.clone();
+                gutter = gutter.child(
+                    div()
+                        .id(SharedString::from(format!("fold-{idx}")))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(12.0))
+                        .mr_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(if folded { theme::accent() } else { theme::dim() })
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            move |_ev: &MouseDownEvent, window, cx| {
+                                e2.update(cx, |this, cx| {
+                                    this.toggle_fold(idx, cx);
+                                });
+                                window.focus(&f2);
+                            },
+                        )
+                        .child(if folded { "▸" } else { "▾" }),
+                );
+            } else {
+                gutter = gutter.child(div().w(px(16.0)).child(""));
+            }
+
             d.child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .w(px(gutter_w))
-                    .flex_shrink_0()
-                    .pr_2()
-                    .text_xs()
-                    .text_color(theme::dim())
-                    .child(SharedString::from(format!("{}", idx + 1))),
+                gutter.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::dim())
+                        .child(SharedString::from(format!("{}", idx + 1))),
+                ),
             )
         })
         .child(text_el)
         .into_any_element()
 }
 
-fn caret(entity: Entity<AppState>, focus: FocusHandle, active: bool) -> AnyElement {
-    let color = if active { theme::accent() } else { theme::muted() };
+/// 带「主/次」区分的 caret：主光标用强调色，额外光标用半透明强调色，
+/// 并且额外光标略窄，重叠时也能看出有几个。
+fn caret_colored(
+    entity: Entity<AppState>,
+    focus: FocusHandle,
+    active: bool,
+    primary: bool,
+    _ordinal: usize,
+) -> AnyElement {
+    let color = if primary {
+        if active {
+            theme::accent()
+        } else {
+            theme::muted()
+        }
+    } else {
+        theme::with_alpha(0x3b82f6, 0.65)
+    };
+    let w = if primary { 2.0 } else { 1.5 };
     div()
-        .w(px(2.0))
+        .w(px(w))
         .h(px(15.0))
         .flex_shrink_0()
         .bg(color)
@@ -592,6 +700,7 @@ fn caret(entity: Entity<AppState>, focus: FocusHandle, active: bool) -> AnyEleme
         })
         .into_any_element()
 }
+
 
 fn char_cell(
     entity: Entity<AppState>,
@@ -615,9 +724,16 @@ fn char_cell(
         .child(display)
         .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
             let extend = ev.modifiers.shift;
+            // Alt/Option + 点击 = 增加一个光标（多光标编辑）
+            let add = ev.modifiers.alt || ev.modifiers.platform;
             entity.update(cx, |this, cx| {
                 this.switch_input_target(InputTarget::Editor);
-                this.editor.move_to(abs, extend);
+                if add {
+                    this.add_cursor_at(abs, cx);
+                } else {
+                    this.clear_multi_cursor(cx);
+                    this.editor.move_to(abs, extend);
+                }
                 cx.notify();
             });
             window.focus(&focus);

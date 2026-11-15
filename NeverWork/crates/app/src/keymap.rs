@@ -37,6 +37,11 @@ pub enum KeyAction {
     Find,
     /// Ctrl+H：打开查找并聚焦替换框。
     Replace,
+    /// Ctrl+Shift+[ / ]：折叠 / 展开全部。
+    FoldAll,
+    UnfoldAll,
+    /// Ctrl+D：选中下一个与当前选区相同的词（多光标）。
+    SelectNextOccurrence,
     /// 回车：对话里是发送，编辑器里是换行。
     Enter,
     /// Tab / Shift+Tab：编辑器里缩进/反缩进。
@@ -55,8 +60,11 @@ pub fn route(ks: &Keystroke) -> Option<KeyAction> {
             "s" => Some(KeyAction::Save),
             "f" => Some(KeyAction::Find),
             "h" => Some(KeyAction::Replace),
+            "[" if shift => Some(KeyAction::FoldAll),
+            "]" if shift => Some(KeyAction::UnfoldAll),
             "a" => Some(KeyAction::SelectAll),
             "z" => Some(if shift { KeyAction::Redo } else { KeyAction::Undo }),
+            "d" => Some(KeyAction::SelectNextOccurrence),
             "y" => Some(KeyAction::Redo),
             "c" => Some(KeyAction::Copy),
             "x" => Some(KeyAction::Cut),

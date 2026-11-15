@@ -36,10 +36,20 @@ pub fn run_team(
     emit: &mut dyn FnMut(TeamEvent),
     cancel: Arc<AtomicBool>,
 ) {
+    let provider_id = std::env::var("NW_PROVIDER").unwrap_or_else(|_| "openai".into());
     match team.flow {
         FlowMode::Pipeline => run_pipeline(team, user_text, base_config, emit, cancel),
-        FlowMode::Parallel | FlowMode::Supervisor => {
-            run_parallel(team, user_text, base_config, emit, cancel)
+        FlowMode::Parallel => run_parallel(team, user_text, base_config, emit, cancel),
+        // 主管指派：由 Lead 逐轮决定下一个角色，而不是当成并行
+        FlowMode::Supervisor => {
+            crate::supervisor::run_supervisor(
+                team,
+                user_text,
+                base_config,
+                &provider_id,
+                emit,
+                cancel,
+            )
         }
     }
     emit(TeamEvent::AllDone);
@@ -47,7 +57,7 @@ pub fn run_team(
 
 /// 解析角色模型名，若看起来是跨 provider 的模型（如 claude*）则切换到 anthropic。
 /// 返回 (provider 名称, 应用于该角色的配置)。
-fn role_provider(base_provider: &str, base: &ProviderConfig, role: &Role) -> (String, ProviderConfig) {
+pub(crate) fn role_provider(base_provider: &str, base: &ProviderConfig, role: &Role) -> (String, ProviderConfig) {
     // 只有看起来像**真实模型 id** 的才覆盖模型名。
     // 团队里 `Claude Opus`、`GPT-5` 这类是展示标签（带空格/大写），
     // 拿它们当模型 id 发给服务端只会得到 400；拿 `claude` 前缀切厂商更糟——
@@ -186,7 +196,7 @@ fn run_parallel(
     }
 }
 
-fn role_system_prompt(role: &Role) -> String {
+pub(crate) fn role_system_prompt(role: &Role) -> String {
     if role.prompt.trim().is_empty() {
         format!(
             "你是团队中的 {}（{}）。请专注你的职责，简洁、专业地完成分配给你的部分。",
