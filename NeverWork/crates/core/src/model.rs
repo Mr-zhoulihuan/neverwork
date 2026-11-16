@@ -385,18 +385,48 @@ pub struct CodeBlock {
 }
 
 /// 会话执行状态（决定左侧会话卡片的徽标与状态胶囊）。
+///
+/// `Working` / `Done` 由发送流程自动流转；`Todo` / `Dropped` 只能由用户
+/// 手动标记（卡片 ⋯ 菜单或命令面板）。生成中不允许手动改状态——运行态的
+/// 优先级高于标记。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     /// 未开始 / 普通会话。
     #[default]
     Idle,
+    /// 待执行（用户标记的待办）。
+    Todo,
     /// 正在生成（工作中…）。
     Working,
     /// 已完成。
     Done,
     /// 已废弃。
     Dropped,
+}
+
+impl SessionStatus {
+    /// 中文短标签（卡片胶囊 / 菜单 / 提示统一用它）；`Idle` 无标记，返回空串。
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionStatus::Idle => "",
+            SessionStatus::Todo => "待执行",
+            SessionStatus::Working => "进行中",
+            SessionStatus::Done => "已完成",
+            SessionStatus::Dropped => "已废弃",
+        }
+    }
+
+    /// 主色（24 位 RGB），胶囊底色/文字共用一套。
+    pub fn hue(self) -> u32 {
+        match self {
+            SessionStatus::Idle => 0x8a8f98,
+            SessionStatus::Todo => 0x5b8def,
+            SessionStatus::Working => 0xe0a33a,
+            SessionStatus::Done => 0x4caf7d,
+            SessionStatus::Dropped => 0x9a6b6b,
+        }
+    }
 }
 
 /// 任务阶段：机器可读的细状态，决定崩溃后能不能续跑。
@@ -688,6 +718,42 @@ pub fn sessions_by_recent(sessions: &[Session]) -> Vec<usize> {
     idx
 }
 
+/// 会话是否属于「已归档」（完成或废弃）。
+///
+/// 置顶不参与归档：置顶意味着用户要常看，收进折叠组反而藏起来了。
+pub fn is_archived_session(s: &Session) -> bool {
+    !s.pinned && matches!(s.status, SessionStatus::Done | SessionStatus::Dropped)
+}
+
+/// 会话列表的过滤条件：搜索词（标题/摘要/副标题）+ 状态 + 分类。
+///
+/// 搜索不扫消息正文：列表要在每个输入字符上即时重算，扫全文会卡；
+/// 正文检索是另一件事（将来给全局搜索）。
+pub fn session_matches_list(
+    s: &Session,
+    query: &str,
+    status: Option<SessionStatus>,
+    tag: Option<SessionTag>,
+) -> bool {
+    if let Some(st) = status {
+        if s.status != st {
+            return false;
+        }
+    }
+    if let Some(t) = tag {
+        if s.tag != t {
+            return false;
+        }
+    }
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return true;
+    }
+    [&s.title, &s.preview, &s.subtitle]
+        .iter()
+        .any(|x| x.to_lowercase().contains(&q))
+}
+
 /// 置顶的会话数量（列表分隔线用）。
 pub fn pinned_count(sessions: &[Session]) -> usize {
     sessions.iter().filter(|s| s.pinned).count()
@@ -934,5 +1000,93 @@ mod aggregate_tests {
         let out = aggregate_changes(&msgs);
         assert_eq!(out[0].path, "a.rs");
         assert_eq!(out[1].path, "z.rs");
+    }
+}
+
+#[cfg(test)]
+mod session_list_tests {
+    use super::*;
+
+    fn session(id: &str) -> Session {
+        Session {
+            id: id.into(),
+            title: "标题".into(),
+            subtitle: String::new(),
+            team_name: String::new(),
+            mode: SessionMode::Solo,
+            messages: Vec::new(),
+            updated_label: String::new(),
+            preview: String::new(),
+            status: SessionStatus::Idle,
+            meta: String::new(),
+            accent: 0,
+            icon: String::new(),
+            badge: String::new(),
+            action: SessionAction::None,
+            tag: SessionTag::None,
+            updated_at: 0,
+            pinned: false,
+            stage: TaskStage::Idle,
+            resume_prompt: String::new(),
+        }
+    }
+
+    #[test]
+    fn todo_status_round_trips_and_old_json_defaults_idle() {
+        let text = serde_json::to_string(&SessionStatus::Todo).unwrap();
+        assert_eq!(text, "\"todo\"");
+        let back: SessionStatus = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, SessionStatus::Todo);
+        // 旧会话 JSON 没有 status 字段：必须回落 Idle
+        let old = r#"{"id":"a","title":"旧","subtitle":"","team_name":"","messages":[],"updated_label":"","preview":""}"#;
+        let s: Session = serde_json::from_str(old).unwrap();
+        assert_eq!(s.status, SessionStatus::Idle);
+    }
+
+    #[test]
+    fn archived_excludes_pinned() {
+        let mut s = session("a");
+        s.status = SessionStatus::Done;
+        assert!(is_archived_session(&s));
+        s.pinned = true;
+        assert!(!is_archived_session(&s), "置顶的完成会话不进归档");
+        s.pinned = false;
+        s.status = SessionStatus::Todo;
+        assert!(!is_archived_session(&s));
+    }
+
+    #[test]
+    fn matches_query_status_and_tag() {
+        let mut s = session("a");
+        s.title = "修复登录 Bug".into();
+        s.preview = "登录页报错".into();
+        s.status = SessionStatus::Todo;
+        s.tag = SessionTag::Bug;
+        // 空条件全通过
+        assert!(session_matches_list(&s, "", None, None));
+        // 标题命中（大小写不敏感）
+        assert!(session_matches_list(&s, "bug", None, None));
+        // 摘要命中
+        assert!(session_matches_list(&s, "登录页", None, None));
+        // 搜不到
+        assert!(!session_matches_list(&s, "部署", None, None));
+        // 状态/分类不符
+        assert!(!session_matches_list(&s, "", Some(SessionStatus::Done), None));
+        assert!(session_matches_list(&s, "", Some(SessionStatus::Todo), None));
+        assert!(!session_matches_list(&s, "", None, Some(SessionTag::Docs)));
+        assert!(session_matches_list(&s, "", None, Some(SessionTag::Bug)));
+        // 组合：都满足才通过
+        assert!(session_matches_list(
+            &s,
+            "登录",
+            Some(SessionStatus::Todo),
+            Some(SessionTag::Bug)
+        ));
+        assert!(!session_matches_list(
+            &s,
+            "部署",
+            Some(SessionStatus::Todo),
+            Some(SessionTag::Bug)
+        ));
     }
 }

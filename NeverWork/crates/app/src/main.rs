@@ -113,6 +113,15 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 // 最小尺寸：再小布局会碎成一团，也没有继续拖的意义。
                 window_min_size: Some(size(px(660.0), px(440.0))),
+                // 必须显式声明透明标题栏：gpui 的默认值是 `appears_transparent: false`，
+                // 那样 Windows 会在窗口最上面叠一条系统原生标题栏（浅色横条 + 左上角
+                // 默认白色窗口图标，右键弹「还原/移动/关闭」系统菜单）。界面本身已经
+                // 自绘标题栏，拖动与最小化/最大化/关闭由 `views::titlebar` 注册的热区接管。
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("NeverWork".into()),
+                    appears_transparent: true,
+                    traffic_light_position: None,
+                }),
                 ..Default::default()
             },
             move |window, cx| {

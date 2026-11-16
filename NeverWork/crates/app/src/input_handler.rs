@@ -82,6 +82,8 @@ impl AppState {
             InputTarget::Chat => &mut self.chat,
             InputTarget::Editor => &mut self.editor,
             InputTarget::Workspace => &mut self.ws_input,
+            InputTarget::SessionSearch => &mut self.session_search,
+            InputTarget::RenameSession => &mut self.rename_buf,
             InputTarget::Field(_) => &mut self.field_buf,
         }
     }
@@ -92,6 +94,8 @@ impl AppState {
             InputTarget::Chat => &self.chat,
             InputTarget::Editor => &self.editor,
             InputTarget::Workspace => &self.ws_input,
+            InputTarget::SessionSearch => &self.session_search,
+            InputTarget::RenameSession => &self.rename_buf,
             InputTarget::Field(_) => &self.field_buf,
         }
     }

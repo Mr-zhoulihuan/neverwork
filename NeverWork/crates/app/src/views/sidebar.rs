@@ -9,12 +9,12 @@
 //! 把空间让给会话卡片。
 
 use gpui::prelude::*;
-use gpui::{div, px, ClickEvent, Context, Rgba, SharedString};
+use gpui::{div, px, relative, ClickEvent, Context, Rgba, SharedString};
 
 use neverwork_core::{SessionAction, SessionStatus};
 use neverwork_ui::theme;
 
-use crate::state::{AppState, CenterView};
+use crate::state::{AppState, CenterView, InputTarget};
 
 /// 图标栏宽度。
 pub(crate) const RAIL_W: f32 = 52.0;
@@ -32,13 +32,13 @@ const CARD_INNER: f32 = SESSION_W - LIST_PAD * 2.0 - CARD_PAD * 2.0;
 enum RailAction {
     Chat,
     Team,
-    Editor,
     Skills,
     Settings,
 }
 
 impl AppState {
-    /// `hide_list` 为真时只保留图标栏（极窄窗口）。
+    /// `hide_list` 为真时只保留图标栏（极窄窗口 / 全页视图）。
+    /// 会话列表可手动收起成 16px 窄条（展开按钮），此时图标栏照常显示。
     pub(crate) fn left_sidebar(&self, hide_list: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let row = div()
             .flex()
@@ -48,6 +48,8 @@ impl AppState {
             .child(self.icon_rail(cx));
         if hide_list {
             row
+        } else if self.session_collapsed {
+            row.child(self.session_panel_collapsed(cx))
         } else {
             row.child(self.session_panel(cx))
         }
@@ -58,7 +60,6 @@ impl AppState {
     fn icon_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_chat = self.center == CenterView::Chat;
         let is_team = self.center == CenterView::Team;
-        let is_editor = self.center == CenterView::File;
         let is_skills = self.center == CenterView::Skills;
         let is_settings = self.center == CenterView::Settings;
 
@@ -71,94 +72,53 @@ impl AppState {
             .h_full()
             .pt_3()
             .pb_2()
-            .gap_1()
+            .gap_3()
             .bg(theme::bg())
             .border_r_1()
             .border_color(theme::border());
 
-        // 品牌标
+        // 品牌标：参考稿是细栏顶部一枚绿色 logo
         rail = rail.child(
             div()
                 .flex()
                 .items_center()
                 .justify_center()
-                .size(px(28.0))
-                .rounded_lg()
-                .bg(theme::accent())
-                .mb_2()
+                .size(px(30.0))
+                .rounded_xl()
+                .bg(theme::green())
+                .mb_3()
                 .text_sm()
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_color(gpui::rgb(0xffffff))
                 .child("N"),
         );
 
-        rail = rail
-            .child(self.rail_button("rail-chat", "◐", "对话", is_chat, RailAction::Chat, cx))
-            .child(self.rail_button("rail-team", "◈", "团队", is_team, RailAction::Team, cx))
-            .child(self.rail_button("rail-editor", "▤", "编辑器", is_editor, RailAction::Editor, cx))
-            .child(self.rail_button("rail-skills", "✦", "技能", is_skills, RailAction::Skills, cx));
-
-        // 底部：设置 + AI 状态 + 用户头像
+        // 主图标组放在导航栏的垂直中段：上下各一段弹性空白，
+        // 不贴着 logo，也不会被底部入口拉起。
         rail = rail
             .child(div().flex_1())
-            .child(self.rail_button(
-                "rail-settings",
-                "⚙",
-                "设置",
-                is_settings,
-                RailAction::Settings,
-                cx,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(26.0))
-                    .rounded_full()
-                    .bg(if self.ai_ready {
-                        theme::green_soft()
-                    } else {
-                        theme::raised()
-                    })
-                    .text_xs()
-                    .text_color(if self.ai_ready {
-                        theme::green()
-                    } else {
-                        theme::dim()
-                    })
-                    .child(if self.ai_ready { "●" } else { "○" }),
-            )
-            .child(
-                div()
-                    .id("rail-user")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(28.0))
-                    .rounded_full()
-                    .bg(theme::raised())
-                    .border_1()
-                    .border_color(theme::border())
-                    .text_xs()
-                    .text_color(theme::fg())
-                    .cursor_pointer()
-                    .hover(|d| d.bg(theme::border()))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                        this.toggle_palette(cx);
-                    }))
-                    .child("U"),
-            );
+            .child(self.rail_button("rail-chat", "◐", is_chat, RailAction::Chat, cx))
+            .child(self.rail_button("rail-team", "◈", is_team, RailAction::Team, cx))
+            .child(self.rail_button("rail-skills", "✦", is_skills, RailAction::Skills, cx))
+            .child(div().flex_1());
+
+        // 底部固定入口：只剩设置（命令面板走标题栏「⌘K」与会话面板「⋯」）
+        rail = rail.child(self.rail_button(
+            "rail-settings",
+            "⚙",
+            is_settings,
+            RailAction::Settings,
+            cx,
+        ));
 
         rail
     }
 
-    /// 图标栏按钮：纯图标（参考稿就是图标栏），悬停显示名称提示。
+    /// 图标栏按钮：40px 方形、选中时亮底白图标（对齐参考稿的方形选中态）。
     fn rail_button(
         &self,
         id: &'static str,
         glyph: &'static str,
-        label: &'static str,
         active: bool,
         action: RailAction,
         cx: &mut Context<Self>,
@@ -168,9 +128,12 @@ impl AppState {
             .flex()
             .items_center()
             .justify_center()
-            .size(px(34.0))
-            .rounded_lg()
-            .text_sm()
+            .size(px(40.0))
+            // 符号字体（YaHei / Segoe UI Symbol）的墨迹重心比行盒中心低 ≈ 2.5px，
+            // 不补偿时图标看起来偏下；pb 把行盒整体上提，让字形几何居中。
+            .pb(px(5.0))
+            .rounded_xl()
+            .text_size(px(18.0))
             .cursor_pointer()
             .when(active, |d| d.bg(theme::raised()).text_color(theme::fg()))
             .when(!active, |d| {
@@ -182,22 +145,12 @@ impl AppState {
                 this.run_rail(action, cx);
             }))
             .child(SharedString::from(glyph))
-            .when(false, |d| d.child(SharedString::from(label)))
     }
 
     fn run_rail(&mut self, action: RailAction, cx: &mut Context<Self>) {
         match action {
             RailAction::Chat => self.show_chat(cx),
             RailAction::Team => self.set_center(CenterView::Team, cx),
-            RailAction::Editor => {
-                if self.open_path.is_some() {
-                    self.focus_mode = false;
-                    self.set_center(CenterView::File, cx);
-                } else {
-                    self.notice = Some("先在右侧文件树里打开一个文件".into());
-                    cx.notify();
-                }
-            }
             RailAction::Skills => self.open_skills(cx),
             RailAction::Settings => {
                 self.open_settings(crate::state::SettingsTab::General, cx)
@@ -207,8 +160,47 @@ impl AppState {
 
     // ==================== 会话列表 ====================
 
+    /// 收起态：只留一条 16px 窄边（对齐右栏的折叠条），点一下重新展开。
+    /// 展开按钮垂直居中，与图标栏主图标组同一高度。
+    fn session_panel_collapsed(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .w(px(16.0))
+            .flex_shrink_0()
+            .h_full()
+            .bg(theme::bg())
+            .border_r_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .id("expand-session")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(16.0))
+                    .h(px(64.0))
+                    .rounded_lg()
+                    .bg(theme::raised())
+                    .border_1()
+                    .border_color(theme::border())
+                    .text_size(px(16.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme::fg())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::accent()).text_color(gpui::rgb(0xffffff)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.toggle_session_list(cx);
+                    }))
+                    .child("»"),
+            )
+    }
+
     fn session_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut panel = div()
+            .relative()
             .flex()
             .flex_col()
             .w(px(SESSION_W))
@@ -256,31 +248,10 @@ impl AppState {
                 ),
         );
 
-        // ---- 分类筛选 ----
-        {
-            let mut chips = div()
-                .id("tag-filter")
-                .flex()
-                .flex_wrap()
-                .gap_1()
-                .px_2()
-                .pb_2
-                ()
-                .child(self.tag_chip(None, "全部", cx));
-            // 只显示实际有会话的分类，避免一排空按钮
-            for tag in neverwork_core::SessionTag::all() {
-                if tag == neverwork_core::SessionTag::None {
-                    continue;
-                }
-                if !self.sessions.iter().any(|s| s.tag == tag) {
-                    continue;
-                }
-                chips = chips.child(self.tag_chip(Some(tag), tag.label(), cx));
-            }
-            panel = panel.child(chips);
-        }
+        // ---- 搜索（标题/摘要/副标题，不扫正文） ----
+        panel = panel.child(self.session_search_row(cx));
 
-        // ---- 工作区细条（点击切换工作区） ----
+        // ---- 工作区细条（点击打开工作区管理器） ----
         panel = panel.child(
             div()
                 .flex()
@@ -317,7 +288,7 @@ impl AppState {
                         .text_color(theme::dim())
                         .child(SharedString::from(format!("{} 项", self.files.len()))),
                 )
-                .child(div().text_xs().text_color(theme::accent()).child("切换")),
+                .child(div().text_xs().text_color(theme::accent()).child("管理")),
         );
 
         // ---- 会话卡片列表 ----
@@ -333,16 +304,25 @@ impl AppState {
             .overflow_scroll();
 
         // 按「最近活跃优先」排序，最新在最前；筛选只影响显示，不改数据顺序
+        let query = self.session_search.text().to_string();
+        // 搜索激活时不收起归档：用户是在找东西，不能把命中结果藏起来
+        let filter_active = !query.trim().is_empty();
+        let mut archived: Vec<usize> = Vec::new();
         let mut pinned_done = false;
         let mut normal_started = false;
         for idx in self.ordered_sessions() {
-            if let Some(f) = self.tag_filter {
-                if self.sessions[idx].tag != f {
-                    continue;
-                }
+            let s = &self.sessions[idx];
+            if !neverwork_core::session_matches_list(s, &query, None, None) {
+                continue;
+            }
+            // 当前打开的会话不进归档组：否则点一下就“消失”了
+            if !filter_active && idx != self.active_session && neverwork_core::is_archived_session(s)
+            {
+                archived.push(idx);
+                continue;
             }
             // 置顶区结束后插一条分隔，视觉上把两段分开
-            if !self.sessions[idx].pinned && !normal_started {
+            if !s.pinned && !normal_started {
                 normal_started = true;
                 if pinned_done {
                     list = list.child(
@@ -373,10 +353,81 @@ impl AppState {
                     );
                 }
             }
-            if self.sessions[idx].pinned {
+            if s.pinned {
                 pinned_done = true;
             }
             list = list.child(self.session_card(idx, cx));
+        }
+
+        // 命中为空的提示：搜索/筛选后一片空白最容易让人以为会话丢了
+        let empty_hit = !pinned_done && !normal_started && archived.is_empty();
+        if empty_hit {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_4()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .child(if filter_active {
+                        "没有匹配的会话"
+                    } else {
+                        "还没有会话，点右上角 ＋ 开始"
+                    }),
+            );
+        }
+
+        // ---- 归档折叠组（完成/废弃且未置顶） ----
+        if !archived.is_empty() {
+            let count = archived.len();
+            let confirm = self.archive_clean_confirm;
+            let head = div()
+                .id("archive-head")
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_2()
+                .py_1()
+                .mt_1()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|d| d.bg(theme::raised()))
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    this.toggle_archive(cx);
+                }))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::dim())
+                        .child(if self.archive_open { "▾" } else { "▸" }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::dim())
+                        .child(SharedString::from(format!("已归档 {count}"))),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .id("archive-clean")
+                        .px_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(if confirm { theme::red() } else { theme::dim() })
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            cx.stop_propagation();
+                            this.click_clean_archived(cx);
+                        }))
+                        .child(if confirm { "再点确认清理" } else { "清理" }),
+                );
+            list = list.child(head);
+            if self.archive_open {
+                for idx in archived {
+                    list = list.child(self.session_card(idx, cx));
+                }
+            }
         }
         panel = panel.child(list);
 
@@ -411,45 +462,108 @@ impl AppState {
                 ),
         );
 
+        // ---- 右侧边中部的收起把手 ----
+        // 绝对定位贴在右边缘：会话区右侧 16px 恰好是列表与卡片的内边距，
+        // 不会压到卡片内容；垂直居中（top 50% + 负外边距上提半个高度）。
+        panel = panel.child(
+            div()
+                .absolute()
+                .top(relative(0.5))
+                .right(px(0.0))
+                .mt(px(-32.0))
+                .id("collapse-session")
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(20.0))
+                .h(px(64.0))
+                .rounded_lg()
+                .bg(theme::raised())
+                .border_1()
+                .border_color(theme::border())
+                .text_size(px(16.0))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(theme::fg())
+                .cursor_pointer()
+                .hover(|d| d.bg(theme::accent()).text_color(gpui::rgb(0xffffff)))
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    this.toggle_session_list(cx);
+                }))
+                .child("«"),
+        );
+
         panel
     }
 
-    /// 分类筛选 chip。
-    fn tag_chip(
-        &self,
-        tag: Option<neverwork_core::SessionTag>,
-        label: &str,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let on = self.tag_filter == tag;
-        let hue = tag.map(|t| t.hue()).unwrap_or(0x8a8a8a);
-        div()
-            .id(SharedString::from(format!("tagchip-{label}")))
-            .px_2
-            ()
-            .py_0p5
-            ()
-            .rounded_full
-            ()
-            .text_xs
-            ()
-            .cursor_pointer
-            ()
-            .when(on, |d| {
-                d.bg(theme::with_alpha(hue, 0.22))
-                    .text_color(gpui::rgb(hue))
-                    .border_1()
-                    .border_color(theme::with_alpha(hue, 0.5))
+    /// 搜索行：点一下聚焦，Esc 清空（中文输入走 IME，不碰 key_char）。
+    fn session_search_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let query = self.session_search.text().to_string();
+        let placeholder = query.is_empty();
+        let focused = self.input_target == InputTarget::SessionSearch;
+        let text = if placeholder {
+            "搜索会话…".to_string()
+        } else {
+            crate::views::text_fit::fit_text(&query, 176.0, 12.0)
+        };
+        let mut row = div()
+            .id("session-search")
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .mx_2()
+            .mb_1()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(theme::raised())
+            .border_1()
+            .border_color(if focused {
+                theme::accent_line()
+            } else {
+                theme::border()
             })
-            .when(!on, |d| {
-                d.bg(theme::raised())
-                    .text_color(theme::dim())
-                    .hover(|d| d.bg(theme::border()))
-            })
-            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
-                this.set_tag_filter(tag, cx);
+            .cursor(gpui::CursorStyle::IBeam)
+            .track_focus(&self.focus_handle)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.switch_input_target(InputTarget::SessionSearch);
+                let end = this.session_search.text().len();
+                this.session_search.move_to(end, false);
+                window.focus(&this.focus_handle);
+                cx.notify();
             }))
-            .child(SharedString::from(label.to_string()))
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
+                this.on_session_search_key(ev, cx);
+            }))
+            .child(div().flex_shrink_0().text_xs().text_color(theme::dim()).child("⌕"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_xs()
+                    .text_color(if placeholder { theme::dim() } else { theme::fg() })
+                    .child(SharedString::from(text)),
+            );
+        if !placeholder {
+            row = row.child(
+                div()
+                    .id("session-search-clear")
+                    .flex_shrink_0()
+                    .px_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        cx.stop_propagation();
+                        this.clear_session_search(cx);
+                    }))
+                    .child("✕"),
+            );
+        }
+        row
     }
 
     fn session_card(&self, idx: usize, cx: &mut Context<Self>) -> impl IntoElement {
@@ -479,6 +593,11 @@ impl AppState {
         let title_text = crate::views::text_fit::fit_text(&session.title, title_w, 14.0);
 
         let (pill_label, pill_fg, pill_bg) = match session.status {
+            SessionStatus::Todo => (
+                "待执行".to_string(),
+                theme::yellow(),
+                soft(theme::yellow(), 0.14),
+            ),
             SessionStatus::Working => (
                 if session.meta.is_empty() {
                     "工作中".to_string()
@@ -506,6 +625,7 @@ impl AppState {
         };
         let has_pill = !pill_label.is_empty();
         let pill_w = match session.status {
+            SessionStatus::Todo => 44.0,
             SessionStatus::Working => 48.0,
             SessionStatus::Done => 44.0,
             SessionStatus::Dropped => 44.0,
@@ -513,9 +633,9 @@ impl AppState {
         };
         let time_w = 46.0;
         // 摘要列吃掉除「时间 + 胶囊」以外的全部宽度。
-        // 第二行右侧有置顶按钮（16px）+ 间距
+        // 第二行右侧有置顶按钮（16px）、⋯ 按钮（16px）+ 间距
         let preview_w =
-            CARD_INNER - time_w - if has_pill { pill_w + 6.0 } else { 0.0 } - 16.0 - 8.0;
+            CARD_INNER - time_w - if has_pill { pill_w + 6.0 } else { 0.0 } - 16.0 - 16.0 - 10.0;
 
         // ---- 第一行：头像 + 分支徽标 + 标题 +（右）状态圆圈 ----
         let mut head = div()
@@ -673,6 +793,30 @@ impl AppState {
         // 置顶按钮放第二行右侧：第一行留给标题，避免长标题被挤成省略号。
         // 已置顶显示实心图钉（黄色），未置顶是淡色空心。
         let pinned = session.pinned;
+        let menu_open = self.session_menu == Some(idx);
+        foot = foot.child(
+            div()
+                .id(SharedString::from(format!("sess-menu-{idx}")))
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(16.0))
+                .flex_shrink_0()
+                .rounded_sm()
+                .text_color(if menu_open { theme::fg() } else { theme::dim() })
+                .cursor_pointer()
+                .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
+                // 用 down 而不是 click：只有 down 事件带鼠标坐标，菜单才能贴着按钮弹
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, ev: &gpui::MouseDownEvent, _w, cx| {
+                        cx.stop_propagation();
+                        let p = ev.position;
+                        this.toggle_session_menu(idx, (p.x.into(), p.y.into()), cx);
+                    }),
+                )
+                .child("⋯"),
+        );
         foot = foot.child(
             div()
                 .id(SharedString::from(format!("sess-pin-{idx}")))
@@ -693,7 +837,7 @@ impl AppState {
         );
 
         // 参考稿里卡片无边框，靠底色区分；选中项用略亮的底色。
-        div()
+        let mut card = div()
             .id(SharedString::from(format!("sess-{idx}")))
             .flex()
             .flex_col()
@@ -715,8 +859,94 @@ impl AppState {
             .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                 this.select_session(idx, cx);
             }))
+            // 右键任意位置弹操作菜单（菜单里承担全部可做之事）
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _w, cx| {
+                    cx.stop_propagation();
+                    let p = ev.position;
+                    this.toggle_session_menu(idx, (p.x.into(), p.y.into()), cx);
+                }),
+            )
             .child(head)
-            .child(foot)
+            .child(foot);
+
+        // 重命名：行内输入（Enter/保存按钮提交，Esc 取消）
+        if self.rename_session == Some(idx) {
+            card = card.child(self.rename_session_row(cx));
+        }
+        card
+    }
+
+    /// 卡片内联重命名行。
+    fn rename_session_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let value = self.rename_buf.text().to_string();
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .py_1()
+            .rounded_md()
+            .bg(theme::bg())
+            .border_1()
+            .border_color(theme::accent_line())
+            .child(
+                div()
+                    .id("session-rename-input")
+                    .flex()
+                    .items_center()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_xs()
+                    .text_color(theme::fg())
+                    .cursor(gpui::CursorStyle::IBeam)
+                    .track_focus(&self.focus_handle)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.switch_input_target(InputTarget::RenameSession);
+                        window.focus(&this.focus_handle);
+                        cx.notify();
+                    }))
+                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
+                        this.on_rename_session_key(ev, cx);
+                    }))
+                    .child(SharedString::from(crate::views::text_fit::fit_text(
+                        &value, 120.0, 12.0,
+                    ))),
+            )
+            .child(
+                div()
+                    .id("session-rename-save")
+                    .px_1p5()
+                    .rounded_sm()
+                    .bg(theme::accent())
+                    .text_xs()
+                    .text_color(theme::bg())
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        cx.stop_propagation();
+                        this.commit_rename_session(cx);
+                    }))
+                    .child("保存"),
+            )
+            .child(
+                div()
+                    .id("session-rename-cancel")
+                    .px_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        cx.stop_propagation();
+                        this.cancel_rename_session(cx);
+                    }))
+                    .child("✕"),
+            )
     }
 
     /// 点卡片右上角圆圈：按圆圈语义执行（继续 / 重放 / 无操作）。

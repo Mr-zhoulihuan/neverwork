@@ -12,7 +12,7 @@ cargo test --workspace          # 全部测试（3 条打真实 DeepSeek，需 N
 cargo build -p neverwork        # 只编应用（增量约 6s）
 ```
 
-运行期变量：`NW_ROOT`、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_EXPAND_STEPS`/`NW_RIGHT_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_INSTALL_SKILL`。
+运行期变量：`NW_ROOT`、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_EXPAND_STEPS`/`NW_RIGHT_COLLAPSED`/`NW_SESSION_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_INSTALL_SKILL`/`NW_SESSION_QUERY`/`NW_SESSION_MENU`/`NW_ARCHIVE_OPEN`/`NW_WORKSPACE_POPUP`/`NW_DEMO_STATUS`/`NW_SWITCH_WS`。
 
 工作区回落：`NW_ROOT` → `settings.last_workspace` → `~/.neverwork/workspace`。**不要**回落到当前目录/向上找 `Cargo.toml`——会把 IDE 自己的仓库当工作区。
 
@@ -36,12 +36,15 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - **多光标是 `TextBuffer` 独立层**（`extra_cursors`），只有 `*_multi` 系列碰它。
 - **折叠不重排文本**：只跳过隐藏行，真实行号映射回光标/选区。**`multi_patch` 必须先全量校验再写**，失败回滚。
 - **文字截断别只靠 `.truncate()`**：gpui 首帧没确定宽度就不生效，`flex_1` 嵌套下会硬裁且无省略号。要省略号用 `views::text_fit::fit_text(text, 预算px, 字号)` + `.whitespace_nowrap()`。
-- **布局优先级**：中栏 > 会话栏 > 右栏。窄窗口把右栏收成 16px 窄条（<1080），极窄（<620）才隐藏会话列表，图标栏永远保留。**设置/技能/编辑器页收起会话列表**（编辑器保留右栏文件树）；`CenterView::Team` 照常显示。宽度用「可见尺寸」（见环境特性）。
-- 图标栏只有对话/团队/编辑器/技能 + 底部设置；命令面板入口在标题栏「⌘K」、头像、会话面板「⋯」。
+- **布局优先级**：中栏 > 会话栏 > 右栏。窄窗口把右栏收成 16px 窄条（<1080），极窄（<620）才隐藏会话列表，图标栏永远保留。**设置/技能/编辑器页收起会话列表**（编辑器保留右栏文件树）；`CenterView::Team` 照常显示。会话列表本身也可手动收起：会话栏右边缘中部的「«」把手（id `collapse-session`，绝对定位不占列表高度）收起成 16px 窄条，再点窄条中部的「»」（`expand-session`）展开，`session_collapsed` 是内存态、默认展开，与右栏 `right_collapsed` 同构；`left_w` 计算必须把收起态算成 `RAIL_W + 16`。宽度用「可见尺寸」（见环境特性）。
+- 图标栏只有对话/团队/技能（主组垂直居中）+ 底部一个设置入口；编辑器页靠右栏文件树打开文件进入，不占图标；命令面板走标题栏「⌘K」与会话面板「⋯」入口。
+- **窗口是无边框自绘的**（`main.rs` 里 `titlebar: Some(TitlebarOptions { appears_transparent: true, .. })`）。**别退回 `WindowOptions::default()` 的 `appears_transparent: false`**——那样 Windows 会在最上面叠一条系统原生标题栏（浅色横条 + 左上角白色默认窗口图标 + 右键「还原/移动/关闭」菜单）。
+- 标题栏拖动 / 最小化 / 最大化(还原) / 关闭由 `views::titlebar_hitboxes`（绝对定位 canvas）注册系统热区 `Drag`/`Min`/`Max`/`Close` 处理，点击不经过 `on_click`；右侧 360px 不铺 Drag 热区，否则 HTCAPTION 会吞掉「专注/⌘K/窗口按钮」的点击。
+- 窗口按钮图标必须用 `div` 画（横线/方框/错位双框），**不要用 `□`/`❐` 字符**：字体回退后两者几乎一样，最大化前后看不出区别。最大化状态在 `render` 里用 `window.is_maximized()` 传给 `titlebar`，窗口尺寸变化会触发重绘。
 
 ## 左侧栏
 
-`RAIL_W=52` + `SESSION_W=264` 会话卡片（头像+标题+状态 / 摘要+时间+胶囊）。卡片内宽 `CARD_INNER = SESSION_W - LIST_PAD*2 - CARD_PAD*2`，漏算内边距会裁右侧胶囊。
+`RAIL_W=52` + `SESSION_W=264` 会话卡片（头部标题 + ＋新建 + ◀收起，头像+标题+状态 / 摘要+时间+胶囊）。卡片内宽 `CARD_INNER = SESSION_W - LIST_PAD*2 - CARD_PAD*2`，漏算内边距会裁右侧胶囊。会话操作是**右键上下文菜单**（`views/session_menu.rs`，全屏透明遮罩 + 232px 绝对定位卡片，行=语义图标+13px 文字；宽度用 `session_menu::MENU_W` 与 state 的 clamp 共用）；右键卡片与点卡片的 ⋯ 都走 `on_mouse_down` 取鼠标坐标（`ClickEvent` 不带坐标），渲染侧用 `visible_w/h` clamp 反向弹出防出界。筛选/归档判定用 core 的 `session_matches_list`/`is_archived_session`，不要在视图里另写一套。
 
 ## 环境特性
 

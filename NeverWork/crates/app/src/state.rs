@@ -89,6 +89,10 @@ pub enum InputTarget {
     Chat,
     Editor,
     Workspace,
+    /// 会话列表搜索框。
+    SessionSearch,
+    /// 会话重命名输入框（回车提交，Esc 取消）。
+    RenameSession,
     /// 设置页 / 技能页里的某个表单字段。
     Field(FormField),
 }
@@ -153,6 +157,10 @@ pub enum Command {
     TagSession(u8),
     /// 置顶 / 取消置顶当前会话。
     TogglePin,
+    /// 给当前会话设状态（参数是编号：0 清除 / 1 待执行 / 2 已完成 / 3 已废弃）。
+    SessionStatus(u8),
+    /// 把当前会话导出成 Markdown。
+    ExportSession,
     Settings,
     Skills,
 }
@@ -178,6 +186,11 @@ impl Command {
             (Command::TagSession(4), "分类：文档", ""),
             (Command::TagSession(5), "分类：调试", ""),
             (Command::TagSession(6), "分类：实验", ""),
+            (Command::SessionStatus(1), "状态：待执行", ""),
+            (Command::SessionStatus(2), "状态：已完成", ""),
+            (Command::SessionStatus(3), "状态：已废弃", ""),
+            (Command::SessionStatus(0), "状态：清除标记", ""),
+            (Command::ExportSession, "导出当前会话为 Markdown", ""),
             (Command::Settings, "打开设置", ""),
             (Command::Skills, "技能市场", ""),
         ]
@@ -211,8 +224,25 @@ pub struct AppState {
     pub git_confirm: Option<crate::git_ops::GitOp>,
     /// Git 面板是否展开分支列表。
     pub git_show_branches: bool,
-    /// 会话列表的分类筛选；`None` 表示「全部」。
-    pub tag_filter: Option<neverwork_core::SessionTag>,
+    /// 会话列表搜索框（标题/摘要/副标题，不扫正文）。
+    pub session_search: TextBuffer,
+    /// 正在展示右键菜单的会话下标。
+    pub session_menu: Option<usize>,
+    /// 菜单弹出的窗口坐标（clamp 在视口内，定位在渲染时做）。
+    pub session_menu_at: Option<(f32, f32)>,
+    /// 删除二次确认：`Some(idx)` 时该会话的删除按钮变成「再点一次确认」。
+    pub session_delete_confirm: Option<usize>,
+    /// 「已归档」折叠组是否展开（搜索/筛选激活时强制展开）。
+    pub archive_open: bool,
+    /// 清理归档的二次确认。
+    pub archive_clean_confirm: bool,
+    /// 正在重命名的会话下标与输入缓冲。
+    pub rename_session: Option<usize>,
+    pub rename_buf: TextBuffer,
+    /// 工作区管理器浮层是否打开。
+    pub workspace_popup: bool,
+    /// 正在重命名的工作区下标（`settings.workspaces` 的下标）。
+    pub ws_rename: Option<usize>,
 
     // ===== 视图 =====
     pub center: CenterView,
@@ -323,6 +353,8 @@ pub struct AppState {
     pub expanded_handoff: std::collections::HashSet<usize>,
     /// 右侧栏是否收起。
     pub right_collapsed: bool,
+    /// 会话列表是否收起（收成图标栏右侧的 16px 窄条，点窄条展开）。
+    pub session_collapsed: bool,
     /// 新出现的工具步骤组默认展开（仅 `NW_EXPAND_STEPS=1` 时打开）。
     pub expand_steps_all: bool,
     /// 编辑器查找 / 替换状态。
@@ -503,6 +535,111 @@ fn blank_session(seq: usize, config: &Config, mode: SessionMode) -> Session {
     }
 }
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 把一个会话库装进内存：空库补一条空白会话、重算相对时间、按 `active_id` 恢复选中。
+///
+/// 启动与切换工作区共用。切换时不用损伤报告（
+/// 启动才需要提示「有记录损坏」）。
+fn adopt_store(
+    store: neverwork_core::SessionStore,
+    config: &Config,
+) -> (Vec<Session>, usize) {
+    let mut sessions = store.sessions;
+    if sessions.is_empty() {
+        sessions.push(blank_session(0, config, default_session_mode()));
+    }
+    // 文件里存的「3分钟前」是写盘那一刻的快照，按真实时间戳重算：
+    // 否则隔一周打开，列表还写着「3分钟前」。
+    for s in &mut sessions {
+        s.updated_label = neverwork_core::relative_label(s.updated_at);
+    }
+    let active = sessions
+        .iter()
+        .position(|s| s.id == store.active_id)
+        .unwrap_or(0);
+    (sessions, active)
+}
+
+/// 导出为 Markdown 的正文。工具调用压成一行引用，完整输出不进导图文件。
+fn session_markdown(s: &Session) -> String {
+    use neverwork_core::MessageKind;
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", s.title));
+    out.push_str(&format!(
+        "- 模式：{}{}\n",
+        s.mode.label(),
+        if s.mode.is_team() {
+            format!("（{}）", s.team_name)
+        } else {
+            String::new()
+        }
+    ));
+    out.push_str(&format!("- 最近活跃：{}\n", s.updated_label));
+    out.push_str(&format!("- 消息数：{}\n\n---\n\n", s.messages.len()));
+    for m in &s.messages {
+        match &m.kind {
+            MessageKind::User => out.push_str(&format!("## 用户\n\n{}\n\n", m.body.trim_end())),
+            MessageKind::Agent { participant } => {
+                out.push_str(&format!("## {}\n\n{}\n\n", participant.role_name, m.body.trim_end()))
+            }
+            MessageKind::ToolCall {
+                name,
+                summary,
+                status,
+                ..
+            } => out.push_str(&format!(
+                "> 🔧 `{name}` {} — {:?}\n\n",
+                summary,
+                status
+            )),
+            MessageKind::Tool { summary, .. } => {
+                if !summary.trim().is_empty() {
+                    out.push_str(&format!("> 🛠 {}\n\n", summary));
+                }
+            }
+            MessageKind::Handoff {
+                from, to, action, ..
+            } => out.push_str(&format!("> 🔀 {from} → {to}：{action}\n\n")),
+            _ => {
+                let body = m.body.trim_end();
+                if !body.is_empty() {
+                    out.push_str(&format!("{body}\n\n"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 导出文件名：标题只留字母数字/汉字/少量安全符号，其余换成下划线。
+/// Windows 非法字符（`<>:"/\\|?*`）一个都不能进路径。
+fn safe_file_name(title: &str, id: &str) -> String {
+    let mut name: String = title
+        .chars()
+        .take(32)
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | ' ' | '·' | '（' | '）' | '(' | ')') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = name.trim().trim_matches('_').to_string();
+    name = if trimmed.is_empty() {
+        "session".into()
+    } else {
+        trimmed
+    };
+    format!("{name}-{id}")
+}
+
 /// 会话卡片第二行：把最后一条有内容的消息压成一行。
 ///
 /// 工具卡片优先用「工具名 + 路径」，比正文更说明「刚才在干什么」。
@@ -553,20 +690,7 @@ impl AppState {
         // `load_with_recovery` 会把崩溃残留的 Running/AwaitingApproval 降级成
         // `Interrupted`，并告诉这里降级了几条、丢弃了几条。
         let (store, report) = neverwork_core::sessions::load_with_recovery(&root);
-        let mut sessions = store.sessions;
-        if sessions.is_empty() {
-            sessions.push(blank_session(0, &config, default_session_mode()));
-        }
-        // 文件里存的「3分钟前」是写盘那一刻的快照，按真实时间戳重算：
-        // 否则隔一周打开，列表还写着「3分钟前」。
-        for s in &mut sessions {
-            s.updated_label = neverwork_core::relative_label(s.updated_at);
-        }
-        // 恢复到上次激活的那个会话，而不是永远跳到第一条。
-        let active_session = sessions
-            .iter()
-            .position(|s| s.id == store.active_id)
-            .unwrap_or(0);
+        let (sessions, active_session) = adopt_store(store, &config);
 
         // 技能市场：先读缓存（离线也能看到上次同步的真实条目），启动后后台刷新。
         let market_cache = crate::marketplace::load_cache();
@@ -593,7 +717,16 @@ impl AppState {
             git_branch_input: TextBuffer::single_line(),
             git_confirm: None,
             git_show_branches: false,
-            tag_filter: None,
+            session_search: TextBuffer::single_line(),
+            session_menu: None,
+            session_menu_at: None,
+            session_delete_confirm: None,
+            archive_open: false,
+            archive_clean_confirm: false,
+            rename_session: None,
+            rename_buf: TextBuffer::single_line(),
+            workspace_popup: false,
+            ws_rename: None,
             center: initial_view(),
             settings_tab: initial_settings_tab(),
             right_tab: RightTab::Files,
@@ -659,6 +792,10 @@ impl AppState {
             right_collapsed: std::env::var("NW_RIGHT_COLLAPSED")
                 .map(|v| v != "0")
                 .unwrap_or(true),
+            // 会话列表默认展开；`NW_SESSION_COLLAPSED=1` 供验证时以收起态启动。
+            session_collapsed: std::env::var("NW_SESSION_COLLAPSED")
+                .map(|v| v == "1")
+                .unwrap_or(false),
             expand_steps_all: false,
             find: crate::find::FindState::default(),
             find_query_buf: TextBuffer::single_line(),
@@ -883,6 +1020,46 @@ impl AppState {
                 _ => {}
             }
         }
+        // 验证专用：会话列表搜索/操作面板/归档组/工作区浮层直达
+        if let Ok(q) = std::env::var("NW_SESSION_QUERY") {
+            me.session_search.reset(&q);
+        }
+        if let Ok(v) = std::env::var("NW_SESSION_MENU") {
+            me.session_menu = v.parse::<usize>().ok();
+            // 截图用：直接给一个固定坐标（会话列表区域中部）
+            if me.session_menu.is_some() {
+                me.session_menu_at = Some((150.0, 320.0));
+            }
+        }
+        if std::env::var("NW_WORKSPACE_POPUP").map(|v| v == "1").unwrap_or(false) {
+            me.workspace_popup = true;
+        }
+        if std::env::var("NW_ARCHIVE_OPEN").map(|v| v == "1").unwrap_or(false) {
+            me.archive_open = true;
+        }
+        // 验收专用：启动即切到另一个工作区（等价于点工作区管理器里的一行）。
+        // 必须在 NW_DEMO_STATUS 之前：先切走再打标记，避免把演示状态写回旧库。
+        if let Ok(p) = std::env::var("NW_SWITCH_WS") {
+            me.enter_workspace(std::path::PathBuf::from(p), cx);
+        }
+        // 验收专用：给前几条会话临时打状态，检查胶囊/归档组。
+        // 只改内存，不落盘（不调 save_sessions），进程退出即无。
+        if std::env::var("NW_DEMO_STATUS").map(|v| v == "1").unwrap_or(false) {
+            let demo = [
+                neverwork_core::SessionStatus::Todo,
+                neverwork_core::SessionStatus::Done,
+                neverwork_core::SessionStatus::Dropped,
+            ];
+            for (i, st) in demo.iter().enumerate() {
+                if let Some(s) = me.sessions.get_mut(i) {
+                    s.status = *st;
+                }
+            }
+        }
+        // 启动就把当前工作区记进最近列表（首次运行时列表里至少有一条）
+        me.settings
+            .record_workspace(&me.root.to_string_lossy().to_string(), now_secs());
+        let _ = neverwork_core::config::save_settings(&me.settings);
         // 用 NW_VIEW 直达同步页时也自动查一次版本。
         if me.settings_tab == SettingsTab::Sync && me.center == CenterView::Settings {
             me.check_update(cx);
@@ -1058,13 +1235,362 @@ impl AppState {
         }
     }
 
-    /// 当前分类筛选；`None` 表示全部。
-    pub(crate) fn set_tag_filter(
+    /// 手动标记会话状态。生成中不允许改——运行态优先级高于标记。
+    pub(crate) fn set_session_status(
         &mut self,
-        tag: Option<neverwork_core::SessionTag>,
+        idx: usize,
+        status: neverwork_core::SessionStatus,
         cx: &mut Context<Self>,
     ) {
-        self.tag_filter = tag;
+        let Some(s) = self.sessions.get_mut(idx) else {
+            return;
+        };
+        if s.status == neverwork_core::SessionStatus::Working {
+            self.notice = Some("正在生成，结束后再标记状态".into());
+            cx.notify();
+            return;
+        }
+        s.status = status;
+        let short: String = s.title.chars().take(16).collect();
+        let label = status.label();
+        self.notice = Some(if label.is_empty() {
+            format!("已清除「{short}」的状态标记")
+        } else {
+            format!("「{short}」已标记为{label}")
+        });
+        self.session_menu = None;
+        self.session_menu_at = None;
+        self.save_sessions();
+        cx.notify();
+    }
+
+    /// 在窗口坐标处弹出会话操作菜单；同一会话再点则收起。
+    pub(crate) fn toggle_session_menu(
+        &mut self,
+        idx: usize,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        if self.session_menu == Some(idx) {
+            self.close_session_menu(cx);
+            return;
+        }
+        self.session_menu = Some(idx);
+        self.session_menu_at = Some(at);
+        self.session_delete_confirm = None;
+        cx.notify();
+    }
+
+    /// 收起会话操作菜单。
+    pub(crate) fn close_session_menu(&mut self, cx: &mut Context<Self>) {
+        self.session_menu = None;
+        self.session_menu_at = None;
+        self.session_delete_confirm = None;
+        cx.notify();
+    }
+
+    /// 删除会话（第一次点进入确认态，第二次真删）。
+    pub(crate) fn click_delete_session(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.session_delete_confirm != Some(idx) {
+            self.session_delete_confirm = Some(idx);
+            cx.notify();
+            return;
+        }
+        if idx >= self.sessions.len() {
+            return;
+        }
+        let removed = self.sessions.remove(idx);
+        let short: String = removed.title.chars().take(16).collect();
+        if self.sessions.is_empty() {
+            self.sessions.push(blank_session(0, &self.config, default_session_mode()));
+        }
+        // active_session 是索引引用：删当前会话落到相邻的，删前面的则前移一格
+        if idx == self.active_session {
+            self.active_session = idx.min(self.sessions.len() - 1);
+            self.active_role = None;
+        } else if idx < self.active_session {
+            self.active_session -= 1;
+        }
+        // 重命名/菜单指向的是下标，删完要同步修正，否则下次展开会错位到别人
+        self.session_menu = None;
+        self.session_menu_at = None;
+        self.session_delete_confirm = None;
+        match self.rename_session {
+            Some(r) if r == idx => {
+                self.rename_session = None;
+                self.rename_buf.reset("");
+                self.input_target = InputTarget::Chat;
+            }
+            Some(r) if r > idx => self.rename_session = Some(r - 1),
+            _ => {}
+        }
+        self.notice = Some(format!("已删除「{short}」"));
+        self.save_sessions();
+        cx.notify();
+    }
+
+    /// 清理全部归档会话（已完成/已废弃且未置顶），二次确认。
+    pub(crate) fn click_clean_archived(&mut self, cx: &mut Context<Self>) {
+        if !self.archive_clean_confirm {
+            self.archive_clean_confirm = true;
+            cx.notify();
+            return;
+        }
+        let active_id = self
+            .sessions
+            .get(self.active_session)
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
+        let before = self.sessions.len();
+        self.sessions
+            .retain(|s| !neverwork_core::is_archived_session(s));
+        let removed = before - self.sessions.len();
+        if self.sessions.is_empty() {
+            self.sessions.push(blank_session(0, &self.config, default_session_mode()));
+        }
+        self.active_session = self
+            .sessions
+            .iter()
+            .position(|s| s.id == active_id)
+            .unwrap_or(0);
+        self.active_role = None;
+        self.archive_clean_confirm = false;
+        self.archive_open = false;
+        // 清理会打乱所有下标，开着的菜单/重命名/确认态全部作废
+        self.session_menu = None;
+        self.session_menu_at = None;
+        self.session_delete_confirm = None;
+        self.rename_session = None;
+        self.rename_buf.reset("");
+        if self.input_target == InputTarget::RenameSession {
+            self.input_target = InputTarget::Chat;
+        }
+        self.notice = Some(format!("已清理 {removed} 个归档会话"));
+        self.save_sessions();
+        cx.notify();
+    }
+
+    pub(crate) fn begin_rename_session(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(s) = self.sessions.get(idx) else {
+            return;
+        };
+        let title = s.title.clone();
+        self.rename_session = Some(idx);
+        self.rename_buf.reset(&title);
+        self.input_target = InputTarget::RenameSession;
+        self.session_menu = None;
+        self.session_menu_at = None;
+        self.session_delete_confirm = None;
+        cx.notify();
+    }
+
+    pub(crate) fn commit_rename_session(&mut self, cx: &mut Context<Self>) {
+        let Some(idx) = self.rename_session.take() else {
+            return;
+        };
+        let name = self.rename_buf.text().trim().to_string();
+        if !name.is_empty() {
+            if let Some(s) = self.sessions.get_mut(idx) {
+                s.title = name;
+            }
+            self.save_sessions();
+        }
+        self.input_target = InputTarget::Chat;
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_rename_session(&mut self, cx: &mut Context<Self>) {
+        self.rename_session = None;
+        self.rename_buf.reset("");
+        self.input_target = InputTarget::Chat;
+        cx.notify();
+    }
+
+    /// 把会话导出为 Markdown：落在 `~/.neverwork/exports/`，不污染工作区目录。
+    pub(crate) fn export_session(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(s) = self.sessions.get(idx) else {
+            return;
+        };
+        let dir = neverwork_core::config::config_dir().join("exports");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.notice = Some(format!("导出失败：{e}"));
+            cx.notify();
+            return;
+        };
+        let path = dir.join(format!("{}.md", safe_file_name(&s.title, &s.id)));
+        match std::fs::write(&path, session_markdown(s)) {
+            Ok(()) => self.notice = Some(format!("已导出到 {}", path.display())),
+            Err(e) => self.notice = Some(format!("导出失败：{e}")),
+        }
+        self.session_menu = None;
+        self.session_menu_at = None;
+        cx.notify();
+    }
+
+    // ===== 会话库切换与工作区管理器 =====
+
+    /// 把当前内存里的会话装回原位（切换工作区后调用）。
+    fn adopt_session_store(&mut self, store: neverwork_core::SessionStore) {
+        let (sessions, active) = adopt_store(store, &self.config);
+        self.sessions = sessions;
+        self.active_session = active;
+        self.active_role = None;
+    }
+
+    /// 进入一个工作区：存旧会话 → 换根 → 重载该工作区的会话库。
+    ///
+    /// 会话按工作区隔离存储（`sessions/<slug>-<hash>.json`），不换库就会把
+    /// 上一个项目的列表带过来，保存时还会写进新工作区的文件。
+    pub(crate) fn enter_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.streaming {
+            self.notice = Some("正在生成，先停止再切换工作区".into());
+            self.workspace_popup = false;
+            cx.notify();
+            return;
+        }
+        if !path.is_dir() {
+            self.notice = Some(format!("不是一个目录：{}", path.display()));
+            cx.notify();
+            return;
+        }
+        // 先把旧工作区的会话落盘，否则下面改 root 后旧会话会写进新文件
+        self.save_sessions();
+        self.root = path;
+        let root_str = self.root.to_string_lossy().to_string();
+        self.settings.last_workspace = root_str.clone();
+        self.settings.record_workspace(&root_str, now_secs());
+        let _ = neverwork_core::config::save_settings(&self.settings);
+        self.expanded = filesystem::default_expanded(&self.root);
+        self.files = filesystem::build_tree(&self.root, &self.expanded).unwrap_or_default();
+        self.workspace = Workspace {
+            name: self
+                .root
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "workspace".into()),
+            path: self.root.to_string_lossy().to_string(),
+            kind: ConnectionKind::Local,
+            remote_url: None,
+            online: true,
+        };
+        self.open_path = None;
+        self.editor.reset("");
+        self.dirty = false;
+        self.folds.clear();
+        self.center = CenterView::Chat;
+        self.adopt_session_store(neverwork_core::sessions::load_with_recovery(&self.root).0);
+        // 列表的搜索/菜单是上一个工作区的语境，全部复位
+        self.session_search.reset("");
+        self.session_menu = None;
+        self.session_menu_at = None;
+        self.session_delete_confirm = None;
+        self.rename_session = None;
+        self.archive_clean_confirm = false;
+        self.archive_open = false;
+        self.workspace_popup = false;
+        self.ws_rename = None;
+        self.ws_prompt_open = false;
+        self.palette_open = false;
+        self.ws_input.reset("");
+        self.notice = Some(format!("已切换到 {}", self.root.display()));
+        self.refresh_git(cx);
+    }
+
+    pub(crate) fn open_workspace_prompt(&mut self, cx: &mut Context<Self>) {
+        self.workspace_popup = true;
+        self.ws_rename = None;
+        self.ws_input.reset("");
+        cx.notify();
+    }
+
+    pub(crate) fn close_workspace_prompt(&mut self, cx: &mut Context<Self>) {
+        self.workspace_popup = false;
+        self.ws_rename = None;
+        self.ws_input.reset("");
+        cx.notify();
+    }
+
+    /// 工作区管理器底部的「打开文件夹…」：转入手输路径行。
+    pub(crate) fn open_workspace_folder_input(&mut self, cx: &mut Context<Self>) {
+        self.ws_prompt_open = true;
+        self.palette_open = true;
+        self.workspace_popup = false;
+        self.ws_rename = None;
+        self.ws_input.reset("");
+        self.input_target = InputTarget::Workspace;
+        cx.notify();
+    }
+
+    pub(crate) fn switch_to_recent_workspace(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .settings
+            .workspaces
+            .get(i)
+            .map(|w| PathBuf::from(&w.path))
+        else {
+            return;
+        };
+        self.enter_workspace(path, cx);
+    }
+
+    pub(crate) fn toggle_workspace_pin(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(w) = self.settings.workspaces.get_mut(i) {
+            w.pinned = !w.pinned;
+        }
+        let _ = neverwork_core::config::save_settings(&self.settings);
+        cx.notify();
+    }
+
+    pub(crate) fn remove_recent_workspace(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i < self.settings.workspaces.len() {
+            self.settings.workspaces.remove(i);
+        }
+        self.ws_rename = None;
+        let _ = neverwork_core::config::save_settings(&self.settings);
+        cx.notify();
+    }
+
+    pub(crate) fn begin_rename_workspace(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(w) = self.settings.workspaces.get(i) else {
+            return;
+        };
+        self.ws_rename = Some(i);
+        self.ws_input.reset(&w.name);
+        self.input_target = InputTarget::Workspace;
+        cx.notify();
+    }
+
+    pub(crate) fn commit_rename_workspace(&mut self, cx: &mut Context<Self>) {
+        let Some(i) = self.ws_rename.take() else {
+            return;
+        };
+        let name = self.ws_input.text().trim().to_string();
+        if let Some(w) = self.settings.workspaces.get_mut(i) {
+            w.name = name;
+        }
+        let _ = neverwork_core::config::save_settings(&self.settings);
+        self.ws_input.reset("");
+        self.input_target = InputTarget::Chat;
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_rename_workspace(&mut self, cx: &mut Context<Self>) {
+        self.ws_rename = None;
+        self.ws_input.reset("");
+        self.input_target = InputTarget::Chat;
+        cx.notify();
+    }
+
+    /// 清空搜索框（Esc / ✕ 按钮）。
+    pub(crate) fn clear_session_search(&mut self, cx: &mut Context<Self>) {
+        self.session_search.reset("");
+        cx.notify();
+    }
+
+    /// 展开/收起「已归档」折叠组。
+    pub(crate) fn toggle_archive(&mut self, cx: &mut Context<Self>) {
+        self.archive_open = !self.archive_open;
+        self.archive_clean_confirm = false;
         cx.notify();
     }
 
@@ -1346,81 +1872,18 @@ impl AppState {
 
     // ===== 工作区切换 =====
 
-    pub(crate) fn open_workspace_prompt(&mut self, cx: &mut Context<Self>) {
-        self.ws_prompt_open = true;
-        self.palette_open = true;
-        self.ws_input.reset("");
-        cx.notify();
-    }
-
     /// 切换到一个已知存在的目录作为工作区（子仓库入口用）。
     pub(crate) fn switch_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if !path.is_dir() {
-            self.notice = Some(format!("目录不存在：{}", path.display()));
-            cx.notify();
-            return;
-        }
-        self.root = path;
-        self.settings.last_workspace = self.root.to_string_lossy().to_string();
-        let _ = neverwork_core::config::save_settings(&self.settings);
-        self.expanded = filesystem::default_expanded(&self.root);
-        self.files = filesystem::build_tree(&self.root, &self.expanded).unwrap_or_default();
-        self.workspace = Workspace {
-            name: self
-                .root
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "workspace".into()),
-            path: self.root.to_string_lossy().to_string(),
-            kind: ConnectionKind::Local,
-            remote_url: None,
-            online: true,
-        };
-        self.open_path = None;
-        self.editor.reset("");
-        self.dirty = false;
-        self.folds.clear();
-        self.center = CenterView::Chat;
-        self.notice = Some(format!("已切换到 {}", self.root.display()));
-        self.refresh_git(cx);
+        self.enter_workspace(path, cx);
     }
 
+    /// 手输路径确认（从工作区管理器底部的「打开文件夹…」进入）。
     pub(crate) fn apply_workspace_input(&mut self, cx: &mut Context<Self>) {
         let raw = self.ws_input.text().trim().to_string();
         if raw.is_empty() {
             return;
         }
-        let path = PathBuf::from(&raw);
-        if !path.is_dir() {
-            self.notice = Some(format!("不是一个目录：{raw}"));
-            cx.notify();
-            return;
-        }
-        self.root = path;
-        self.settings.last_workspace = self.root.to_string_lossy().to_string();
-        let _ = neverwork_core::config::save_settings(&self.settings);
-        self.expanded = filesystem::default_expanded(&self.root);
-        self.files = filesystem::build_tree(&self.root, &self.expanded).unwrap_or_default();
-        self.workspace = Workspace {
-            name: self
-                .root
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "workspace".into()),
-            path: self.root.to_string_lossy().to_string(),
-            kind: ConnectionKind::Local,
-            remote_url: None,
-            online: true,
-        };
-        self.open_path = None;
-        self.editor.reset("");
-        self.dirty = false;
-        self.center = CenterView::Chat;
-        self.ws_prompt_open = false;
-        self.palette_open = false;
-        self.ws_input.reset("");
-        self.notice = Some(format!("已切换到 {}", self.root.display()));
-        cx.notify();
+        self.enter_workspace(PathBuf::from(&raw), cx);
     }
 
     // ===== 命令面板 =====
@@ -1474,6 +1937,20 @@ impl AppState {
                 });
                 cx.notify();
             }
+            Command::SessionStatus(code) => {
+                let status = match code {
+                    1 => neverwork_core::SessionStatus::Todo,
+                    2 => neverwork_core::SessionStatus::Done,
+                    3 => neverwork_core::SessionStatus::Dropped,
+                    _ => neverwork_core::SessionStatus::Idle,
+                };
+                let idx = self.active_session;
+                self.set_session_status(idx, status, cx);
+            }
+            Command::ExportSession => {
+                let idx = self.active_session;
+                self.export_session(idx, cx);
+            }
             Command::Settings => self.open_settings(SettingsTab::General, cx),
             Command::Skills => self.open_skills(cx),
         }
@@ -1486,6 +1963,8 @@ impl AppState {
             InputTarget::Chat => &self.chat,
             InputTarget::Editor => &self.editor,
             InputTarget::Workspace => &self.ws_input,
+            InputTarget::SessionSearch => &self.session_search,
+            InputTarget::RenameSession => &self.rename_buf,
             InputTarget::Field(_) => &self.field_buf,
         }
     }
@@ -1495,6 +1974,8 @@ impl AppState {
             InputTarget::Chat => &mut self.chat,
             InputTarget::Editor => &mut self.editor,
             InputTarget::Workspace => &mut self.ws_input,
+            InputTarget::SessionSearch => &mut self.session_search,
+            InputTarget::RenameSession => &mut self.rename_buf,
             InputTarget::Field(_) => &mut self.field_buf,
         }
     }
@@ -1648,6 +2129,20 @@ impl AppState {
         }
     }
 
+    pub(crate) fn on_session_search_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        self.switch_input_target(InputTarget::SessionSearch);
+        if let Some(action) = keymap::route(&ev.keystroke) {
+            self.apply_action(InputTarget::SessionSearch, action, cx);
+        }
+    }
+
+    pub(crate) fn on_rename_session_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        self.switch_input_target(InputTarget::RenameSession);
+        if let Some(action) = keymap::route(&ev.keystroke) {
+            self.apply_action(InputTarget::RenameSession, action, cx);
+        }
+    }
+
     fn apply_action(&mut self, target: InputTarget, action: KeyAction, cx: &mut Context<Self>) {
         match action {
             KeyAction::Motion { motion, extend } => {
@@ -1746,7 +2241,20 @@ impl AppState {
                     self.scroll_editor_to_cursor();
                     cx.notify();
                 }
-                InputTarget::Workspace => self.apply_workspace_input(cx),
+                // 工作区输入同时用于「切换到新路径」与「重命名工作区」两种场景
+                InputTarget::Workspace => {
+                    if self.ws_rename.is_some() {
+                        self.commit_rename_workspace(cx);
+                    } else {
+                        self.apply_workspace_input(cx);
+                    }
+                }
+                // 搜索是实时的，回车只收起焦点，不改词
+                InputTarget::SessionSearch => {
+                    self.input_target = InputTarget::Chat;
+                    cx.notify();
+                }
+                InputTarget::RenameSession => self.commit_rename_session(cx),
                 InputTarget::Field(_) => self.commit_field(cx),
             },
             KeyAction::Tab { shift } => {
@@ -1780,6 +2288,8 @@ impl AppState {
                 if self.market_detail.is_some() {
                     // 详情抽屉在最上层，Esc 先关它
                     self.close_market_detail(cx);
+                } else if self.workspace_popup {
+                    self.close_workspace_prompt(cx);
                 } else if self.new_session_picker {
                     self.close_new_session_picker(cx);
                 } else if self.model_picker.is_some() {
@@ -1789,6 +2299,15 @@ impl AppState {
                     self.palette_open = false;
                 } else if self.palette_open {
                     self.palette_open = false;
+                } else if self.rename_session.is_some() {
+                    self.cancel_rename_session(cx);
+                } else if self.session_menu.is_some() {
+                    // 先收菜单，再收确认态
+                    self.close_session_menu(cx);
+                } else if self.archive_clean_confirm {
+                    self.archive_clean_confirm = false;
+                } else if !self.session_search.text().trim().is_empty() {
+                    self.session_search.reset("");
                 } else if self.role_skill_picker.is_some() {
                     self.close_role_skill_picker(cx);
                 } else if self.streaming {
@@ -3002,6 +3521,12 @@ impl AppState {
         cx.notify();
     }
 
+    /// 收起 / 展开会话列表（图标栏永远保留）。
+    pub(crate) fn toggle_session_list(&mut self, cx: &mut Context<Self>) {
+        self.session_collapsed = !self.session_collapsed;
+        cx.notify();
+    }
+
     /// 用户对写操作的决定。
     pub(crate) fn answer_approval(&mut self, allow: bool, cx: &mut Context<Self>) {
         if let Some(p) = self.pending.take() {
@@ -3123,6 +3648,9 @@ impl Render for AppState {
             0.0
         } else if hide_list {
             crate::views::sidebar::RAIL_W
+        } else if self.session_collapsed {
+            // 会话列表收起时只留一条 16px 窄边（展开按钮），和右栏收起一致。
+            crate::views::sidebar::RAIL_W + 16.0
         } else {
             crate::views::sidebar::RAIL_W + crate::views::sidebar::SESSION_W
         };
@@ -3156,7 +3684,10 @@ impl Render for AppState {
             let want = match self.input_target {
                 InputTarget::Editor => Some(self.editor_focus.clone()),
                 InputTarget::Workspace => Some(self.ws_focus.clone()),
-                InputTarget::Chat | InputTarget::Field(_) => Some(self.focus_handle.clone()),
+                InputTarget::Chat
+                | InputTarget::Field(_)
+                | InputTarget::SessionSearch
+                | InputTarget::RenameSession => Some(self.focus_handle.clone()),
             };
             if let Some(handle) = want {
                 if !handle.is_focused(window) {
@@ -3180,7 +3711,7 @@ impl Render for AppState {
             .flex_col()
             .bg(theme::surface())
             .text_color(theme::fg())
-            .child(crate::views::titlebar(self, cx))
+            .child(crate::views::titlebar(self, window.is_maximized(), cx))
             .child({
                 let row = div()
                     .flex_1()
@@ -3207,8 +3738,29 @@ impl Render for AppState {
                 self.ws_focus.clone(),
             ));
 
+        // 会话右键菜单：坐标 clamp 进可见区域，靠下/靠右时往上/左弹。
+        if let (Some(idx), Some((x, y))) = (self.session_menu, self.session_menu_at) {
+            // 宽度与菜单卡片共用同一个常量；高度是估计值（含标题行/分组分隔线）
+            const MENU_W: f32 = crate::views::session_menu::MENU_W;
+            const MENU_H: f32 = 380.0;
+            let mx = if x + MENU_W + 8.0 <= visible_w {
+                x
+            } else {
+                (x - MENU_W).max(8.0)
+            };
+            let my = if y + MENU_H + 8.0 <= visible_h {
+                y
+            } else {
+                (y - MENU_H).max(8.0)
+            };
+            root = root.child(self.session_menu_overlay(idx, mx, my, cx).into_any_element());
+        }
         if self.palette_open {
             root = root.child(self.palette_overlay(cx).into_any_element());
+        }
+        // 工作区管理器：与命令面板同形态的居中遮罩卡片。
+        if self.workspace_popup {
+            root = root.child(self.workspace_popup_overlay(cx).into_any_element());
         }
         // 条目详情：从右侧抽出 420px 抽屉（技能页里点卡片打开）。
         if self.market_detail.is_some() {
@@ -3241,7 +3793,10 @@ fn input_bridge(
         InputTarget::Editor => editor_focus.clone(),
         InputTarget::Workspace => ws_focus.clone(),
         // 表单字段与对话共用同一个输入宿主
-        InputTarget::Chat | InputTarget::Field(_) => chat_focus.clone(),
+        InputTarget::Chat
+        | InputTarget::Field(_)
+        | InputTarget::SessionSearch
+        | InputTarget::RenameSession => chat_focus.clone(),
     };
     gpui::canvas(
         |_bounds, _window, _cx| {},
@@ -4222,5 +4777,47 @@ mod history_tests {
         assert_eq!(h.len(), 2);
         assert!(h[0].content.contains("省略"));
         assert_eq!(h[1].content.chars().count(), HISTORY_BUDGET_CHARS / 2 + 1);
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::{safe_file_name, session_markdown};
+    use neverwork_core::Session;
+
+    fn session(json: &str) -> Session {
+        serde_json::from_str(json).expect("会话 JSON 应能反序列化")
+    }
+
+    #[test]
+    fn safe_file_name_strips_windows_illegal_chars() {
+        let n = safe_file_name("a/b:c*d?e|f\\g<h>i\"j", "s1");
+        assert!(
+            !n.chars()
+                .any(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')),
+            "文件名里还有 Windows 非法字符：{n}"
+        );
+        assert!(n.ends_with("-s1"));
+    }
+
+    #[test]
+    fn safe_file_name_falls_back_when_title_is_all_punctuation() {
+        assert_eq!(safe_file_name("///", "s9"), "session-s9");
+    }
+
+    #[test]
+    fn markdown_keeps_user_and_agent_headers() {
+        let s = session(
+            r#"{"id":"s1","title":"修一个 bug","subtitle":"","team_name":"单助手",
+                 "messages":[
+                   {"kind":{"type":"user"},"body":"帮我看下","code":null},
+                   {"kind":{"type":"agent","participant":{"role_id":"a","role_name":"助手","color_index":0,"initial":"A"}},"body":"好的","code":null}
+                 ],
+                 "updated_label":"刚刚"}"#,
+        );
+        let md = session_markdown(&s);
+        assert!(md.starts_with("# 修一个 bug"));
+        assert!(md.contains("## 用户"));
+        assert!(md.contains("## 助手"));
     }
 }

@@ -550,6 +550,42 @@ impl Skill {
     }
 }
 
+// ============ 工作区 ============
+
+/// 一个最近打开过的工作区。
+///
+/// 只做「最近列表」，不扫描磁盘、不监听目录——工作区是否仍存在由切换时
+/// `is_dir` 现场判断（列表里标「不存在」）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentWorkspace {
+    /// 绝对路径，兼作唯一键。
+    pub path: String,
+    /// 用户重命名；空则显示目录名。
+    #[serde(default)]
+    pub name: String,
+    /// 收藏：排序永远在前，且不会被上限淘汰。
+    #[serde(default)]
+    pub pinned: bool,
+    /// 最近打开（Unix 秒）。排序用时间戳而不是字符串。
+    #[serde(default)]
+    pub opened_at: u64,
+}
+
+impl RecentWorkspace {
+    /// 列表里显示的名字：自定义名 → 目录名 → 完整路径。
+    pub fn display_name(&self) -> String {
+        let n = self.name.trim();
+        if !n.is_empty() {
+            return n.to_string();
+        }
+        std::path::Path::new(&self.path)
+            .file_name()
+            .map(|x| x.to_string_lossy().to_string())
+            .filter(|x| !x.is_empty())
+            .unwrap_or_else(|| self.path.clone())
+    }
+}
+
 // ============ 设置根 ============
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -607,6 +643,10 @@ pub struct Settings {
     /// 上次打开的工作区（绝对路径）。空则用内置默认。
     #[serde(default)]
     pub last_workspace: String,
+    /// 最近打开过的工作区（收藏在前）。上限见 [`Settings::record_workspace`]。
+    /// 会话按工作区隔离存储，切换工作区会重载对应会话库。
+    #[serde(default)]
+    pub workspaces: Vec<RecentWorkspace>,
 
     // ---- 同步与升级 ----
     /// 配置同步开关（导出/导入或云同步）。
@@ -675,6 +715,7 @@ impl Default for Settings {
             max_run_seconds: 0,
             skills: Vec::new(),
             last_workspace: String::new(),
+            workspaces: Vec::new(),
             sync_enabled: false,
             last_sync_at: 0,
             last_update_check: 0,
@@ -717,6 +758,55 @@ impl Settings {
 
     pub fn provider_mut(&mut self, id: &str) -> Option<&mut ProviderEntry> {
         self.providers.iter_mut().find(|p| p.id == id)
+    }
+
+    /// 记录一次工作区打开：同路径更新打开时间（保留自定义名与收藏），
+    /// 超过上限时淘汰最久未打开且未收藏的。
+    ///
+    /// 收藏项不参与淘汰：用户特意星标的项目被挤掉，比列表少几条难受得多。
+    pub fn record_workspace(&mut self, path: &str, now: u64) {
+        const MAX_WORKSPACES: usize = 12;
+        if path.trim().is_empty() {
+            return;
+        }
+        if let Some(w) = self.workspaces.iter_mut().find(|w| w.path == path) {
+            w.opened_at = now;
+            return;
+        }
+        self.workspaces.push(RecentWorkspace {
+            path: path.to_string(),
+            name: String::new(),
+            pinned: false,
+            opened_at: now,
+        });
+        while self.workspaces.len() > MAX_WORKSPACES {
+            let victim = self
+                .workspaces
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| !w.pinned)
+                .min_by_key(|(_, w)| w.opened_at)
+                .map(|(i, _)| i);
+            match victim {
+                Some(i) => {
+                    self.workspaces.remove(i);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// 工作区列表的展示顺序：收藏在前 → 最近打开优先。返回原数组下标。
+    pub fn workspace_order(&self) -> Vec<usize> {
+        let mut idx: Vec<usize> = (0..self.workspaces.len()).collect();
+        idx.sort_by(|&a, &b| {
+            self.workspaces[b]
+                .pinned
+                .cmp(&self.workspaces[a].pinned)
+                .then(self.workspaces[b].opened_at.cmp(&self.workspaces[a].opened_at))
+                .then(a.cmp(&b))
+        });
+        idx
     }
 
     /// 脱敏副本：清空所有厂商的 API Key。
@@ -955,5 +1045,70 @@ mod tests {
             .push(ProviderEntry::from_preset(ProviderPreset::Custom));
         s.providers.last_mut().unwrap().id = "custom-1".into();
         assert_eq!(s.next_custom_id(), "custom-2");
+    }
+
+    #[test]
+    fn record_workspace_upserts_and_keeps_name() {
+        let mut s = Settings::default();
+        s.record_workspace("E:\\AI\\a", 100);
+        s.workspaces[0].name = "项目A".into();
+        s.workspaces[0].pinned = true;
+        s.record_workspace("E:\\AI\\a", 200);
+        assert_eq!(s.workspaces.len(), 1, "同一路径不能重复入列");
+        assert_eq!(s.workspaces[0].opened_at, 200);
+        assert_eq!(s.workspaces[0].name, "项目A", "重新打开不能冲掉自定义名");
+        assert!(s.workspaces[0].pinned, "重新打开不能冲掉收藏");
+    }
+
+    #[test]
+    fn record_workspace_evicts_oldest_unpinned_but_keeps_pinned() {
+        let mut s = Settings::default();
+        s.record_workspace("E:\\w0", 1);
+        s.workspaces[0].pinned = true;
+        for i in 1..=12u64 {
+            s.record_workspace(&format!("E:\\w{i}"), i * 10);
+        }
+        assert_eq!(s.workspaces.len(), 12, "上限 12 条");
+        assert!(
+            s.workspaces.iter().any(|w| w.path == "E:\\w0"),
+            "收藏项不参与淘汰"
+        );
+        assert!(
+            !s.workspaces.iter().any(|w| w.path == "E:\\w1"),
+            "最久未打开的先被淘汰"
+        );
+    }
+
+    #[test]
+    fn workspace_order_pinned_first_then_recent() {
+        let mut s = Settings::default();
+        s.record_workspace("E:\\a", 100);
+        s.record_workspace("E:\\b", 200);
+        s.record_workspace("E:\\c", 50);
+        s.workspaces[2].pinned = true; // c 收藏
+        let order = s.workspace_order();
+        assert_eq!(s.workspaces[order[0]].path, "E:\\c");
+        assert_eq!(s.workspaces[order[1]].path, "E:\\b");
+        assert_eq!(s.workspaces[order[2]].path, "E:\\a");
+    }
+
+    #[test]
+    fn recent_workspace_display_name_falls_back_to_dir() {
+        let mut w = RecentWorkspace {
+            path: "E:\\AI\\ide".into(),
+            name: String::new(),
+            pinned: false,
+            opened_at: 0,
+        };
+        assert_eq!(w.display_name(), "ide");
+        w.name = "心爱项目".into();
+        assert_eq!(w.display_name(), "心爱项目");
+    }
+
+    #[test]
+    fn old_settings_without_workspaces_load() {
+        let json = r#"{"theme":"dark"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(s.workspaces.is_empty(), "旧配置不能因缺字段整库失效");
     }
 }
