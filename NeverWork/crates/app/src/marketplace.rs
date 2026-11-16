@@ -305,6 +305,20 @@ pub fn icon_path(entry: &MarketEntry) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// 条目来源的展示文案：由 id 前缀推断（市场条目 id 带源前缀，本地导入没有）。
+/// 技能页详情抽屉与团队插件面板共用，避免两处文案不一致。
+pub fn source_label(id: &str) -> &'static str {
+    if id.starts_with("tencent.") {
+        "腾讯云广场"
+    } else if id.starts_with("gh.") {
+        "GitHub 技能"
+    } else if id.starts_with("mcp.") {
+        "MCP 官方"
+    } else {
+        "本地安装"
+    }
+}
+
 /// 标准 FNV-1a 64 位（prime = 0x100000001B3）。
 /// 注意：改哈希算法/幂等错一个字都会让旧缓存名失配，图标会重新下载一轮。
 fn fnv1a(s: &str) -> u64 {

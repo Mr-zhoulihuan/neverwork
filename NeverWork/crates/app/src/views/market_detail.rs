@@ -124,16 +124,8 @@ impl AppState {
             );
 
         // ---- 形态 / 来源 / 标签 ----
-        // 来源从 id 前缀推断：本地导入的技能不属于任何一个市场源。
-        let source_label = if skill.id.starts_with("tencent.") {
-            "腾讯云广场"
-        } else if skill.id.starts_with("gh.") {
-            "GitHub 技能"
-        } else if skill.id.starts_with("mcp.") {
-            "MCP 官方"
-        } else {
-            "本地安装"
-        };
+        // 来源从 id 前缀推断（与团队插件面板共用同一份文案）。
+        let source_label = crate::marketplace::source_label(&skill.id);
         let mut badges = div()
             .flex()
             .items_center()
@@ -261,7 +253,7 @@ impl AppState {
         }
         panel = panel.child(body);
 
-        // ---- 底栏：安装 / 卸载 + 上游链接 ----
+        // ---- 底栏：绑定 / 安装 / 卸载 + 上游链接 ----
         let id = skill.id.clone();
         let entry_for_btn = entry.clone();
         let mut install_btn = div()
@@ -274,7 +266,41 @@ impl AppState {
             .py_1p5()
             .rounded_md()
             .text_xs();
-        if installed {
+        // 从团队角色面板进来时，主按钮是「绑定到角色」（绑定会先确保安装，
+        // MCP 未装则走确认流程，确认后自动绑），不再给卸载入口。
+        let bound_role = self.market_detail_role.and_then(|ri| {
+            let team = self.config.active_team()?;
+            let role = team.roles.get(ri)?;
+            let bound = role.skills.iter().any(|x| x == &skill.id);
+            Some((ri, role.name.clone(), bound))
+        });
+        if let Some((role_idx, role_name, bound)) = bound_role {
+            install_btn = if bound {
+                install_btn
+                    .bg(theme::with_alpha(0x22c55e, 0.12))
+                    .text_color(theme::green())
+                    .child(SharedString::from(format!("✓ 已绑定到「{role_name}」")))
+            } else if remote_only {
+                // 绑定会先确保安装；仅远程条目装不了，自然也不能绑
+                install_btn
+                    .border_1()
+                    .border_color(theme::border())
+                    .text_color(theme::dim())
+                    .child("仅远程，暂不支持绑定")
+            } else {
+                let skill_for_bind = skill.clone();
+                let label = format!("＋ 绑定到「{role_name}」");
+                install_btn
+                    .bg(theme::accent())
+                    .text_color(gpui::rgb(0xffffff))
+                    .cursor_pointer()
+                    .hover(|d| d.opacity(0.88))
+                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                        this.attach_skill_to_role(role_idx, skill_for_bind.clone(), cx);
+                    }))
+                    .child(SharedString::from(label))
+            };
+        } else if installed {
             install_btn = install_btn
                 .bg(theme::with_alpha(0x22c55e, 0.12))
                 .text_color(theme::green())

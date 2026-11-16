@@ -326,11 +326,26 @@ impl AppState {
     /// 打开条目详情抽屉（点卡片主体触发，安装按钮不触发）。
     pub(crate) fn open_market_detail(&mut self, entry: MarketEntry, cx: &mut Context<Self>) {
         self.market_detail = Some(entry);
+        // 市场页打开时底栏是安装 / 卸载，不带角色绑定。
+        self.market_detail_role = None;
+        cx.notify();
+    }
+
+    /// 从团队角色面板打开详情：底栏主按钮变成「绑定到角色」。
+    pub(crate) fn open_market_detail_for_role(
+        &mut self,
+        entry: MarketEntry,
+        role_idx: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.market_detail = Some(entry);
+        self.market_detail_role = Some(role_idx);
         cx.notify();
     }
 
     pub(crate) fn close_market_detail(&mut self, cx: &mut Context<Self>) {
         self.market_detail = None;
+        self.market_detail_role = None;
         cx.notify();
     }
 

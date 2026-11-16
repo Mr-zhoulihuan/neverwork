@@ -283,6 +283,8 @@ pub struct AppState {
     pub role_skill_picker: Option<usize>,
     /// 角色插件搜索词。
     pub role_skill_search: String,
+    /// 团队插件面板的筛选页签：0=全部 1=MCP 2=技能 3=已安装。
+    pub role_skill_filter: u8,
     /// 待确认的 MCP 插件安装（技能 id）。
     /// MCP 插件安装 = 注册并启动外部进程，必须用户点头后才接。
     pub pending_mcp_install: Option<String>,
@@ -296,6 +298,9 @@ pub struct AppState {
     pub mcp_source: MarketSource,
     /// 详情抽屉里的条目；`None` 表示抽屉关闭。
     pub market_detail: Option<MarketEntry>,
+    /// 详情抽屉从团队角色面板打开时要绑定的角色下标。
+    /// `Some` 时底栏主按钮是「绑定到角色」而不是安装 / 卸载。
+    pub market_detail_role: Option<usize>,
     /// 各来源最近一次拉到的条目（内存，不序列化）。
     pub market_entries: std::collections::HashMap<MarketSource, Vec<MarketEntry>>,
     /// 各来源上次成功同步的时间。
@@ -631,12 +636,14 @@ impl AppState {
             new_session_picker: false,
             role_skill_picker: None,
             role_skill_search: String::new(),
+            role_skill_filter: 0,
             pending_mcp_install: None,
             pending_mcp_attach: None,
             skill_import_open: false,
             market_source: MarketSource::Official,
             mcp_source: MarketSource::Official,
             market_detail: None,
+            market_detail_role: None,
             market_entries,
             market_fetched_at,
             market_loading: false,
@@ -707,9 +714,21 @@ impl AppState {
                 me.role_skill_picker = Some(i);
             }
         }
+        // 验证用：预置团队插件面板的筛选页签（0=全部 1=MCP 2=技能 3=已安装）。
+        if let Ok(v) = std::env::var("NW_ROLE_SKILL_FILTER") {
+            if let Ok(f) = v.parse::<u8>() {
+                me.role_skill_filter = f.min(3);
+            }
+        }
         // 验证用：预置角色插件搜索词（配合 NW_PICK_ROLE_SKILL 截图用）。
         if let Ok(q) = std::env::var("NW_ROLE_SKILL_QUERY") {
             me.role_skill_search = q;
+        }
+        // 验证用：详情抽屉从团队角色面板打开（参数是角色下标，配合 NW_MARKET_DETAIL 选条目）。
+        if let Ok(v) = std::env::var("NW_MARKET_DETAIL_ROLE") {
+            if let Ok(i) = v.parse::<usize>() {
+                me.market_detail_role = Some(i);
+            }
         }
         // 验证用：启动即安装一个技能（文本技能直接落盘；MCP 进入待确认）。
         if let Ok(id) = std::env::var("NW_INSTALL_SKILL") {
@@ -2045,6 +2064,18 @@ impl AppState {
             }
         }
         out
+    }
+
+    /// 按 id 找市场条目（任意来源）。
+    ///
+    /// 团队插件面板靠它拿真实图标与来源链接；本地导入 / 内建条目
+    /// 可能没有对应市场条目，调用方回退字形与「本地」徽标。
+    pub(crate) fn market_entry_for(&self, id: &str) -> Option<MarketEntry> {
+        self.market_entries
+            .values()
+            .flatten()
+            .find(|e| e.skill.id == id)
+            .cloned()
     }
 
     /// 当前来源的市场条目（内建示例只在官方来源里合并展示）。

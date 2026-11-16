@@ -1,5 +1,5 @@
 use super::*;
-use gpui::ClickEvent;
+use gpui::{img, ClickEvent};
 
 use crate::state::FormField;
 use crate::views::text_fit::fit_text;
@@ -365,6 +365,7 @@ impl AppState {
         }
         self.role_skill_picker = Some(idx);
         self.role_skill_search.clear();
+        self.role_skill_filter = 0;
         self.field_buf.reset("");
         if self.active_field == Some(FormField::RoleSkillSearch) {
             self.active_field = None;
@@ -375,6 +376,7 @@ impl AppState {
     pub(crate) fn close_role_skill_picker(&mut self, cx: &mut Context<Self>) {
         self.role_skill_picker = None;
         self.role_skill_search.clear();
+        self.role_skill_filter = 0;
         self.field_buf.reset("");
         if self.active_field == Some(FormField::RoleSkillSearch) {
             self.active_field = None;
@@ -442,7 +444,7 @@ impl AppState {
                     .text_xs()
                     .text_color(if empty { theme::dim() } else { theme::fg() })
                     .child(SharedString::from(if empty {
-                        "搜索插件市场，如「需求分析」".to_string()
+                        "搜索插件，如「PDF」「云开发」".to_string()
                     } else {
                         fit_text(&display, 240.0, 12.0)
                     })),
@@ -464,30 +466,74 @@ impl AppState {
                 )
             });
 
-        // 候选：已知插件（已安装 + 内建 + 各来源市场），按综合评分排序，最多 8 条。
+        // 候选：已知插件（已安装 + 内建 + 各来源市场），带市场条目以取真实图标与来源。
         let q = self.role_skill_search.trim().to_lowercase();
-        let mut list: Vec<(neverwork_core::Skill, bool)> = self
+        let mut list: Vec<(neverwork_core::Skill, Option<crate::marketplace::MarketEntry>, bool)> = self
             .known_skills()
             .into_iter()
             .map(|s| {
+                let entry = self.market_entry_for(&s.id);
                 let installed = self.is_skill_installed(&s.id);
-                (s, installed)
+                (s, entry, installed)
             })
             .collect();
+        // 计数取筛选前的全集：页签上的数字不随搜索 / 筛选跳动。
+        let total_n = list.len();
+        let mcp_n = list.iter().filter(|(s, _, _)| s.is_mcp()).count();
+        let installed_n = list.iter().filter(|(_, _, on)| *on).count();
         if !q.is_empty() {
-            list.retain(|(s, _)| {
+            list.retain(|(s, _, _)| {
                 s.name.to_lowercase().contains(&q)
                     || s.id.to_lowercase().contains(&q)
                     || s.summary.to_lowercase().contains(&q)
                     || s.author.to_lowercase().contains(&q)
             });
         }
+        match self.role_skill_filter {
+            1 => list.retain(|(s, _, _)| s.is_mcp()),
+            2 => list.retain(|(s, _, _)| !s.is_mcp()),
+            3 => list.retain(|(_, _, on)| *on),
+            _ => {}
+        }
         list.sort_by(|a, b| {
             b.0.score()
                 .partial_cmp(&a.0.score())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        list.truncate(8);
+        // 面板内滚动，不再砍到 8 条；上限避免极端数据把首帧拖慢。
+        list.truncate(60);
+
+        // 筛选页签：全部 / MCP / 技能 / 已安装。
+        let filters: [(&str, usize, u8); 4] = [
+            ("全部", total_n, 0),
+            ("MCP", mcp_n, 1),
+            ("技能", total_n - mcp_n, 2),
+            ("已安装", installed_n, 3),
+        ];
+        let mut chips = div().flex().items_center().gap_1().pl_1();
+        for (label, n, val) in filters {
+            let on = self.role_skill_filter == val;
+            chips = chips.child(
+                div()
+                    .id(SharedString::from(format!("role-skill-filter-{idx}-{val}")))
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .text_xs()
+                    .when(on, |d| d.bg(theme::fg()).text_color(theme::surface()))
+                    .when(!on, |d| {
+                        d.bg(theme::raised())
+                            .text_color(theme::muted())
+                            .hover(|d| d.text_color(theme::fg()))
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.role_skill_filter = val;
+                        cx.notify();
+                    }))
+                    .child(SharedString::from(format!("{label} {n}"))),
+            );
+        }
 
         // MCP 安装确认条：注册外部进程前让用户点头（确认后自动绑到本角色）
         let pending_bar: Option<gpui::AnyElement> =
@@ -574,9 +620,9 @@ impl AppState {
                     .child("市场里没有匹配的插件，换个关键词试试"),
             );
         }
-        for (skill, _) in list {
+        for (skill, entry, _) in list {
             let added = role.skills.iter().any(|x| x == &skill.id);
-            rows = rows.child(self.role_plugin_row(idx, skill, added, cx));
+            rows = rows.child(self.role_plugin_row(idx, skill, entry, added, cx));
         }
 
         div()
@@ -610,21 +656,32 @@ impl AppState {
                             .child("完成"),
                     ),
             )
-            .child(rows)
+            .child(chips)
+            .child(
+                div()
+                    .id(SharedString::from(format!("role-skill-list-{idx}")))
+                    .max_h(px(300.0))
+                    .overflow_y_scroll()
+                    .child(rows),
+            )
             .child(
                 div()
                     .text_xs()
                     .text_color(theme::dim())
-                    .child("文本插件安装后落盘到 skills/<id>/SKILL.md，正文会拼进角色提示词；MCP 插件会启动外部进程，需确认。点底部「保存」写盘。"),
+                    .child("文本插件安装后落盘到 skills/<id>/SKILL.md，绑定后正文拼进该角色提示词；MCP 插件会启动外部进程，需确认。点条目看详情，点底部「保存」写盘。"),
             )
             .children(pending_bar)
     }
 
-    /// 插件市场面板里的一行候选。`added` 为真时右侧是「已添加」（不可再点）。
+    /// 插件市场面板里的一行候选：真实图标 + 名称/来源/形态 + 摘要。
+    ///
+    /// 点行主体打开详情抽屉（底栏是「绑定到角色」）；右侧「添加」直接绑定。
+    /// `added` 为真时右侧是「已添加」（不可再点）。
     fn role_plugin_row(
         &self,
         idx: usize,
         skill: neverwork_core::Skill,
+        entry: Option<crate::marketplace::MarketEntry>,
         added: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -634,7 +691,35 @@ impl AppState {
             skill.glyph.clone()
         };
         let name = skill.name.clone();
-        let summary = fit_text(&skill.summary, 320.0, 12.0);
+        let summary = fit_text(&skill.summary, 520.0, 12.0);
+        let source = crate::marketplace::source_label(&skill.id);
+        let mcp = skill.is_mcp();
+        // 远程托管条目没有本地启动配置，不能安装 / 绑定。
+        let remote_only = entry.as_ref().map(|e| e.remote_only).unwrap_or(false);
+
+        // 图标：优先真实 logo（已缓存），否则回退字形方块。
+        let icon: AnyElement = match entry.as_ref().and_then(crate::marketplace::icon_path) {
+            Some(path) => div()
+                .size(px(26.0))
+                .flex_shrink_0()
+                .rounded_md()
+                .overflow_hidden()
+                .child(img(path).size(px(26.0)).object_fit(gpui::ObjectFit::Cover))
+                .into_any_element(),
+            None => div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(26.0))
+                .flex_shrink_0()
+                .rounded_md()
+                .bg(theme::accent_soft())
+                .text_xs()
+                .text_color(theme::accent())
+                .child(SharedString::from(glyph))
+                .into_any_element(),
+        };
+
         let action = if added {
             div()
                 .px_2()
@@ -644,6 +729,17 @@ impl AppState {
                 .text_xs()
                 .text_color(theme::accent())
                 .child("已添加")
+                .into_any_element()
+        } else if remote_only {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .border_1()
+                .border_color(theme::border())
+                .text_xs()
+                .text_color(theme::dim())
+                .child("仅远程")
                 .into_any_element()
         } else {
             let add = skill.clone();
@@ -659,32 +755,37 @@ impl AppState {
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::accent_soft()))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    // 不让点击冒泡到整行（否则会顺手打开详情抽屉）。
+                    cx.stop_propagation();
                     this.attach_skill_to_role(idx, add.clone(), cx);
                 }))
                 .child("＋ 添加")
                 .into_any_element()
         };
 
+        // 本地导入 / 内建条目没有市场条目，用技能本体补一个：详情抽屉照常可开。
+        let entry_for_open = entry.unwrap_or_else(|| {
+            let mut e = crate::marketplace::MarketEntry::new(skill.clone());
+            e.remote_only = false;
+            e.tags = Vec::new();
+            e
+        });
+
         div()
+            .id(SharedString::from(format!("role-{idx}-plugin-row-{}", skill.id)))
             .flex()
             .items_center()
             .gap_2()
             .px_2()
-            .py_1()
+            .py_1p5()
             .rounded_md()
             .bg(theme::panel())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(22.0))
-                    .rounded_md()
-                    .bg(theme::accent_soft())
-                    .text_xs()
-                    .text_color(theme::accent())
-                    .child(SharedString::from(glyph)),
-            )
+            .cursor_pointer()
+            .hover(|d| d.bg(theme::raised()))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                this.open_market_detail_for_role(entry_for_open.clone(), idx, cx);
+            }))
+            .child(icon)
             .child(
                 div()
                     .flex()
@@ -701,18 +802,36 @@ impl AppState {
                                 div()
                                     .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::fg())
                                     .child(SharedString::from(name)),
                             )
-                            .when(skill.is_mcp(), |d| {
-                                d.child(
-                                    div()
-                                        .px_1()
-                                        .rounded_sm()
-                                        .bg(theme::accent_soft())
-                                        .text_xs()
-                                        .text_color(theme::accent())
-                                        .child("MCP"),
-                                )
+                            .child(
+                                div()
+                                    .px_1()
+                                    .rounded_sm()
+                                    .bg(theme::raised())
+                                    .text_xs()
+                                    .text_color(theme::dim())
+                                    .child(source),
+                            )
+                            .child(if mcp {
+                                div()
+                                    .px_1()
+                                    .rounded_sm()
+                                    .bg(theme::accent_soft())
+                                    .text_xs()
+                                    .text_color(theme::accent())
+                                    .child("MCP")
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .px_1()
+                                    .rounded_sm()
+                                    .bg(theme::raised())
+                                    .text_xs()
+                                    .text_color(theme::muted())
+                                    .child("文本")
+                                    .into_any_element()
                             }),
                     )
                     .child(
