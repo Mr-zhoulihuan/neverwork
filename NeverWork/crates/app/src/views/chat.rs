@@ -224,6 +224,17 @@ impl AppState {
         col
     }
 
+    /// 当前模型是否支持工具调用（团队自动交接的前提）。
+    fn tools_supported(&self) -> bool {
+        if let Ok(p) = std::env::var("NW_PROVIDER") {
+            return p.is_empty() || p.eq_ignore_ascii_case("openai");
+        }
+        matches!(
+            self.settings.active_provider().map(|p| p.protocol()),
+            Some(neverwork_core::Protocol::OpenAiCompatible)
+        )
+    }
+
     pub(crate) fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = self.chat.text().is_empty();
         let has_open_file = self.open_path.is_some();
@@ -293,6 +304,76 @@ impl AppState {
                     .text_color(theme::muted())
                     .child("未检测到 AI 配置。设置环境变量 NW_API_KEY 后重启即可对话。"),
             );
+        }
+
+        // ===== 团队 @ 入口：角色 chips 与「本轮交给」提示 =====
+        if self.team_mode {
+            if let Some(team) = self.config.active_team().cloned() {
+                if !self.streaming {
+                    let mut chips = div().flex().items_center().gap_2().flex_wrap();
+                    for (i, role) in team.roles.iter().enumerate() {
+                        let name = role.name.clone();
+                        chips = chips.child(
+                            div()
+                                .id(SharedString::from(format!("role-chip-{i}")))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme::border())
+                                .bg(theme::panel())
+                                .text_xs()
+                                .text_color(theme::muted())
+                                .cursor_pointer()
+                                .hover(|d| d.bg(theme::raised()).text_color(theme::accent()))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                    this.chat.insert(&format!("@{name} "));
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .size(px(6.0))
+                                        .rounded_md()
+                                        .bg(theme::role_color(role.color_index)),
+                                )
+                                .child(SharedString::from(role.name.clone())),
+                        );
+                    }
+                    col = col.child(chips);
+                }
+                // 命中 @角色 时告诉用户这一轮会交给谁；降级原因写在后面，
+                // 否则用户会以为是角色没响应。
+                if let Some(ri) =
+                    neverwork_core::parse_role_mention(self.chat.text(), &team.roles)
+                {
+                    if let Some(role) = team.roles.get(ri) {
+                        let mut hint = format!("本轮交给：{}", role.name);
+                        if !self.tools_enabled {
+                            hint.push_str("（工具已关：角色间不会自动交接）");
+                        } else if !self.tools_supported() {
+                            hint.push_str("（当前模型不支持工具，角色间不会自动交接）");
+                        }
+                        col = col.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .py_1p5()
+                                .rounded_md()
+                                .bg(theme::accent_soft())
+                                .border_1()
+                                .border_color(theme::accent_line())
+                                .text_xs()
+                                .text_color(theme::accent())
+                                .child(SharedString::from(hint)),
+                        );
+                    }
+                }
+            }
         }
 
         // ===== 输入行：逐字符渲染，能看到光标，也能点任意位置改字 =====
@@ -584,28 +665,87 @@ impl AppState {
             MessageKind::Agent { participant } => {
                 let (model, provider) = self.model_labels();
                 let body = m.body.clone();
-                agent_bubble(
-                    &participant.role_name,
-                    &participant.role_id,
-                    participant.initial.clone(),
-                    participant.color_index,
-                    &m.body,
-                    m.code.as_ref(),
-                    m.elapsed_ms,
-                    (m.tokens_in, m.tokens_out),
-                    &model,
-                    &provider,
-                    avail,
-                    Some((
-                        gpui::ElementId::from(SharedString::from(format!("copy-agent-{idx}"))),
-                        Box::new(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                            this.copy_message(body.clone(), "回答", cx);
-                        })) as ClickCb,
-                    )),
+                if self.team_mode {
+                    // 角色类型标签是展示信息，跟着团队配置走；配置里找不到就只显名字。
+                    let kind_label = self
+                        .config
+                        .active_team()
+                        .and_then(|t| {
+                            t.roles
+                                .iter()
+                                .find(|r| r.name.trim() == participant.role_name.trim())
+                        })
+                        .map(|r| r.kind_label.clone())
+                        .unwrap_or_default();
+                    team_bubble(
+                        &participant.role_name,
+                        &kind_label,
+                        participant.initial.clone(),
+                        participant.color_index,
+                        &m.body,
+                        m.code.as_ref(),
+                        m.elapsed_ms,
+                        (m.tokens_in, m.tokens_out),
+                        &model,
+                        &provider,
+                        avail,
+                        Some((
+                            gpui::ElementId::from(SharedString::from(format!(
+                                "copy-agent-{idx}"
+                            ))),
+                            Box::new(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                this.copy_message(body.clone(), "回答", cx);
+                            })) as ClickCb,
+                        )),
+                    )
+                    .into_any_element()
+                } else {
+                    agent_bubble(
+                        &participant.role_name,
+                        &participant.role_id,
+                        participant.color_index,
+                        &m.body,
+                        m.code.as_ref(),
+                        m.elapsed_ms,
+                        (m.tokens_in, m.tokens_out),
+                        &model,
+                        &provider,
+                        avail,
+                        Some((
+                            gpui::ElementId::from(SharedString::from(format!(
+                                "copy-agent-{idx}"
+                            ))),
+                            Box::new(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                this.copy_message(body.clone(), "回答", cx);
+                            })) as ClickCb,
+                        )),
+                    )
+                    .into_any_element()
+                }
+            }
+            MessageKind::Handoff {
+                from,
+                to,
+                action,
+                detail,
+            } => {
+                let expanded = self.expanded_handoff.contains(&idx);
+                handoff_card(
+                    idx,
+                    from,
+                    to,
+                    action,
+                    detail,
+                    expanded,
+                    Box::new(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        if !this.expanded_handoff.remove(&idx) {
+                            this.expanded_handoff.insert(idx);
+                        }
+                        cx.notify();
+                    })),
                 )
                 .into_any_element()
             }
-            MessageKind::Handoff { to, action, .. } => handoff(to, action).into_any_element(),
             MessageKind::Tool { summary, .. } => tool_result(summary).into_any_element(),
             MessageKind::Parallel { items } => parallel_row(items).into_any_element(),
             // 工具调用统一由 `tool_steps_group` 聚合渲染。
@@ -952,14 +1092,15 @@ pub(crate) fn user_bubble(text: &str, copy: impl IntoElement) -> impl IntoElemen
         )
 }
 
-/// AI 回答：没有头像、没有气泡框，就是一段文档流 + 一行页脚。
+/// AI 回答（单助手）：没有头像、没有气泡框，就是一段文档流 + 一行页脚。
 ///
 /// 参考稿（opencode）里回答本身完全平铺，`▣ Build · 模型 · 厂商 · 4.2s`
 /// 这条页脚承担「这是谁说的、花了多久」的信息，比头像更省地方。
+/// 团队模式不要用它 —— 多角色平铺会连成一片、分不清谁说了什么，
+/// 那边走 `team_bubble`。
 pub(crate) fn agent_bubble(
     name: &str,
     role_id: &str,
-    initial: String,
     color_idx: usize,
     text: &str,
     code: Option<&neverwork_core::CodeBlock>,
@@ -990,13 +1131,37 @@ pub(crate) fn agent_bubble(
         col = col.child(code_block(c));
     }
 
-    // 页脚：多角色时带上角色名，单助手时只写模型与厂商。
+    col = col.child(agent_footer(
+        name,
+        role_id,
+        color_idx,
+        elapsed_ms,
+        tokens,
+        model_label,
+        provider_label,
+        copy,
+    ));
+    col
+}
+
+/// 回答页脚：`▣ 角色 · 模型 · 厂商 · 4.2s · ↑1.2k ↓345 [复制]`。
+fn agent_footer(
+    name: &str,
+    role_id: &str,
+    color_idx: usize,
+    elapsed_ms: u64,
+    tokens: (u64, u64),
+    model_label: &str,
+    provider_label: &str,
+    copy: Option<(gpui::ElementId, ClickCb)>,
+) -> impl IntoElement {
+    // 多角色时带上角色名，单助手时只写模型与厂商。
     let who = if role_id == "agent" {
         String::new()
-    } else if initial.is_empty() {
-        name.to_string()
+    } else if name.is_empty() {
+        String::new()
     } else {
-        format!("{name}")
+        name.to_string()
     };
     let mut parts: Vec<String> = Vec::new();
     if !who.is_empty() {
@@ -1018,8 +1183,6 @@ pub(crate) fn agent_bubble(
     }
     // 页脚文字统一走弱化色令牌：之前多角色用「白色 45% 透明」，
     // 浅色主题下白底白字几乎看不见；主题令牌两套底色都安全。
-    // 角色区分交给前面的 ▣（用 role_color 着色）。
-    let foot_color = theme::muted();
     let mut foot = div()
         .flex()
         .items_center()
@@ -1034,15 +1197,132 @@ pub(crate) fn agent_bubble(
         .child(
             div()
                 .text_xs()
-                .text_color(foot_color)
+                .text_color(theme::muted())
                 .child(SharedString::from(parts.join(" · "))),
         )
         .child(div().flex_1());
     if let Some((id, cb)) = copy {
         foot = foot.child(copy_chip(id, cb));
     }
-    col = col.child(foot);
-    col
+    foot
+}
+
+/// 团队模式的角色气泡：头像 + 名字行 + 气泡框 + 页脚。
+///
+/// 团队一轮里可能连着好几个角色的发言，纯文档流会连成一片；
+/// 头像和气泡框给出「谁说完了、这句是谁的」的空间边界。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn team_bubble(
+    name: &str,
+    kind_label: &str,
+    initial: String,
+    color_idx: usize,
+    text: &str,
+    code: Option<&neverwork_core::CodeBlock>,
+    elapsed_ms: u64,
+    tokens: (u64, u64),
+    model_label: &str,
+    provider_label: &str,
+    avail: f32,
+    copy: Option<(gpui::ElementId, ClickCb)>,
+) -> impl IntoElement {
+    let color = theme::role_color(color_idx);
+    let initial = if initial.trim().is_empty() {
+        name.chars().next().map(|c| c.to_string()).unwrap_or_default()
+    } else {
+        initial
+    };
+
+    let mut head = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(color)
+                .child(SharedString::from(name.to_string())),
+        );
+    if !kind_label.trim().is_empty() {
+        head = head.child(
+            div()
+                .px_1p5()
+                .py_0p5()
+                .rounded_md()
+                .bg(theme::raised())
+                .text_xs()
+                .text_color(theme::dim())
+                .child(SharedString::from(kind_label.trim().to_string())),
+        );
+    }
+
+    // 气泡内宽 = 中栏可用宽度 - 头像 28 - 间距 12 - 左右内边距 32。
+    // 折行预算按它算，否则文字会顶出气泡右边被裁。
+    let inner_w = (avail - 72.0).max(160.0);
+    let mut body = div().flex().flex_col().gap_2().text_color(theme::fg());
+    if text.trim().is_empty() && code.is_none() {
+        body = body.child(div().text_color(theme::dim()).child("…"));
+    } else {
+        for b in crate::markdown::parse(text) {
+            body = body.child(markdown_block(b, inner_w));
+        }
+    }
+    if let Some(c) = code {
+        body = body.child(code_block(c));
+    }
+
+    let foot = agent_footer(
+        name,
+        "",
+        color_idx,
+        elapsed_ms,
+        tokens,
+        model_label,
+        provider_label,
+        copy,
+    );
+
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .flex_shrink_0()
+                .size(px(28.0))
+                .rounded_md()
+                .bg(color)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::bg())
+                .child(SharedString::from(initial)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(head)
+                .child(
+                    div()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::panel())
+                        .px_4()
+                        .py_3()
+                        .child(body),
+                )
+                .child(foot),
+        )
 }
 
 /// 毫秒 → `272ms` / `4.2s` / `1m 03s`。
@@ -1310,25 +1590,78 @@ pub(crate) fn code_block(c: &neverwork_core::CodeBlock) -> impl IntoElement {
         .child(div().px_3().py_2().text_xs().text_color(theme::fg()).child(SharedString::from(c.code.clone())))
 }
 
-pub(crate) fn handoff(to: &str, action: &str) -> impl IntoElement {
-    div()
+/// 角色交接卡片：默认一行「需求验证 → 接口成员 · 需要修改 3 处」，
+/// 点击展开完整交接载荷。居中显示在两条角色气泡之间。
+pub(crate) fn handoff_card(
+    card_id: usize,
+    from: &str,
+    to: &str,
+    action: &str,
+    detail: &str,
+    expanded: bool,
+    on_click: ClickCb,
+) -> impl IntoElement {
+    let expandable = !detail.trim().is_empty();
+    let mut head = div()
         .flex()
-        .justify_center()
+        .items_center()
+        .gap_2()
+        .text_xs()
+        .text_color(theme::muted())
+        .child(div().text_color(theme::accent()).child("⇄"))
+        .child(SharedString::from(from.to_string()))
+        .child(div().text_color(theme::dim()).child("→"))
         .child(
             div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py_1()
-                .rounded_lg()
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .text_xs()
-                .text_color(theme::muted())
-                .child(SharedString::from(format!("{to} {action}"))),
+                .text_color(theme::fg())
+                .child(SharedString::from(to.to_string())),
         )
+        .child(div().text_color(theme::dim()).child("·"))
+        .child(SharedString::from(action.to_string()));
+    if expandable {
+        head = head.child(div().flex_1()).child(
+            div()
+                .text_color(theme::accent())
+                .child(if expanded { "▾ 收起" } else { "▸ 详情" }),
+        );
+    }
+    let mut card = div()
+        .id(SharedString::from(format!("handoff-card-{card_id}")))
+        .flex()
+        .flex_col()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .rounded_lg()
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::border())
+        .child(head)
+        // 带 cursor_pointer 的元素必须有 on_click，否则是死点击
+        .when(expandable, |d| {
+            d.cursor_pointer()
+                .on_click(move |ev, w, cx| on_click(ev, w, cx))
+        });
+    if expandable && expanded {
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .pt_2()
+            .border_t_1()
+            .border_color(theme::border())
+            .text_xs()
+            .text_color(theme::muted());
+        for line in detail.trim().lines() {
+            body = body.child(if line.trim().is_empty() {
+                div().h(px(6.0))
+            } else {
+                div().child(SharedString::from(line.to_string()))
+            });
+        }
+        card = card.child(body);
+    }
+    div().flex().justify_center().child(card)
 }
 
 pub(crate) fn tool_result(summary: &str) -> impl IntoElement {

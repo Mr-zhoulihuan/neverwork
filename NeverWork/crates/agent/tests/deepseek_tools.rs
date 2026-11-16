@@ -93,6 +93,11 @@ fn run(
         AgentEvent::RoundLimit => trace.rounds_limited = true,
         AgentEvent::TimeLimit => trace.rounds_limited = true,
         AgentEvent::CostLimit { .. } => trace.rounds_limited = true,
+        // 单 Agent 跑的路径没有团队，交接事件不会出现；出现即视为异常。
+        AgentEvent::HandoffRequest { from, .. } => {
+            trace.errors.push(format!("意外交接：{from}"));
+        }
+        AgentEvent::HandoffLimit => trace.errors.push("意外触发交接上限".into()),
         AgentEvent::Compacting => eprintln!("[上下文] 正在压缩更早的对话…"),
         AgentEvent::Usage {
             input_tokens,

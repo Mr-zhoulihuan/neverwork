@@ -24,4 +24,4 @@ pub mod settings;
 pub use config::{Config, ExportOptions};
 pub use model::*;
 pub use sessions::SessionStore;
-pub use settings::{Settings, ThemeMode, ProviderPreset, ProviderEntry, Protocol, Skill, SkillCategory, McpServerConfig, APP_VERSION, DEFAULT_WORKSPACE};
+pub use settings::{Settings, ThemeMode, ProviderPreset, ProviderEntry, Protocol, Skill, SkillCategory, McpServerConfig, APP_VERSION};

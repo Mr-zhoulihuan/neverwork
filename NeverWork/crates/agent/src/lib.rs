@@ -19,13 +19,15 @@ pub mod trace;
 #[cfg(test)]
 mod tests;
 
-pub use agent_loop::{run_agent, AgentEvent, RunLimits};
+pub use agent_loop::{run_agent, run_agent_in_team, AgentEvent, RunLimits, MAX_HANDOFF_STEPS};
 pub use openai::OpenAiProvider;
 pub use anthropic::AnthropicProvider;
 pub use gemini::GeminiProvider;
 pub use supervisor::{parse_decision, Decision};
 pub use team::{run_team, run_team_with_history, TeamEvent};
-pub use tools::{ToolCall, ToolResult, ToolSpec};
+pub use tools::{
+    HandoffChange, HandoffPayload, ToolCall, ToolResult, ToolSpec, HANDOFF_TOOL,
+};
 
 use neverwork_core::AppResult;
 

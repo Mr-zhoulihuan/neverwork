@@ -693,9 +693,6 @@ impl Settings {
     }
 }
 
-/// 内置默认工作区。换机器时不存在会自动回退。
-pub const DEFAULT_WORKSPACE: &str = r"E:\go";
-
 /// 当前应用版本（用于「检查更新」展示）。
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 

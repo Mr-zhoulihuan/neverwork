@@ -440,6 +440,159 @@ fn builtin_specs() -> Vec<ToolSpec> {
     ]
 }
 
+/// 角色交接工具名。它不走 `execute`，由 agent 循环识别后切换角色。
+pub const HANDOFF_TOOL: &str = "handoff";
+
+/// 交接里的一个具体修改点。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffChange {
+    /// 相对工作区根的文件，可为空（表示非文件类问题）。
+    #[serde(default)]
+    pub file: String,
+    /// 位置，如函数名或行号范围。
+    #[serde(default)]
+    pub location: String,
+    /// 问题描述。
+    #[serde(default)]
+    pub issue: String,
+    /// 要求的修改。
+    #[serde(default)]
+    pub required: String,
+}
+
+/// `handoff` 的结构化载荷：结论 + 指令 + 验收标准。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffPayload {
+    /// 目标角色名。
+    #[serde(default)]
+    pub to: String,
+    /// `pass` / `needs_change`。
+    #[serde(default)]
+    pub verdict: String,
+    /// 一句话结论。
+    #[serde(default)]
+    pub summary: String,
+    /// 具体修改点；`needs_change` 时不得为空。
+    #[serde(default)]
+    pub changes: Vec<HandoffChange>,
+    /// 验收标准。
+    #[serde(default)]
+    pub acceptance: String,
+}
+
+/// 团队模式下的交接工具描述。
+///
+/// `to` 用 enum 列出团队成员，模型不能凭空编一个角色名。
+/// 它不需要审批：真正写文件的是接手角色的工具，仍会逐个弹确认。
+pub fn handoff_spec(roles: &[neverwork_core::Role]) -> ToolSpec {
+    let names: Vec<String> = roles
+        .iter()
+        .map(|r| r.name.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    ToolSpec {
+        name: HANDOFF_TOOL.into(),
+        description: "把当前任务交接给团队里的另一个角色，本轮立即结束并由它自动接手。\
+            需要别人接手时必须用这个工具；正文里写 @角色名 不会通知任何人。\
+            一轮只能交接一个角色，且必须单独调用（不能与读写工具混用）。"
+            .into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "enum": names,
+                    "description": "目标角色名（团队成员，不能是自己）"
+                },
+                "verdict": {
+                    "type": "string",
+                    "enum": ["pass", "needs_change"],
+                    "description": "验证结论：pass=通过；needs_change=需要修改"
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "一句话结论，会显示在交接卡片上"
+                },
+                "changes": {
+                    "type": "array",
+                    "description": "具体修改点；verdict=needs_change 时必须非空",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file": { "type": "string", "description": "相对工作区根的文件" },
+                            "location": { "type": "string", "description": "位置，如函数名或行号" },
+                            "issue": { "type": "string", "description": "问题描述" },
+                            "required": { "type": "string", "description": "要求的修改" }
+                        },
+                        "required": ["file", "issue", "required"]
+                    }
+                },
+                "acceptance": {
+                    "type": "string",
+                    "description": "验收标准"
+                }
+            },
+            "required": ["to", "verdict", "summary"]
+        }),
+        requires_approval: false,
+    }
+}
+
+/// 校验一次 `handoff` 调用。
+///
+/// 失败回 `BAD_ARGS` 结构化错误且**不结束本次运行**：模型可以补全参数
+/// 后重试，而不是让整条链路悄无声息地断掉。
+pub fn validate_handoff(
+    call: &ToolCall,
+    team: &neverwork_core::Team,
+    role_idx: usize,
+) -> Result<HandoffPayload, (&'static str, String)> {
+    let mut p: HandoffPayload = serde_json::from_str(call.arguments.trim())
+        .map_err(|e| ("BAD_ARGS", format!("handoff 参数不是合法 JSON：{e}")))?;
+    let current = team
+        .roles
+        .get(role_idx)
+        .map(|r| r.name.trim().to_string())
+        .unwrap_or_default();
+    p.to = p.to.trim().to_string();
+    if p.to.is_empty() {
+        return Err(("BAD_ARGS", "缺少目标角色 to".into()));
+    }
+    let target = team.role_by_name(&p.to).ok_or_else(|| {
+        let names: Vec<&str> = team.roles.iter().map(|r| r.name.trim()).collect();
+        (
+            "BAD_ARGS",
+            format!(
+                "目标角色「{}」不在团队里。可用角色：{}",
+                p.to,
+                names.join("、")
+            ),
+        )
+    })?;
+    if target == role_idx {
+        return Err(("BAD_ARGS", "不能把任务交接给自己".into()));
+    }
+    p.verdict = p.verdict.trim().to_ascii_lowercase();
+    if p.verdict != "pass" && p.verdict != "needs_change" {
+        return Err(("BAD_ARGS", "verdict 只能是 pass 或 needs_change".into()));
+    }
+    p.summary = p.summary.trim().to_string();
+    if p.summary.is_empty() {
+        return Err(("BAD_ARGS", "缺少一句话结论 summary".into()));
+    }
+    p.changes.retain(|c| {
+        !(c.file.trim().is_empty() && c.issue.trim().is_empty() && c.required.trim().is_empty())
+    });
+    if p.verdict == "needs_change" && p.changes.is_empty() {
+        return Err((
+            "BAD_ARGS",
+            format!("verdict=needs_change 时必须提供 changes（具体修改点），当前角色「{current}」未给出"),
+        ));
+    }
+    p.to = team.roles[target].name.trim().to_string();
+    Ok(p)
+}
+
 /// 某工具是否需要批准。
 pub fn requires_approval(name: &str) -> bool {
     tool_specs()
@@ -1183,5 +1336,107 @@ mod tests {
         let r = ToolResult::blocked(&call("read_file", json!({"path": "a"})), "重复太多次");
         assert!(!r.ok);
         assert_eq!(r.error_code, Some("REPEAT_BLOCKED"));
+    }
+
+    // ---- 团队交接 ----
+
+    fn team() -> neverwork_core::Team {
+        neverwork_core::Team {
+            id: "t".into(),
+            name: "测试团队".into(),
+            flow: neverwork_core::FlowMode::Pipeline,
+            roles: vec![
+                neverwork_core::Role::new("a", "需求验证", "需"),
+                neverwork_core::Role::new("b", "接口成员", "接"),
+            ],
+        }
+    }
+
+    fn handoff(args: Value) -> ToolCall {
+        call(HANDOFF_TOOL, args)
+    }
+
+    #[test]
+    fn handoff_spec_lists_members_and_verdicts() {
+        let t = team();
+        let spec = handoff_spec(&t.roles);
+        assert_eq!(spec.name, HANDOFF_TOOL);
+        assert!(!spec.requires_approval, "交接本身不写盘，不该弹审批");
+        let p = &spec.parameters;
+        assert_eq!(
+            p["properties"]["to"]["enum"],
+            json!(["需求验证", "接口成员"])
+        );
+        assert_eq!(
+            p["properties"]["verdict"]["enum"],
+            json!(["pass", "needs_change"])
+        );
+    }
+
+    #[test]
+    fn valid_handoff_is_normalized() {
+        let t = team();
+        let c = handoff(json!({
+            "to": " 接口成员 ",
+            "verdict": "NEEDS_CHANGE",
+            "summary": "  需要改 2 处 ",
+            "changes": [
+                {"file": "src/lib.rs", "location": "run", "issue": "空指针", "required": "加判空"},
+                {"file": "", "location": "", "issue": "", "required": ""}
+            ],
+            "acceptance": "cargo test 通过"
+        }));
+        let p = validate_handoff(&c, &t, 0).expect("应通过");
+        assert_eq!(p.to, "接口成员");
+        assert_eq!(p.verdict, "needs_change");
+        assert_eq!(p.summary, "需要改 2 处");
+        assert_eq!(p.changes.len(), 1, "全空修改点应被清掉");
+    }
+
+    #[test]
+    fn pass_allows_empty_changes() {
+        let t = team();
+        let c = handoff(json!({"to": "接口成员", "verdict": "pass", "summary": "通过"}));
+        assert!(validate_handoff(&c, &t, 0).is_ok());
+    }
+
+    #[test]
+    fn self_handoff_is_rejected() {
+        let t = team();
+        let c = handoff(json!({"to": "需求验证", "verdict": "pass", "summary": "x"}));
+        let e = validate_handoff(&c, &t, 0).unwrap_err();
+        assert_eq!(e.0, "BAD_ARGS");
+        assert!(e.1.contains("自己"), "{:?}", e);
+    }
+
+    #[test]
+    fn unknown_target_lists_members() {
+        let t = team();
+        let c = handoff(json!({"to": "不存在", "verdict": "pass", "summary": "x"}));
+        let e = validate_handoff(&c, &t, 0).unwrap_err();
+        assert!(e.1.contains("需求验证"), "{:?}", e);
+    }
+
+    #[test]
+    fn needs_change_requires_changes() {
+        let t = team();
+        let c = handoff(json!({"to": "接口成员", "verdict": "needs_change", "summary": "要改"}));
+        let e = validate_handoff(&c, &t, 0).unwrap_err();
+        assert!(e.1.contains("changes"), "{:?}", e);
+    }
+
+    #[test]
+    fn bad_verdict_missing_summary_and_bad_json_are_rejected() {
+        let t = team();
+        let c = handoff(json!({"to": "接口成员", "verdict": "maybe", "summary": "x"}));
+        assert!(validate_handoff(&c, &t, 0).is_err());
+        let c = handoff(json!({"to": "接口成员", "verdict": "pass", "summary": "  "}));
+        assert!(validate_handoff(&c, &t, 0).is_err());
+        let c = ToolCall {
+            id: "x".into(),
+            name: HANDOFF_TOOL.into(),
+            arguments: "not json".into(),
+        };
+        assert!(validate_handoff(&c, &t, 0).is_err());
     }
 }

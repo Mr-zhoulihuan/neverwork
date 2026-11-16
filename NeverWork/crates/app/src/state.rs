@@ -286,6 +286,8 @@ pub struct AppState {
     pub auto_approve: bool,
     /// 展开的工具步骤组（键 = 该组第一条消息的下标）。
     pub expanded_steps: std::collections::HashSet<usize>,
+    /// 展开的交接卡片（键 = 消息下标），不与 `expanded_steps` 混用。
+    pub expanded_handoff: std::collections::HashSet<usize>,
     /// 右侧栏是否收起。
     pub right_collapsed: bool,
     /// 新出现的工具步骤组默认展开（仅 `NW_EXPAND_STEPS=1` 时打开）。
@@ -394,11 +396,11 @@ impl RoundBubbles {
 
 /// 决定启动时打开哪个工作区。
 ///
-/// 优先级：`NW_ROOT` → 上次用过的（`settings.last_workspace`）→ 内置默认 `E:\go`
-/// → 从当前目录向上找 `Cargo.toml` → 当前目录。
+/// 优先级：`NW_ROOT` → 上次用过的（`settings.last_workspace`）→ `~/.neverwork/workspace`。
 ///
-/// 内置默认是**别人机器上可能不存在**的绝对路径，所以每一步都要校验存在性再采用，
-/// 否则会出现「打开一个空目录还以为 IDE 坏了」。
+/// 最后一级**不能**回落到「当前目录 / 向上找 `Cargo.toml`」：从 NeverWork 自己的
+/// 源码目录启动时，那正好把 IDE 的开发仓库当成用户工作区，看到的是本项目代码，
+/// 既不是用户选的也没有任何提示。改为自动创建的中立空目录。
 fn resolve_root(saved: &str) -> PathBuf {
     if let Ok(p) = std::env::var("NW_ROOT") {
         let path = PathBuf::from(p);
@@ -412,20 +414,12 @@ fn resolve_root(saved: &str) -> PathBuf {
             return path;
         }
     }
-    let default = PathBuf::from(neverwork_core::DEFAULT_WORKSPACE);
-    if default.is_dir() {
-        return default;
-    }
-    let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let start = dir.clone();
-    loop {
-        if dir.join("Cargo.toml").exists() {
-            return dir;
-        }
-        if !dir.pop() {
-            return start;
-        }
-    }
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".into());
+    let ws = PathBuf::from(home).join(".neverwork").join("workspace");
+    let _ = std::fs::create_dir_all(&ws);
+    ws
 }
 
 /// 造一个空白会话。
@@ -580,10 +574,12 @@ impl AppState {
             export_with_secrets: false,
             turn_started: None,
             tools_enabled: true,
-            team_mode: false,
+            // 默认单助手；`NW_TEAM=1` 供自动化验收直接以团队模式启动。
+            team_mode: std::env::var("NW_TEAM").map(|v| v == "1").unwrap_or(false),
             pending: None,
             auto_approve: false,
             expanded_steps: std::collections::HashSet::new(),
+            expanded_handoff: std::collections::HashSet::new(),
             // 右侧文件/Git 面板默认收起：把宽度让给对话区，
             // 需要时点一下窄条展开（`NW_RIGHT_COLLAPSED=0` 可强制展开用于验证）。
             right_collapsed: std::env::var("NW_RIGHT_COLLAPSED")
@@ -1703,14 +1699,58 @@ impl AppState {
                 roles.push(neverwork_core::Role::new("agent", "Assistant", "A"));
             }
             // 模型与厂商一律以设置里的当前选择为准：role.model 只是展示标签。
-            self.spawn_agents_chain(session_idx, text, roles, provider_id, config, cx);
+            match neverwork_core::parse_role_mention(&text, &roles) {
+                // 点名角色：以它为入口，后续由 handoff 自动接力。
+                Some(entry) => {
+                    let mut team = team.clone();
+                    if team.roles.is_empty() {
+                        team.roles = roles.clone();
+                    }
+                    self.spawn_agents_chain(
+                        session_idx,
+                        text,
+                        roles,
+                        Some((team, entry)),
+                        provider_id,
+                        config,
+                        cx,
+                    );
+                }
+                // 没点名：保持原有「全员按顺序跑」的行为。
+                None => self.spawn_agents_chain(
+                    session_idx, text, roles, None, provider_id, config, cx,
+                ),
+            }
         } else if self.team_mode {
-            self.spawn_team(session_idx, text, team, provider_id, config, cx);
+            // 关工具：@ 入口仍生效，但只跑被点名角色，不自动交接。
+            match neverwork_core::parse_role_mention(&text, &team.roles) {
+                Some(entry) => {
+                    let role = team.roles[entry].clone();
+                    self.spawn_agents_chain(
+                        session_idx,
+                        text,
+                        vec![role],
+                        None,
+                        provider_id,
+                        config,
+                        cx,
+                    );
+                }
+                None => self.spawn_team(session_idx, text, team, provider_id, config, cx),
+            }
         } else {
             // 单个助手：不套任何角色 prompt，避免「规划者 / 编码」这类
             // 与具体诉求无关的角色约束把问答带偏。
             let solo = neverwork_core::Role::new("agent", "Assistant", "A");
-            self.spawn_agents_chain(session_idx, text, vec![solo], provider_id, config, cx);
+            self.spawn_agents_chain(
+                session_idx,
+                text,
+                vec![solo],
+                None,
+                provider_id,
+                config,
+                cx,
+            );
         }
     }
 
@@ -1745,13 +1785,15 @@ impl AppState {
 
     /// 带工具的 Agent 链：按角色顺序串行执行，事件经 flume 回到 UI 线程。
     ///
-    /// 每个角色一次完整的「模型 → 工具 → 回填」循环；某个角色的产出会作为下一个角色的
-    /// 上下文，这样流水线（规划 → 编码 → 审查）在带工具时依然成立。
+    /// 传 `handoff = Some((team, entry))` 时进入「@ 入口」模式：只从被点名
+    /// 角色开始，由 `handoff` 工具决定下一跳；`None` 保持原有按 roles 顺序
+    /// 全部跑一遍的行为。两条路径共用同一套 UI 事件泵。
     fn spawn_agents_chain(
         &mut self,
         session_idx: usize,
         text: String,
         roles: Vec<neverwork_core::Role>,
+        handoff: Option<(neverwork_core::Team, usize)>,
         provider: String,
         config: neverwork_agent::ProviderConfig,
         cx: &mut Context<Self>,
@@ -1777,30 +1819,68 @@ impl AppState {
         std::thread::spawn(move || {
             // 跨角色累积的对话上下文，起手带上会话历史
             let mut history: Vec<neverwork_agent::ChatMessage> = seeded;
-            for (ri, role) in roles.iter().enumerate() {
+            // 老路径：按 roles 顺序全部跑一遍；
+            // @ 入口模式：从被点名角色开始，由 handoff 决定下一跳。
+            let handoff_mode = handoff.is_some();
+            let mut next: Option<usize> = handoff.as_ref().map(|(_, i)| *i);
+            let mut seq = 0usize;
+            let mut hops = 0usize;
+            let mut input = text;
+            loop {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
+                let ri = match next {
+                    Some(i) => i,
+                    None => {
+                        if seq >= roles.len() {
+                            break;
+                        }
+                        seq
+                    }
+                };
+                let Some(role) = roles.get(ri) else { break };
                 let mut collected = String::new();
+                let mut hop: Option<neverwork_agent::HandoffPayload> = None;
                 {
                     let mut emit = |ev: neverwork_agent::AgentEvent| {
                         if let neverwork_agent::AgentEvent::TextDelta(d) = &ev {
                             collected.push_str(d);
                         }
+                        if let neverwork_agent::AgentEvent::HandoffRequest { payload, .. } = &ev {
+                            hop = Some(payload.clone());
+                        }
                         let _ = tx.send((ri, ev));
                     };
-                    neverwork_agent::run_agent(
-                        &provider,
-                        config.clone(),
-                        &role.prompt,
-                        history.clone(),
-                        &text,
-                        root.clone(),
-                        with_tools,
-                        limits,
-                        &mut emit,
-                        cancel.clone(),
-                    );
+                    match &handoff {
+                        // 团队交接链：用角色身份跑，工具清单里带 handoff。
+                        Some((team, _)) => neverwork_agent::run_agent_in_team(
+                            &provider,
+                            config.clone(),
+                            history.clone(),
+                            &input,
+                            root.clone(),
+                            with_tools,
+                            limits,
+                            team,
+                            ri,
+                            &mut emit,
+                            cancel.clone(),
+                        ),
+                        // 单 Agent / 团队顺序路径：不带 handoff 工具。
+                        None => neverwork_agent::run_agent(
+                            &provider,
+                            config.clone(),
+                            &role.prompt,
+                            history.clone(),
+                            &input,
+                            root.clone(),
+                            with_tools,
+                            limits,
+                            &mut emit,
+                            cancel.clone(),
+                        ),
+                    }
                 }
                 if !collected.trim().is_empty() {
                     // 下一个角色能看到前面角色说了什么
@@ -1808,6 +1888,29 @@ impl AppState {
                         "[{}] {}",
                         role.name, collected
                     )));
+                }
+                match hop {
+                    Some(payload) if handoff_mode => {
+                        if !can_handoff(hops) {
+                            let _ = tx.send((ri, neverwork_agent::AgentEvent::HandoffLimit));
+                            break;
+                        }
+                        let Some((team, _)) = &handoff else { break };
+                        let Some(target) = team.role_by_name(&payload.to) else {
+                            break;
+                        };
+                        input = render_handoff(&role.name, &payload);
+                        next = Some(target);
+                        hops += 1;
+                    }
+                    _ => {
+                        // 入口模式跑完即结束；老路径继续下一个角色。
+                        if handoff_mode {
+                            break;
+                        }
+                        seq += 1;
+                        next = None;
+                    }
                 }
             }
         });
@@ -1990,6 +2093,47 @@ impl AppState {
                             cx.notify();
                         });
                     }
+                    // 交接完成：落一张卡片，下一段角色正文会开新气泡。
+                    neverwork_agent::AgentEvent::HandoffRequest { from, payload } => {
+                        let _ = weak.update(async_cx, |this, cx| {
+                            bubbles.end_round(ri);
+                            let action = if payload.verdict == "needs_change" {
+                                format!("需要修改 {} 处", payload.changes.len())
+                            } else {
+                                "验证通过".to_string()
+                            };
+                            let detail = render_handoff(&from, &payload);
+                            this.sessions[session_idx].messages.push(Message {
+                                kind: MessageKind::Handoff {
+                                    from: from.clone(),
+                                    to: payload.to.clone(),
+                                    action,
+                                    detail: detail.clone(),
+                                },
+                                // 历史回放用 body：下一轮追问时模型看得到
+                                // 「上次谁把什么交给了谁、要求改哪些」。
+                                body: detail,
+                                code: None,
+                                elapsed_ms: 0,
+                                tokens_in: 0,
+                                tokens_out: 0,
+                            });
+                            this.chat_scroll_dirty.set(true);
+                            // 交接卡片是明确的阶段边界，立即落盘
+                            this.save_sessions();
+                            cx.notify();
+                        });
+                    }
+                    neverwork_agent::AgentEvent::HandoffLimit => {
+                        let _ = weak.update(async_cx, |this, cx| {
+                            // 正常收尾，不标 Failed：链路已经跑完能跑的部分。
+                            this.notice = Some(format!(
+                                "已达交接上限（{} 跳），链路正常结束。",
+                                neverwork_agent::MAX_HANDOFF_STEPS
+                            ));
+                            cx.notify();
+                        });
+                    }
                     neverwork_agent::AgentEvent::Denied { call } => {
                         let tmsg = tool_msg.remove(&call.id);
                         let _ = weak.update(async_cx, |this, cx| {
@@ -2094,7 +2238,10 @@ impl AppState {
                             cx.notify();
                         });
                     }
-                    neverwork_agent::AgentEvent::Done => {}
+                    // 每个角色跑完都要收气泡：同一角色被交回时才能开新气泡。
+                    neverwork_agent::AgentEvent::Done => {
+                        bubbles.end_round(ri);
+                    }
                 }
             }
 
@@ -3067,6 +3214,59 @@ fn keep_head(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// 还能不能再交接一跳（上限 6 跳，不含入口角色的首次运行）。
+fn can_handoff(hops: usize) -> bool {
+    hops < neverwork_agent::MAX_HANDOFF_STEPS
+}
+
+/// 把交接载荷渲染成目标角色读得懂的指令。
+///
+/// 目标角色拿到的是一段 user 文本，所以必须自带上下文：
+/// 谁交过来的、结论是什么、具体改哪里、怎么算改完。
+fn render_handoff(from: &str, p: &neverwork_agent::HandoffPayload) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "【团队交接】「{from}」把任务交给了你（「{}」）。\n\n",
+        p.to
+    ));
+    s.push_str(&format!("结论：{}\n", p.summary));
+    s.push_str(&format!(
+        "验证结论：{}\n",
+        if p.verdict == "pass" {
+            "通过（pass）"
+        } else {
+            "需要修改（needs_change）"
+        }
+    ));
+    if !p.changes.is_empty() {
+        s.push_str("\n需要修改的点：\n");
+        for (i, c) in p.changes.iter().enumerate() {
+            let file = c.file.trim();
+            let loc = c.location.trim();
+            let where_ = match (file.is_empty(), loc.is_empty()) {
+                (false, false) => format!("{file}（{loc}）"),
+                (false, true) => file.to_string(),
+                (true, false) => loc.to_string(),
+                (true, true) => "（未指定）".to_string(),
+            };
+            s.push_str(&format!(
+                "{}. {} — 问题：{}；要求：{}\n",
+                i + 1,
+                where_,
+                c.issue.trim(),
+                c.required.trim()
+            ));
+        }
+    }
+    if !p.acceptance.trim().is_empty() {
+        s.push_str(&format!("\n验收标准：{}\n", p.acceptance.trim()));
+    }
+    s.push_str(
+        "\n请按上面的要求继续；需要写文件时照常使用工具（会弹给用户批准）。完成后直接给出结论。",
+    );
+    s
+}
+
 /// 把会话里已经聊过的内容整理成喂给模型的历史。
 ///
 /// 正文（用户 / 助手）原样取用；工具卡片**连同真实输出一起回放**成
@@ -3096,7 +3296,9 @@ fn history_for_model(
                     }),
                 }
             }
-            MessageKind::User | MessageKind::Agent { .. } if !m.body.trim().is_empty() => {
+            MessageKind::User | MessageKind::Agent { .. } | MessageKind::Handoff { .. }
+                if !m.body.trim().is_empty() =>
+            {
                 blocks.push(HistoryBlock::Text(m));
             }
             _ => {}
@@ -3188,6 +3390,124 @@ fn history_for_model(
         out.insert(0, neverwork_agent::ChatMessage::assistant(HISTORY_OMITTED));
     }
     out
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::{can_handoff, history_for_model, render_handoff};
+    use neverwork_core::{Message, MessageKind, Participant, Role, Team};
+
+    fn payload() -> neverwork_agent::HandoffPayload {
+        neverwork_agent::HandoffPayload {
+            to: "接口成员".into(),
+            verdict: "needs_change".into(),
+            summary: "需要补一个空值判断".into(),
+            changes: vec![neverwork_agent::HandoffChange {
+                file: "src/api.rs".into(),
+                location: "handle".into(),
+                issue: "未判空".into(),
+                required: "加 if null 返回 400".into(),
+            }],
+            acceptance: "单测覆盖 null".into(),
+        }
+    }
+
+    #[test]
+    fn render_handoff_contains_everything_target_needs() {
+        let text = render_handoff("需求验证", &payload());
+        assert!(text.contains("需求验证"), "要说明是谁交过来的");
+        assert!(text.contains("接口成员"));
+        assert!(text.contains("需要补一个空值判断"));
+        assert!(text.contains("src/api.rs（handle）"), "文件与位置要能直接定位");
+        assert!(text.contains("未判空"));
+        assert!(text.contains("加 if null 返回 400"));
+        assert!(text.contains("单测覆盖 null"));
+    }
+
+    fn handoff_msg(detail: &str) -> Message {
+        Message {
+            kind: MessageKind::Handoff {
+                from: "需求验证".into(),
+                to: "接口成员".into(),
+                action: "需要修改 1 处".into(),
+                detail: detail.into(),
+            },
+            body: detail.into(),
+            code: None,
+            elapsed_ms: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+        }
+    }
+
+    fn agent(body: &str) -> Message {
+        Message {
+            kind: MessageKind::Agent {
+                participant: Participant {
+                    role_id: "b".into(),
+                    role_name: "接口成员".into(),
+                    color_index: 1,
+                    initial: "接".into(),
+                },
+            },
+            body: body.into(),
+            code: None,
+            elapsed_ms: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+        }
+    }
+
+    #[test]
+    fn handoff_detail_is_replayed_to_the_model() {
+        let msgs = vec![
+            Message {
+                kind: MessageKind::User,
+                body: "验证需求".into(),
+                code: None,
+                elapsed_ms: 0,
+                tokens_in: 0,
+                tokens_out: 0,
+            },
+            handoff_msg("【团队交接】需求验证把任务交给了接口成员\n需要修改：src/api.rs"),
+            agent("改完了"),
+        ];
+        let h = history_for_model(&msgs, "");
+        assert!(
+            h.iter()
+                .any(|m| m.content.contains("需求验证把任务交给了接口成员")),
+            "下一轮追问要能看到上次交接的具体要求"
+        );
+    }
+
+    #[test]
+    fn handoff_stops_at_six_hops() {
+        assert!(can_handoff(0));
+        assert!(can_handoff(5));
+        assert!(!can_handoff(6), "第 6 跳之后不再启动下一跳");
+        assert!(!can_handoff(7));
+    }
+
+    #[test]
+    fn entry_role_is_the_earliest_mention() {
+        let team = Team {
+            id: "t".into(),
+            name: "t".into(),
+            flow: neverwork_core::FlowMode::Pipeline,
+            roles: vec![
+                Role::new("a", "需求验证", "需"),
+                Role::new("b", "接口成员", "接"),
+            ],
+        };
+        assert_eq!(
+            neverwork_core::parse_role_mention("请 @需求验证 然后 @接口成员 修改", &team.roles),
+            Some(0)
+        );
+        assert_eq!(
+            neverwork_core::parse_role_mention("没有点名角色", &team.roles),
+            None
+        );
+    }
 }
 
 #[cfg(test)]

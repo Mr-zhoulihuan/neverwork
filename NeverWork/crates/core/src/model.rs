@@ -113,6 +113,20 @@ pub struct Team {
 }
 
 impl Team {
+    /// 按名字查找角色下标（trim 后 ASCII 忽略大小写）。
+    ///
+    /// 角色名是展示标签，`@` 提及、`handoff.to` 都靠它定位，
+    /// 统一走这里避免各处各写一套匹配。
+    pub fn role_by_name(&self, name: &str) -> Option<usize> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        self.roles
+            .iter()
+            .position(|r| r.name.trim().eq_ignore_ascii_case(name))
+    }
+
     /// 默认协作团队（Planner / Coder / Reviewer 作为示例）。
     pub fn default_team() -> Self {
         Self {
@@ -155,6 +169,79 @@ impl Team {
     }
 }
 
+/// 判断一个字符能不能作为 `@角色名` 的左右边界。
+///
+/// 包含中英文标点：邮箱式 `a@b.com` 的 `@` 前是字母，不应命中。
+fn is_mention_boundary(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_ascii_punctuation()
+        || "，。！？；：、（）【】「」『』《》〈〉…—～·".contains(c)
+}
+
+/// 角色名后是否已结束（或跟着合法边界）。
+///
+/// 特例：`.` 后紧跟字母/数字视为文件扩展名，`@需求验证.md` 不算提及。
+fn mention_ends_at(text: &str, end: usize) -> bool {
+    let mut rest = text[end..].chars();
+    match rest.next() {
+        None => true,
+        Some('.') => match rest.next() {
+            Some(n) if n.is_alphanumeric() => false,
+            _ => true,
+        },
+        Some(c) => is_mention_boundary(c),
+    }
+}
+
+/// 从用户文本里解析 `@角色名`，返回命中的角色下标。
+///
+/// 规则（与设计文档一致）：
+/// - `@` 前必须是行首、空白或标点，避免邮箱式误匹配；
+/// - 角色名后必须是空白、标点或文本结尾；
+/// - 前缀重叠取最长（`接口成员` 胜过 `接口`）；
+/// - 多处命中取最早出现，同长同位置按角色列表顺序取第一个。
+///
+/// 只做入口路由：消息里后续的 `@其他角色` 是给模型看的正文，
+/// 不改变入口。
+pub fn parse_role_mention(text: &str, roles: &[Role]) -> Option<usize> {
+    for (at, c) in text.char_indices() {
+        if c != '@' {
+            continue;
+        }
+        if at > 0 {
+            let prev = text[..at].chars().next_back().unwrap_or(' ');
+            if !is_mention_boundary(prev) {
+                continue;
+            }
+        }
+        let mut best: Option<(usize, usize)> = None; // (名字长度, 角色下标)
+        for (ri, role) in roles.iter().enumerate() {
+            let name = role.name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let end = at + 1 + name.len();
+            if end > text.len() || !text.is_char_boundary(end) {
+                continue;
+            }
+            if !text[at + 1..end].eq_ignore_ascii_case(name) {
+                continue;
+            }
+            if !mention_ends_at(text, end) {
+                continue;
+            }
+            // 同位置取最长；同长保留列表里靠前的角色。
+            if best.map_or(true, |(len, _)| name.len() > len) {
+                best = Some((name.len(), ri));
+            }
+        }
+        if let Some((_, ri)) = best {
+            return Some(ri);
+        }
+    }
+    None
+}
+
 // ============ 会话与消息 ============
 
 /// 会话中的一个参与者（某个角色的一个实例）。
@@ -174,7 +261,16 @@ pub enum MessageKind {
     /// 某个 Agent 发言。
     Agent { participant: Participant },
     /// 角色转交提示。
-    Handoff { from: String, to: String, action: String },
+    Handoff {
+        from: String,
+        to: String,
+        /// 一行摘要（卡片默认显示）。
+        action: String,
+        /// 完整交接载荷文本（卡片展开、历史回放）。旧会话没有该字段，
+        /// 反序列化为空串。
+        #[serde(default)]
+        detail: String,
+    },
     /// 工具调用结果。
     Tool { summary: String, files: Vec<String> },
     /// 并行执行状态。
@@ -635,6 +731,91 @@ pub struct FileNode {
     /// 现在用它精确定位。旧配置反序列化时为空。
     #[serde(default)]
     pub path: String,
+}
+
+#[cfg(test)]
+mod mention_tests {
+    use super::*;
+
+    fn roles() -> Vec<Role> {
+        vec![
+            Role::new("a", "需求验证", "需"),
+            Role::new("b", "接口成员", "接"),
+            Role::new("c", "接口", "接"),
+            Role::new("d", "Planner", "P"),
+            Role::new("e", "b", "B"),
+        ]
+    }
+
+    #[test]
+    fn hits_leading_mention() {
+        assert_eq!(parse_role_mention("@需求验证 请验证", &roles()), Some(0));
+    }
+
+    #[test]
+    fn prefers_longest_prefix() {
+        assert_eq!(parse_role_mention("@接口成员 改一下", &roles()), Some(1));
+        assert_eq!(parse_role_mention("@接口 改一下", &roles()), Some(2));
+    }
+
+    #[test]
+    fn takes_earliest_mention() {
+        assert_eq!(
+            parse_role_mention("@接口成员 然后 @需求验证", &roles()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn ignores_email_and_glued() {
+        assert_eq!(parse_role_mention("@a@b.com", &roles()), None);
+        assert_eq!(parse_role_mention("a@需求验证", &roles()), None);
+    }
+
+    #[test]
+    fn ignores_file_extension() {
+        assert_eq!(parse_role_mention("@需求验证.md 看下", &roles()), None);
+        // 句末句点是边界，仍应命中。
+        assert_eq!(parse_role_mention("请找 @需求验证。", &roles()), Some(0));
+    }
+
+    #[test]
+    fn ascii_case_insensitive() {
+        assert_eq!(parse_role_mention("@planner 你好", &roles()), Some(3));
+    }
+
+    #[test]
+    fn skips_empty_role_name() {
+        let mut rs = roles();
+        rs.push(Role::new("f", "  ", "F"));
+        assert_eq!(parse_role_mention("@需求验证 你好", &rs), Some(0));
+    }
+
+    #[test]
+    fn role_by_name_trims_and_ignores_case() {
+        let team = Team {
+            id: "t".into(),
+            name: "t".into(),
+            flow: FlowMode::Pipeline,
+            roles: roles(),
+        };
+        assert_eq!(team.role_by_name(" PLANNER "), Some(3));
+        assert_eq!(team.role_by_name("不存在"), None);
+        assert_eq!(team.role_by_name("  "), None);
+    }
+
+    #[test]
+    fn handoff_detail_defaults_for_old_sessions() {
+        let json = r#"{"type":"handoff","from":"A","to":"B","action":"改3处"}"#;
+        let kind: MessageKind = serde_json::from_str(json).unwrap();
+        match kind {
+            MessageKind::Handoff { detail, action, .. } => {
+                assert_eq!(action, "改3处");
+                assert_eq!(detail, "");
+            }
+            _ => panic!("应反序列化为 Handoff"),
+        }
+    }
 }
 
 #[cfg(test)]
