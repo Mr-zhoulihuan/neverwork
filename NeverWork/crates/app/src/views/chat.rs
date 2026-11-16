@@ -72,12 +72,13 @@ impl AppState {
                         // 团队模式才显示角色点；单助手模式不放任何说明文字。
                         // 「能问答也能读文件」这种事说了也没用：用户直接问就行，
                         // 挂在标题下面只会一直占着一行。
-                        .when(self.team_mode, |d| d.child(role_dots_row(&self.config))),
+                        .when(self.is_team_mode(), |d| d.child(role_dots_row(&self.config))),
                 )
                 .child(div().flex_1())
                 .child(
+                    // 模式在新建会话时选定，这里只展示、不提供切换。
+                    // 要另一种模式就点侧栏「＋」新建一个会话。
                     div()
-                        .id("open-team")
                         .flex()
                         .items_center()
                         .gap_1()
@@ -89,28 +90,55 @@ impl AppState {
                         .border_color(theme::border())
                         .text_xs()
                         .text_color(theme::muted())
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                            // 单击直接切模式：这是最常用的动作。
-                            // 编辑团队角色走侧栏「团队」或命令面板。
-                            this.toggle_agent_mode(cx);
-                        }))
-                        .child(if self.team_mode {
+                        .child(if self.is_team_mode() {
                             SharedString::from(format!(
-                                "◈ {} · 团队 ▾",
-                                self.config.active_team().map(|t| t.name.clone()).unwrap_or_default()
+                                "◈ {} · 团队",
+                                self.config
+                                    .active_team()
+                                    .map(|t| t.name.clone())
+                                    .unwrap_or_default()
                             ))
                         } else {
-                            SharedString::from("◎ 单助手 ▾")
+                            SharedString::from("◎ 单助手")
                         }),
                 ),
         );
 
-        // 顶部状态条：团队模式显示流水线，单助手模式默认整条不出现。
+        // 顶部状态条：团队会话显示流水线（按当前团队的角色动态生成），
+        // 单助手会话默认整条不出现。
         // 之前单助手也会挂一条「需要时会读文件，改文件前会问你」，
         // 属于解释了也不影响操作的废话提示，还白占一行高度。
         // 只有正在生成时才给一条，让用户知道它在干活、能停止。
-        if self.team_mode {
+        if self.is_team_mode() {
+            let mut steps = div().flex().items_center().gap_2().flex_wrap();
+            match self.config.active_team() {
+                Some(t) if !t.roles.is_empty() => {
+                    for (i, role) in t.roles.iter().enumerate() {
+                        if i > 0 {
+                            steps = steps
+                                .child(div().text_xs().text_color(theme::dim()).child("→"));
+                        }
+                        // 正在发言的角色高亮，空闲时全部正常显示。
+                        let on = self.active_role.map_or(true, |a| a == i);
+                        let label = if role.name.trim().is_empty() {
+                            role.kind_label.as_str()
+                        } else {
+                            role.name.as_str()
+                        };
+                        steps =
+                            steps.child(flow_step(&role.initial, role.color_index, label, on));
+                    }
+                }
+                // 团队里没有任何角色：别硬编一条假流水线
+                _ => {
+                    steps = steps.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::dim())
+                            .child("团队里还没有角色，去「团队」页添加"),
+                    );
+                }
+            }
             col = col.child(
                 div()
                     .flex()
@@ -121,11 +149,7 @@ impl AppState {
                     .bg(theme::accent_soft())
                     .border_b_1()
                     .border_color(theme::border())
-                    .child(flow_step("P", 0, "规划", true))
-                    .child(div().text_xs().text_color(theme::dim()).child("→"))
-                    .child(flow_step("C", 1, "编码", true))
-                    .child(div().text_xs().text_color(theme::dim()).child("→"))
-                    .child(flow_step("R", 2, "审查", false))
+                    .child(steps)
                     .child(div().flex_1())
                     .child(
                         div()
@@ -307,7 +331,7 @@ impl AppState {
         }
 
         // ===== 团队 @ 入口：角色 chips 与「本轮交给」提示 =====
-        if self.team_mode {
+        if self.is_team_mode() {
             if let Some(team) = self.config.active_team().cloned() {
                 if !self.streaming {
                     let mut chips = div().flex().items_center().gap_2().flex_wrap();
@@ -620,6 +644,12 @@ fn chat_caret() -> impl IntoElement {
 pub(crate) fn flow_step(initial: &str, idx: usize, label: &str, active: bool) -> impl IntoElement {
     let color = theme::role_color(idx);
     let text = if active { theme::fg() } else { theme::dim() };
+    // 角色没填头像字时退回名字首字，别渲染一个空色块
+    let initial = if initial.trim().is_empty() {
+        label.chars().next().map(|c| c.to_string()).unwrap_or_default()
+    } else {
+        initial.to_string()
+    };
     div()
         .flex()
         .items_center()
@@ -634,7 +664,7 @@ pub(crate) fn flow_step(initial: &str, idx: usize, label: &str, active: bool) ->
                 .bg(color)
                 .text_xs()
                 .text_color(theme::bg())
-                .child(SharedString::from(initial.to_string())),
+                .child(SharedString::from(initial)),
         )
         .child(div().text_xs().text_color(text).child(SharedString::from(label.to_string())))
 }
@@ -665,7 +695,7 @@ impl AppState {
             MessageKind::Agent { participant } => {
                 let (model, provider) = self.model_labels();
                 let body = m.body.clone();
-                if self.team_mode {
+                if self.is_team_mode() {
                     // 角色类型标签是展示信息，跟着团队配置走；配置里找不到就只显名字。
                     let kind_label = self
                         .config

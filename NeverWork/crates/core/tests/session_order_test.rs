@@ -1,6 +1,6 @@
 //! 会话排序与分类标记的测试。
 
-use neverwork_core::{sessions_by_recent, relative_label, Session, SessionStatus, SessionTag};
+use neverwork_core::{sessions_by_recent, relative_label, Session, SessionMode, SessionStatus, SessionTag};
 
 fn s(id: &str, updated_at: u64, tag: SessionTag) -> Session {
     sp(id, updated_at, tag, false)
@@ -12,6 +12,7 @@ fn sp(id: &str, updated_at: u64, tag: SessionTag, pinned: bool) -> Session {
         title: id.into(),
         subtitle: String::new(),
         team_name: String::new(),
+        mode: SessionMode::Solo,
         messages: Vec::new(),
         updated_label: String::new(),
         preview: String::new(),
@@ -263,4 +264,33 @@ fn old_config_defaults_to_idle_stage() {
     assert_eq!(x.stage, neverwork_core::TaskStage::Idle);
     assert!(x.resume_prompt.is_empty());
     assert!(!x.stage.is_active(), "缺 stage 的旧会话不能被当成崩溃残留");
+}
+
+// ===== 会话模式（新建时选定，不可切换） =====
+
+#[test]
+fn old_config_defaults_to_solo_mode() {
+    // 旧会话没有 mode 字段：默认单助手，不能因缺字段整库读不出来
+    let json = r#"{"id":"s","title":"t","subtitle":"","team_name":"",
+        "messages":[],"updated_label":""}"#;
+    let x: Session = serde_json::from_str(json).unwrap();
+    assert_eq!(x.mode, SessionMode::Solo);
+}
+
+#[test]
+fn team_mode_survives_round_trip() {
+    let mut x = sp("t", 1, SessionTag::None, false);
+    x.mode = SessionMode::Team;
+    let text = serde_json::to_string(&x).unwrap();
+    let back: Session = serde_json::from_str(&text).unwrap();
+    assert_eq!(back.mode, SessionMode::Team, "模式要跟着会话落盘");
+}
+
+#[test]
+fn mode_labels_and_glyphs() {
+    assert_eq!(SessionMode::Solo.label(), "单助手");
+    assert_eq!(SessionMode::Team.label(), "团队");
+    assert_ne!(SessionMode::Solo.glyph(), SessionMode::Team.glyph());
+    assert!(SessionMode::Team.is_team());
+    assert!(!SessionMode::Solo.is_team());
 }

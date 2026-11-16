@@ -413,6 +413,26 @@ fn entries() -> Vec<Entry> {
 
         // ===== 商业运营 =====
         entry!(
+            "community.prd-analysis",
+            "需求分析 PRD.Skill",
+            "需",
+            Business,
+            "把模糊需求拆成用户故事、验收标准与边界条件，输出可直接评审的 PRD 骨架。",
+            "community",
+            728_000,
+            96
+        ),
+        entry!(
+            "community.req-review",
+            "需求评审清单",
+            "审",
+            Business,
+            "按完整性、一致性、可测试性检查需求文档，输出缺口清单与澄清问题。",
+            "community",
+            312_000,
+            44
+        ),
+        entry!(
             "community.ecom-ops",
             "电商运营助手",
             "◫",

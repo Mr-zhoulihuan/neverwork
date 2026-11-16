@@ -249,7 +249,8 @@ impl AppState {
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                            this.new_session(cx);
+                            // 先选模式（单助手 / 团队），选定后不可切换
+                            this.open_new_session_picker(cx);
                         }))
                         .child("＋"),
                 ),
@@ -474,7 +475,7 @@ impl AppState {
         } else {
             0.0
         };
-        let title_w = CARD_INNER - 20.0 - 8.0 - badge_w - action_w - tag_w - 6.0;
+        let title_w = CARD_INNER - 20.0 - 8.0 - badge_w - action_w - tag_w - 6.0 - 18.0;
         let title_text = crate::views::text_fit::fit_text(&session.title, title_w, 14.0);
 
         let (pill_label, pill_fg, pill_bg) = match session.status {
@@ -534,6 +535,20 @@ impl AppState {
                     .text_color(color)
                     .child(SharedString::from(icon_text)),
             );
+
+        // 会话模式：团队会话一眼能认出来（新建时选定，不可切换）
+        let mode = session.mode;
+        head = head.child(
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(if mode.is_team() {
+                    theme::accent()
+                } else {
+                    theme::dim()
+                })
+                .child(SharedString::from(mode.glyph())),
+        );
 
         if has_badge {
             head = head.child(

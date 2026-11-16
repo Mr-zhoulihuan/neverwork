@@ -540,6 +540,42 @@ impl SessionTag {
     }
 }
 
+/// 会话的运行模式。
+///
+/// 在**新建会话时选定**，之后不可切换：单助手与团队的工具面、
+/// 事件流、气泡样式完全不同，中途切换会让历史里两种发言混在一起，
+/// 角色上下文也接不上。需要另一种模式就新建一个会话。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    /// 单助手：一个助手同时负责问答与改代码。
+    #[default]
+    Solo,
+    /// 团队：多角色按交接链协作。
+    Team,
+}
+
+impl SessionMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionMode::Solo => "单助手",
+            SessionMode::Team => "团队",
+        }
+    }
+
+    /// 列表/标题栏用的小字形。
+    pub fn glyph(self) -> &'static str {
+        match self {
+            SessionMode::Solo => "◎",
+            SessionMode::Team => "◈",
+        }
+    }
+
+    pub fn is_team(self) -> bool {
+        matches!(self, SessionMode::Team)
+    }
+}
+
 /// 一个会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -547,6 +583,9 @@ pub struct Session {
     pub title: String,
     pub subtitle: String,
     pub team_name: String,
+    /// 运行模式（旧配置没有这个字段时按单助手处理）。
+    #[serde(default)]
+    pub mode: SessionMode,
     pub messages: Vec<Message>,
     pub updated_label: String,
 

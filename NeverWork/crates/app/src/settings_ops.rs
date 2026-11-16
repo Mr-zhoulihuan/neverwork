@@ -130,6 +130,7 @@ impl AppState {
     pub(crate) fn field_value(&self, field: FormField) -> String {
         match field {
             FormField::SkillSearch => self.skill_search.clone(),
+            FormField::RoleSkillSearch => self.role_skill_search.clone(),
             FormField::ProviderKey(i) => self.provider_at(i).map(|p| p.api_key.clone()).unwrap_or_default(),
             FormField::ProviderUrl(i) => self.provider_at(i).map(|p| p.base_url.clone()).unwrap_or_default(),
             FormField::ProviderModel(i) => self.provider_at(i).map(|p| p.model.clone()).unwrap_or_default(),
@@ -149,6 +150,11 @@ impl AppState {
         match field {
             FormField::SkillSearch => {
                 self.skill_search = value;
+                cx.notify();
+                return;
+            }
+            FormField::RoleSkillSearch => {
+                self.role_skill_search = value;
                 cx.notify();
                 return;
             }

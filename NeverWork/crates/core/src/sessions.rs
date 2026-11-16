@@ -204,6 +204,7 @@ mod tests {
             title: "t".into(),
             subtitle: String::new(),
             team_name: String::new(),
+            mode: crate::model::SessionMode::Solo,
             messages: Vec::new(),
             updated_label: String::new(),
             preview: String::new(),

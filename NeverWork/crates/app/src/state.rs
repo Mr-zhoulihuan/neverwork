@@ -21,7 +21,8 @@ use gpui::{
 };
 
 use neverwork_core::{
-    ConnectionKind, Config, FileNode, Message, MessageKind, Session, ToolRunStatus, Workspace,
+    ConnectionKind, Config, FileNode, Message, MessageKind, Session, SessionMode, ToolRunStatus,
+    Workspace,
 };
 use neverwork_ui::theme;
 
@@ -96,6 +97,8 @@ pub enum InputTarget {
 pub enum FormField {
     /// 技能市场搜索框。
     SkillSearch,
+    /// 团队编辑器里给角色挑插件的搜索框。
+    RoleSkillSearch,
     /// 厂商 API Key。
     ProviderKey(u8),
     /// 厂商 API 基址。
@@ -149,8 +152,6 @@ pub enum Command {
     TagSession(u8),
     /// 置顶 / 取消置顶当前会话。
     TogglePin,
-    /// 在「单个助手」和「团队流水线」之间切换。
-    ToggleAgentMode,
     Settings,
     Skills,
 }
@@ -169,7 +170,6 @@ impl Command {
             (Command::FocusMode, "专注模式（隐藏侧栏）", ""),
             // 当前会话的分类：直接列出所有分类，点了就设上（比在卡片上连点快）
             (Command::TogglePin, "置顶 / 取消置顶当前会话", ""),
-            (Command::ToggleAgentMode, "切换：单个助手 / 团队流水线", ""),
             (Command::TagSession(0), "分类：清除标记", ""),
             (Command::TagSession(1), "分类：功能", ""),
             (Command::TagSession(2), "分类：修复", ""),
@@ -273,13 +273,17 @@ pub struct AppState {
     /// 本轮生成的开始时刻，用来在回答末尾显示耗时。
     pub turn_started: Option<std::time::Instant>,
     pub tools_enabled: bool,
-    /// 是否走「多角色团队流水线」。
+    /// 新建会话的模式选择浮层是否打开。
     ///
-    /// 默认关闭 = 单个助手。之前默认就把每条输入都塞进
-    /// Planner → Coder → Reviewer 三个角色串行处理，问一句「你是谁」
-    /// 也要跑三个模型，而且每个角色的职责都写死成改代码，
-    /// 于是问答类诉求必然答得别扭。
-    pub team_mode: bool,
+    /// 模式在新建时选定、之后不可切换（见 `SessionMode`），
+    /// 所以这个浮层是唯一的入口：点「＋」或命令面板「新建会话」都先到这儿。
+    pub new_session_picker: bool,
+    /// 团队编辑器里正在挑插件的角色下标；`None` 表示未展开。
+    pub role_skill_picker: Option<usize>,
+    /// 角色插件搜索词。
+    pub role_skill_search: String,
+    /// 团队会话里正在发言的角色下标（顶部流水线高亮用）。
+    pub active_role: Option<usize>,
     /// 等待用户批准的写操作。同一时刻最多一个。
     pub pending: Option<PendingApproval>,
     /// 自动批准写操作（仅供自动化验证，`NW_AUTO_APPROVE=1` 开启）。
@@ -422,11 +426,20 @@ fn resolve_root(saved: &str) -> PathBuf {
     ws
 }
 
+/// 新建会话的默认模式：默认单助手；`NW_TEAM=1` 供自动化验收直接以团队模式启动。
+fn default_session_mode() -> SessionMode {
+    if std::env::var("NW_TEAM").map(|v| v == "1").unwrap_or(false) {
+        SessionMode::Team
+    } else {
+        SessionMode::Solo
+    }
+}
+
 /// 造一个空白会话。
 ///
 /// id 带时间戳：只用 `s{len+1}` 的话，删掉一个再新建就会撞号，
 /// 而 id 是会话在磁盘上的唯一标识（`active_id` 靠它恢复）。
-fn blank_session(seq: usize, config: &Config) -> Session {
+fn blank_session(seq: usize, config: &Config, mode: SessionMode) -> Session {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -435,10 +448,15 @@ fn blank_session(seq: usize, config: &Config) -> Session {
         id: format!("s{now}-{seq}"),
         title: "新会话".into(),
         subtitle: "空白会话".into(),
-        team_name: config
-            .active_team()
-            .map(|t| t.name.clone())
-            .unwrap_or_else(|| "默认协作团队".into()),
+        team_name: if mode.is_team() {
+            config
+                .active_team()
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| "默认协作团队".into())
+        } else {
+            "单助手".into()
+        },
+        mode,
         messages: Vec::new(),
         updated_label: "刚刚".into(),
         preview: "空白会话，输入第一条指令开始".into(),
@@ -507,7 +525,7 @@ impl AppState {
         let (store, report) = neverwork_core::sessions::load_with_recovery(&root);
         let mut sessions = store.sessions;
         if sessions.is_empty() {
-            sessions.push(blank_session(0, &config));
+            sessions.push(blank_session(0, &config, default_session_mode()));
         }
         // 文件里存的「3分钟前」是写盘那一刻的快照，按真实时间戳重算：
         // 否则隔一周打开，列表还写着「3分钟前」。
@@ -574,8 +592,10 @@ impl AppState {
             export_with_secrets: false,
             turn_started: None,
             tools_enabled: true,
-            // 默认单助手；`NW_TEAM=1` 供自动化验收直接以团队模式启动。
-            team_mode: std::env::var("NW_TEAM").map(|v| v == "1").unwrap_or(false),
+            new_session_picker: false,
+            role_skill_picker: None,
+            role_skill_search: String::new(),
+            active_role: None,
             pending: None,
             auto_approve: false,
             expanded_steps: std::collections::HashSet::new(),
@@ -629,6 +649,20 @@ impl AppState {
                     me.active_field = Some(FormField::ModelSearch);
                 }
             }
+        }
+        // 验证用：启动即弹出「新建会话」的模式选择浮层。
+        if std::env::var("NW_PICK_MODE").map(|v| v == "1").unwrap_or(false) {
+            me.new_session_picker = true;
+        }
+        // 验证用：启动即展开团队编辑器里某个角色的插件市场面板。
+        if let Ok(v) = std::env::var("NW_PICK_ROLE_SKILL") {
+            if let Ok(i) = v.parse::<usize>() {
+                me.role_skill_picker = Some(i);
+            }
+        }
+        // 验证用：预置角色插件搜索词（配合 NW_PICK_ROLE_SKILL 截图用）。
+        if let Ok(q) = std::env::var("NW_ROLE_SKILL_QUERY") {
+            me.role_skill_search = q;
         }
         // 验证用：展开所有工具步骤组 / 收起右栏 / 预置查找词，
         // 便于在无法点击的环境（高 DPI 远程桌面）下截图核对界面。
@@ -746,9 +780,17 @@ impl AppState {
         }
         cx.notify();
         if let Some(t) = auto_send {
-            me.new_session(cx);
+            me.new_session(default_session_mode(), cx);
             me.chat.reset(t);
             me.send_message(cx);
+        } else if let Ok(v) = std::env::var("NW_NEW_SESSION") {
+            // 验证用：新建一个指定模式的空会话（team|solo）。
+            let mode = if v.eq_ignore_ascii_case("team") {
+                SessionMode::Team
+            } else {
+                SessionMode::Solo
+            };
+            me.new_session(mode, cx);
         } else if std::env::var("NW_RESUME").is_ok() {
             // 验证用：启动后直接续跑第一条可续跑的会话（等同点击卡片右上角的 ▶）
             if let Some(i) = me
@@ -766,6 +808,15 @@ impl AppState {
 
     pub fn session(&self) -> &Session {
         &self.sessions[self.active_session.min(self.sessions.len().saturating_sub(1))]
+    }
+
+    /// 当前会话的运行模式。模式在新建会话时选定，之后不可切换。
+    pub(crate) fn session_mode(&self) -> SessionMode {
+        self.session().mode
+    }
+
+    pub(crate) fn is_team_mode(&self) -> bool {
+        self.session_mode().is_team()
     }
 
     /// 把会话写回磁盘。失败不中断对话，只提示一次。
@@ -798,13 +849,28 @@ impl AppState {
         self.save_sessions();
     }
 
-    pub(crate) fn new_session(&mut self, cx: &mut Context<Self>) {
-        let s = blank_session(self.sessions.len(), &self.config);
+    /// 新建会话并切过去。`mode` 在这里定死，之后不可切换。
+    pub(crate) fn new_session(&mut self, mode: SessionMode, cx: &mut Context<Self>) {
+        let s = blank_session(self.sessions.len(), &self.config, mode);
         self.sessions.push(s);
         self.active_session = self.sessions.len() - 1;
         self.center = CenterView::Chat;
         self.palette_open = false;
+        self.new_session_picker = false;
+        self.active_role = None;
         self.save_sessions();
+        cx.notify();
+    }
+
+    /// 打开「新建会话」的模式选择浮层。
+    pub(crate) fn open_new_session_picker(&mut self, cx: &mut Context<Self>) {
+        self.new_session_picker = true;
+        self.palette_open = false;
+        cx.notify();
+    }
+
+    pub(crate) fn close_new_session_picker(&mut self, cx: &mut Context<Self>) {
+        self.new_session_picker = false;
         cx.notify();
     }
 
@@ -812,6 +878,8 @@ impl AppState {
         if idx < self.sessions.len() {
             self.active_session = idx;
             self.center = CenterView::Chat;
+            // 上一个会话的流水线高亮不能带到新会话
+            self.active_role = None;
             // 注意：这里**不** touch。
             // 单纯「点开看一眼」不该把会话顶到最前，否则列表会随着浏览乱跳；
             // 只有真正发消息（send_message）才算活跃。
@@ -838,17 +906,6 @@ impl AppState {
             s.tag = tag;
             cx.notify();
         }
-    }
-
-    /// 在「单个助手」和「团队流水线」之间切换。
-    pub(crate) fn toggle_agent_mode(&mut self, cx: &mut Context<Self>) {
-        self.team_mode = !self.team_mode;
-        self.notice = Some(if self.team_mode {
-            "已切到团队流水线：多角色按顺序协作，适合分阶段的大任务".into()
-        } else {
-            "已切到单个助手：一个助手同时负责问答和改代码".into()
-        });
-        cx.notify();
     }
 
     /// 切换置顶。置顶的会话永远排在最前。
@@ -1250,7 +1307,10 @@ impl AppState {
 
     pub(crate) fn toggle_palette(&mut self, cx: &mut Context<Self>) {
         self.palette_open = !self.palette_open;
-        if !self.palette_open {
+        if self.palette_open {
+            // 两个浮层不同时开：命令面板压住新建会话选择器
+            self.new_session_picker = false;
+        } else {
             self.ws_prompt_open = false;
         }
         cx.notify();
@@ -1263,7 +1323,7 @@ impl AppState {
             Command::Team => self.set_center(CenterView::Team, cx),
             Command::Save => self.save_file(cx),
             Command::RefreshTree => self.refresh_tree(cx),
-            Command::NewSession => self.new_session(cx),
+            Command::NewSession => self.open_new_session_picker(cx),
             Command::Changes => self.set_right_tab(RightTab::Git, cx),
             Command::Preview => self.set_right_tab(RightTab::Preview, cx),
             Command::SwitchWorkspace => self.open_workspace_prompt(cx),
@@ -1271,7 +1331,6 @@ impl AppState {
                 self.focus_mode = !self.focus_mode;
                 cx.notify();
             }
-            Command::ToggleAgentMode => self.toggle_agent_mode(cx),
             Command::TogglePin => {
                 let idx = self.active_session;
                 self.toggle_pin(idx, cx);
@@ -1593,13 +1652,17 @@ impl AppState {
                 }
             }
             KeyAction::Escape => {
-                if self.model_picker.is_some() {
+                if self.new_session_picker {
+                    self.close_new_session_picker(cx);
+                } else if self.model_picker.is_some() {
                     self.close_model_picker(cx);
                 } else if self.ws_prompt_open {
                     self.ws_prompt_open = false;
                     self.palette_open = false;
                 } else if self.palette_open {
                     self.palette_open = false;
+                } else if self.role_skill_picker.is_some() {
+                    self.close_role_skill_picker(cx);
                 } else if self.streaming {
                     self.stop_streaming(cx);
                 }
@@ -1634,11 +1697,15 @@ impl AppState {
             return;
         };
 
-        let team = self
+        // 团队配置随取随用；把角色绑定的插件摘要拼进 prompt（仅内存，不回写配置）。
+        let mut team = self
             .config
             .active_team()
             .cloned()
             .unwrap_or_else(neverwork_core::Team::default_team);
+        self.enrich_team_skills(&mut team);
+        // 模式在新建会话时选定，不能切换；需要另一种就新建一个会话。
+        let team_mode = self.session_mode().is_team();
 
         self.chat.reset("");
         self.notice = None;
@@ -1656,7 +1723,11 @@ impl AppState {
                 tokens_in: 0,
                 tokens_out: 0,
             });
-            session.team_name = team.name.clone();
+            session.team_name = if team_mode {
+                team.name.clone()
+            } else {
+                "单助手".to_string()
+            };
             if session.title.is_empty() || session.title == "新会话" {
                 session.title = text.chars().take(16).collect();
                 // 图标跟标题一起换成首字：列表里比「＋」好认
@@ -1684,16 +1755,14 @@ impl AppState {
         self.chat_scroll_dirty.set(true);
         cx.notify();
 
-        // 三种走法，按「用户想要什么」分：
+        // 三种走法，按「会话模式 + 工具开关」分：
         //
-        // 1. 默认（`team_mode = false`）：**一个**助手带工具。
+        // 1. 单助手会话（`SessionMode::Solo`）：**一个**助手带工具。
         //    它能问答、能读文件、能改代码，由模型自己判断这次要不要动工具。
-        //    绝大多数输入都走这里。
-        // 2. 团队模式（`team_mode = true`）+ 开工具：多角色串行带工具，
-        //    前一个角色的产出作为后一个的上下文，写操作逐个弹审批。
-        //    适合「规划 → 编码 → 审查」这种明确的多阶段任务。
-        // 3. 团队模式 + 关工具：多角色纯文本轮流发言。
-        if self.team_mode && self.tools_enabled {
+        // 2. 团队会话 + 开工具：多角色串行带工具，前一个角色的产出作为
+        //    后一个的上下文，写操作逐个弹审批。
+        // 3. 团队会话 + 关工具：多角色纯文本轮流发言。
+        if team_mode && self.tools_enabled {
             let mut roles = team.roles.clone();
             if roles.is_empty() {
                 roles.push(neverwork_core::Role::new("agent", "Assistant", "A"));
@@ -1721,7 +1790,7 @@ impl AppState {
                     session_idx, text, roles, None, provider_id, config, cx,
                 ),
             }
-        } else if self.team_mode {
+        } else if team_mode {
             // 关工具：@ 入口仍生效，但只跑被点名角色，不自动交接。
             match neverwork_core::parse_role_mention(&text, &team.roles) {
                 Some(entry) => {
@@ -1781,6 +1850,71 @@ impl AppState {
         let hint = neverwork_core::resume_instruction(&original);
         // 传 `Some(original)`：续跑期间再被中断，`resume_prompt` 仍是原始任务
         self.send_text(hint, Some(original), cx);
+    }
+
+    /// 把角色绑定的插件（技能）摘要拼进 prompt。
+    ///
+    /// `Role.skills` 存的是技能 id，而模型只看得到 prompt —— 不拼进去，
+    /// 绑了插件等于没绑。只在内存里的团队副本上追加，不回写配置。
+    fn enrich_team_skills(&self, team: &mut neverwork_core::Team) {
+        let catalog = crate::skills_catalog::catalog();
+        for role in &mut team.roles {
+            let section = role_skills_section(&role.skills, &self.settings.skills, &catalog);
+            if !section.is_empty() {
+                role.prompt.push_str(&section);
+            }
+        }
+    }
+
+    /// 在团队编辑器里给角色挂一个插件：没装过先安装，再记到 `Role.skills`。
+    pub(crate) fn attach_skill_to_role(
+        &mut self,
+        role_idx: usize,
+        skill: neverwork_core::Skill,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_skill_installed(&skill.id) {
+            self.install_skill(skill.clone(), cx);
+        }
+        let ti = self.active_team_index();
+        if let Some(team) = self.config.teams.get_mut(ti) {
+            if let Some(role) = team.roles.get_mut(role_idx) {
+                if !role.skills.contains(&skill.id) {
+                    role.skills.push(skill.id.clone());
+                }
+            }
+        }
+        self.notice = Some(format!("已给角色添加插件「{}」，点「保存」写盘", skill.name));
+        cx.notify();
+    }
+
+    pub(crate) fn detach_skill_from_role(
+        &mut self,
+        role_idx: usize,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let ti = self.active_team_index();
+        if let Some(team) = self.config.teams.get_mut(ti) {
+            if let Some(role) = team.roles.get_mut(role_idx) {
+                role.skills.retain(|x| x != id);
+            }
+        }
+        cx.notify();
+    }
+
+    /// 按 id 找技能的展示信息：已安装的优先，其次内置市场目录。
+    pub(crate) fn find_skill(&self, id: &str) -> Option<neverwork_core::Skill> {
+        self.settings
+            .skills
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+            .or_else(|| {
+                crate::skills_catalog::catalog()
+                    .into_iter()
+                    .find(|s| s.id == id)
+            })
     }
 
     /// 带工具的 Agent 链：按角色顺序串行执行，事件经 flume 回到 UI 线程。
@@ -1944,6 +2078,8 @@ impl AppState {
                         });
                         let _ = weak.update(async_cx, |this, cx| {
                             let Some(p) = participant else { return };
+                            // 顶部流水线跟着当前发言角色高亮
+                            this.active_role = Some(ri);
                             let idx = bubbles.bubble(ri, || {
                                 let i = this.sessions[session_idx].messages.len();
                                 this.sessions[session_idx].messages.push(Message {
@@ -2247,6 +2383,7 @@ impl AppState {
 
             let _ = weak.update(async_cx, |this, cx| {
                 this.streaming = false;
+                this.active_role = None;
                 this.pending = None;
                 // 先把取消标志取出来，后面要可变借用 sessions
                 let cancelled = this.cancel.load(Ordering::Relaxed);
@@ -2323,6 +2460,7 @@ impl AppState {
                 match rx.recv_async().await {
                     Ok(neverwork_agent::TeamEvent::RoleStart { role_index }) => {
                         let _ = weak.update(async_cx, |this, cx| {
+                            this.active_role = Some(role_index);
                             if let Some(team) = this.config.active_team().cloned() {
                                 if let Some(role) = team.roles.get(role_index) {
                                     let idx = this.sessions[session_idx].messages.len();
@@ -2376,6 +2514,7 @@ impl AppState {
                     Ok(neverwork_agent::TeamEvent::AllDone) | Err(_) => {
                         let _ = weak.update(async_cx, |this, cx| {
                             this.streaming = false;
+                            this.active_role = None;
                             let cancelled = this.cancel.load(Ordering::Relaxed);
                             if let Some(session) = this.sessions.get_mut(session_idx) {
                                 session.status = neverwork_core::SessionStatus::Done;
@@ -2717,6 +2856,7 @@ impl AppState {
         // 才收尾，界面上「生成中」和停止按钮会一直挂着（长工具调用可达几十秒），
         // 用户会以为卡死、也无法继续输入下一条。
         self.streaming = false;
+        self.active_role = None;
         // 正在执行/待批准的卡片不会再返回结果，直接标成已取消，避免永远转圈。
         let idx = self.active_session.min(self.sessions.len().saturating_sub(1));
         if let Some(session) = self.sessions.get_mut(idx) {
@@ -2879,6 +3019,10 @@ impl Render for AppState {
 
         if self.palette_open {
             root = root.child(self.palette_overlay(cx).into_any_element());
+        }
+        // 新建会话：先选运行模式（单助手 / 团队），选定后不可切换。
+        if self.new_session_picker {
+            root = root.child(self.new_session_overlay(cx).into_any_element());
         }
         root
     }
@@ -3390,6 +3534,84 @@ fn history_for_model(
         out.insert(0, neverwork_agent::ChatMessage::assistant(HISTORY_OMITTED));
     }
     out
+}
+
+/// 生成「已绑定插件」的 prompt 段落（空串 = 没绑插件）。
+///
+/// 单独抽出来是为了能脱离 `AppState` 单测：已安装信息优先、
+/// 内置目录回退，查不到的 id 也保留（至少让模型知道有这么个插件）。
+fn role_skills_section(
+    ids: &[String],
+    installed: &[neverwork_core::Skill],
+    catalog: &[neverwork_core::Skill],
+) -> String {
+    if ids.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\n\n已绑定插件（技能），优先用其中的方法完成任务：");
+    for id in ids {
+        let found = installed
+            .iter()
+            .find(|x| &x.id == id)
+            .or_else(|| catalog.iter().find(|x| &x.id == id));
+        match found {
+            Some(sk) if !sk.summary.trim().is_empty() => {
+                s.push_str(&format!("\n- {}：{}", sk.name.trim(), sk.summary.trim()));
+            }
+            Some(sk) => s.push_str(&format!("\n- {}", sk.name.trim())),
+            None => s.push_str(&format!("\n- {id}")),
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod role_skills_tests {
+    use super::role_skills_section;
+    use neverwork_core::{Skill, SkillCategory};
+
+    fn sk(id: &str, name: &str, summary: &str) -> Skill {
+        Skill {
+            id: id.into(),
+            name: name.into(),
+            summary: summary.into(),
+            detail: String::new(),
+            category: SkillCategory::Dev,
+            author: String::new(),
+            installs: 0,
+            stars: 0,
+            glyph: String::new(),
+            installed: true,
+        }
+    }
+
+    #[test]
+    fn no_skills_means_no_section() {
+        assert!(role_skills_section(&[], &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn installed_skill_wins_over_catalog() {
+        let installed = vec![sk("a", "已装版", "安装后的简介")];
+        let catalog = vec![sk("a", "市场版", "市场简介")];
+        let s = role_skills_section(&["a".into()], &installed, &catalog);
+        assert!(s.contains("已装版：安装后的简介"), "{s}");
+        assert!(!s.contains("市场版"), "{s}");
+    }
+
+    #[test]
+    fn catalog_is_fallback_for_uninstalled() {
+        let catalog = vec![sk("req", "需求分析", "把需求拆成验收标准")];
+        let s = role_skills_section(&["req".into()], &[], &catalog);
+        assert!(s.contains("需求分析：把需求拆成验收标准"), "{s}");
+    }
+
+    #[test]
+    fn unknown_id_is_kept_as_bare_name() {
+        let s = role_skills_section(&["ghost".into()], &[], &[]);
+        assert!(s.contains("- ghost"), "{s}");
+        assert!(s.contains("已绑定插件"), "{s}");
+    }
 }
 
 #[cfg(test)]
