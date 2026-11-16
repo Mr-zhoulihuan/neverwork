@@ -464,16 +464,16 @@ impl AppState {
                 )
             });
 
-        // 候选：内置市场 + 已安装，按综合评分排序，最多 8 条。
+        // 候选：已知插件（已安装 + 内建 + 各来源市场），按综合评分排序，最多 8 条。
         let q = self.role_skill_search.trim().to_lowercase();
-        let installed: Vec<String> = self
-            .settings
-            .skills
-            .iter()
-            .filter(|s| s.installed)
-            .map(|s| s.id.clone())
+        let mut list: Vec<(neverwork_core::Skill, bool)> = self
+            .known_skills()
+            .into_iter()
+            .map(|s| {
+                let installed = self.is_skill_installed(&s.id);
+                (s, installed)
+            })
             .collect();
-        let mut list = crate::skills_catalog::catalog_with_installed(&installed);
         if !q.is_empty() {
             list.retain(|(s, _)| {
                 s.name.to_lowercase().contains(&q)
@@ -488,6 +488,80 @@ impl AppState {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         list.truncate(8);
+
+        // MCP 安装确认条：注册外部进程前让用户点头（确认后自动绑到本角色）
+        let pending_bar: Option<gpui::AnyElement> =
+            self.pending_mcp_install.as_ref().map(|pid| {
+                let sk = self.find_skill(pid);
+                let name = sk
+                    .as_ref()
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| pid.clone());
+                let cmd = sk
+                    .as_ref()
+                    .and_then(|s| {
+                        s.mcp
+                            .as_ref()
+                            .map(|m| format!("{} {}", m.command, m.args.join(" ")))
+                    })
+                    .unwrap_or_default();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_2()
+                    .rounded_md()
+                    .bg(theme::accent_soft())
+                    .border_1()
+                    .border_color(theme::accent_line())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::fg())
+                            .child(SharedString::from(format!(
+                                "「{name}」是 MCP 插件，将注册并启动外部进程：{cmd}"
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("role-mcp-cancel-{idx}")))
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(theme::muted())
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(theme::border()))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                        this.cancel_mcp_install(cx);
+                                    }))
+                                    .child("取消"),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("role-mcp-confirm-{idx}")))
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(theme::accent())
+                                    .text_xs()
+                                    .text_color(gpui::rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .hover(|d| d.opacity(0.88))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                        this.confirm_mcp_install(cx);
+                                    }))
+                                    .child("确认并绑定"),
+                            ),
+                    )
+                    .into_any_element()
+            });
 
         let mut rows = div().flex().flex_col().gap_1();
         if list.is_empty() {
@@ -541,8 +615,9 @@ impl AppState {
                 div()
                     .text_xs()
                     .text_color(theme::dim())
-                    .child("插件取自技能市场；绑定后其说明会拼进角色提示词，点底部「保存」写盘。"),
+                    .child("文本插件安装后落盘到 skills/<id>/SKILL.md，正文会拼进角色提示词；MCP 插件会启动外部进程，需确认。点底部「保存」写盘。"),
             )
+            .children(pending_bar)
     }
 
     /// 插件市场面板里的一行候选。`added` 为真时右侧是「已添加」（不可再点）。
@@ -619,9 +694,26 @@ impl AppState {
                     .min_w(px(0.0))
                     .child(
                         div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(SharedString::from(name)),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(SharedString::from(name)),
+                            )
+                            .when(skill.is_mcp(), |d| {
+                                d.child(
+                                    div()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .bg(theme::accent_soft())
+                                        .text_xs()
+                                        .text_color(theme::accent())
+                                        .child("MCP"),
+                                )
+                            }),
                     )
                     .child(
                         div()

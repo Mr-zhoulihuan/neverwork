@@ -12,7 +12,7 @@ cargo test --workspace          # 全部测试（3 条打真实 DeepSeek，需 N
 cargo build -p neverwork        # 只编应用（增量约 6s）
 ```
 
-运行期变量：`NW_ROOT`、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_EXPAND_STEPS`/`NW_RIGHT_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_LAYOUT_DEBUG`。
+运行期变量：`NW_ROOT`、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_EXPAND_STEPS`/`NW_RIGHT_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_INSTALL_SKILL`。
 
 工作区回落：`NW_ROOT` → `settings.last_workspace` → `~/.neverwork/workspace`。**不要**回落到当前目录/向上找 `Cargo.toml`——会把 IDE 自己的仓库当工作区。
 
@@ -71,6 +71,7 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - 编辑器：光标/多光标/选区/撤销重做/剪贴板/按字符点击/行号/高亮/虚拟滚动/保存/查找替换/折叠/括号匹配。
 - `Supervisor` 是真分派（Lead 逐轮决定下一角色）。Team 开工具走 `spawn_agents_chain`（串行、每角色带工具、与单 Agent 同一套历史）；关工具走 `run_team_with_history`（纯文本、不传 tools，工具历史由 `flatten_tool_history` 压平，否则 Anthropic 空正文整轮 400）。
 - Provider：OpenAI 兼容 / Anthropic / Gemini 原生；Gemini 工具调用未接。
+- 技能市场**只接真实源**：MCP 官方 Registry / 腾讯云 MCP 广场（国内直达）/ GitHub 技能仓库（jsDelivr 加速），缓存在 `~/.neverwork/marketplace.json`；`skills_catalog.rs` 仅保留可离线验证管道的真实 npm 内建项，**不要再加虚构条目**。MCP 子进程默认注入 npmmirror / 清华 PyPI 镜像（settings.mcp_mirror 可关）。
 - 无 LSP / tree-sitter / 终端 / 全局搜索。Git 有暂存/提交/丢弃/切分支，**无 push/pull、无冲突合并**。单文件 512KB、文件树 8000 节点上限。
 
 <!-- proma:memory:start -->

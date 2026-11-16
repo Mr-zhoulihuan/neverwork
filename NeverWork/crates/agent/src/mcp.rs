@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,18 @@ const MAX_RESULT_CHARS: usize = 32_000;
 const PREFIX: &str = "mcp__";
 /// 工具名长度上限（OpenAI 要求 <= 64）。
 const NAME_MAX: usize = 64;
+
+/// 国内镜像：npm 的官方源在国内经常超时，包管理器都支持用环境变量覆盖。
+const NPM_MIRROR: &str = "https://registry.npmmirror.com";
+const PYPI_MIRROR: &str = "https://pypi.tuna.tsinghua.edu.cn/simple";
+
+/// 是否给 MCP 子进程注入国内镜像（设置里可关；用户自己已设的变量不覆盖）。
+static MIRROR_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// 设置页面开关：关闭后新启动的 MCP 进程不再注入镜像。
+pub fn set_mirror(enabled: bool) {
+    MIRROR_ENABLED.store(enabled, Ordering::Relaxed);
+}
 
 /// 一个 MCP server 提供的工具（解析后的形态）。
 #[derive(Debug, Clone)]
@@ -69,6 +82,18 @@ impl McpClient {
             .stderr(Stdio::null());
         for (k, v) in &cfg.env {
             cmd.env(k, v);
+        }
+        // 国内镜像：只补未设置的变量，企业内网源/用户自定义源优先。
+        if MIRROR_ENABLED.load(Ordering::Relaxed) {
+            for (key, val) in [
+                ("npm_config_registry", NPM_MIRROR),
+                ("UV_DEFAULT_INDEX", PYPI_MIRROR),
+                ("PIP_INDEX_URL", PYPI_MIRROR),
+            ] {
+                if std::env::var_os(key).is_none() {
+                    cmd.env(key, val);
+                }
+            }
         }
         #[cfg(windows)]
         {

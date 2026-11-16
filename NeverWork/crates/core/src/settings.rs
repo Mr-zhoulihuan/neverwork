@@ -421,6 +421,40 @@ impl SkillCategory {
         }
     }
 
+    /// serde 名（SKILL.md front-matter 里用，与 JSON 序列化一致）。
+    pub fn key(&self) -> &'static str {
+        match self {
+            SkillCategory::Office => "office",
+            SkillCategory::Knowledge => "knowledge",
+            SkillCategory::Dev => "dev",
+            SkillCategory::Content => "content",
+            SkillCategory::Design => "design",
+            SkillCategory::Data => "data",
+            SkillCategory::Agent => "agent",
+            SkillCategory::Industry => "industry",
+            SkillCategory::Business => "business",
+            SkillCategory::Life => "life",
+            SkillCategory::Ops => "ops",
+        }
+    }
+
+    /// 从 serde 名解析，未知值回落到开发编程。
+    pub fn from_key(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "office" => SkillCategory::Office,
+            "knowledge" => SkillCategory::Knowledge,
+            "content" => SkillCategory::Content,
+            "design" => SkillCategory::Design,
+            "data" => SkillCategory::Data,
+            "agent" => SkillCategory::Agent,
+            "industry" => SkillCategory::Industry,
+            "business" => SkillCategory::Business,
+            "life" => SkillCategory::Life,
+            "ops" => SkillCategory::Ops,
+            _ => SkillCategory::Dev,
+        }
+    }
+
     /// 分类主色（用于卡片图标底色）。
     pub fn hue(&self) -> u32 {
         match self {
@@ -437,6 +471,19 @@ impl SkillCategory {
             SkillCategory::Ops => 0x64748b,
         }
     }
+}
+
+/// 技能/插件的形态。
+///
+/// - `Text`：落盘为 `~/.neverwork/skills/<id>/SKILL.md`，安装后把正文注入提示词。
+/// - `Mcp`：装的是一个 MCP server，安装 = 写入 `settings.mcp_servers`，
+///   模型通过 `mcp__<server>__<tool>` 工具真实调用（进程由用户安装动作引入）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillKind {
+    #[default]
+    Text,
+    Mcp,
 }
 
 /// 一个可安装的技能。
@@ -466,9 +513,19 @@ pub struct Skill {
     /// 是否已安装。
     #[serde(default)]
     pub installed: bool,
+    /// 插件形态。旧数据没有该字段，按 `Text` 处理。
+    #[serde(default)]
+    pub kind: SkillKind,
+    /// `Mcp` 形态的启动配置；`Text` 形态为 `None`。
+    /// `env` 里可能放 token，`Settings::redacted()` 会清空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpServerConfig>,
 }
 
 impl Skill {
+    pub fn is_mcp(&self) -> bool {
+        self.kind == SkillKind::Mcp
+    }
     /// 安装量的人性化显示：1_149_000 -> `1149.9万`。
     pub fn installs_label(&self) -> String {
         let n = self.installs;
@@ -566,6 +623,10 @@ pub struct Settings {
     /// MCP 服务器（stdio）。空 = 不使用 MCP。
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// 启动 MCP 子进程时注入国内镜像（npm→npmmirror、PyPI→清华）。
+    /// 用户环境里已设置对应变量时不覆盖。
+    #[serde(default = "default_true")]
+    pub mcp_mirror: bool,
 }
 
 fn default_ui_scale() -> f32 {
@@ -618,6 +679,7 @@ impl Default for Settings {
             last_sync_at: 0,
             last_update_check: 0,
             mcp_servers: Vec::new(),
+            mcp_mirror: true,
         }
     }
 }
@@ -667,6 +729,12 @@ impl Settings {
         // MCP 的 env 里常放 token（GITHUB_TOKEN 等），导出时必须清掉
         for m in &mut s.mcp_servers {
             m.env.clear();
+        }
+        // 已安装的 MCP 插件里也可能带 env
+        for sk in &mut s.skills {
+            if let Some(m) = &mut sk.mcp {
+                m.env.clear();
+            }
         }
         s
     }
@@ -835,10 +903,48 @@ mod tests {
             stars: 119,
             glyph: "编".into(),
             installed: false,
+            kind: SkillKind::Text,
+            mcp: None,
         };
         assert_eq!(k.installs_label(), "114.9万");
         k.installs = 980;
         assert_eq!(k.installs_label(), "980");
+    }
+
+    #[test]
+    fn skill_kind_defaults_to_text_and_mcp_is_optional() {
+        // 旧数据没有 kind/mcp 字段：必须回落 Text，不能反序列化失败
+        let json = r#"{"id":"a","name":"a","summary":"","category":"dev"}"#;
+        let k: Skill = serde_json::from_str(json).unwrap();
+        assert_eq!(k.kind, SkillKind::Text);
+        assert!(k.mcp.is_none());
+    }
+
+    #[test]
+    fn redacted_clears_skill_mcp_env() {
+        let mut s = Settings::default();
+        let mut m = McpServerConfig {
+            name: "gh".into(),
+            command: "npx".into(),
+            ..Default::default()
+        };
+        m.env.insert("GITHUB_TOKEN".into(), "secret".into());
+        s.skills.push(Skill {
+            id: "mcp.gh".into(),
+            name: "GitHub".into(),
+            summary: String::new(),
+            detail: String::new(),
+            category: SkillCategory::Dev,
+            author: String::new(),
+            installs: 0,
+            stars: 0,
+            glyph: "".into(),
+            installed: true,
+            kind: SkillKind::Mcp,
+            mcp: Some(m),
+        });
+        let r = s.redacted();
+        assert!(r.skills[0].mcp.as_ref().unwrap().env.is_empty(), "导出时插件 env 必须清空");
     }
 
     #[test]

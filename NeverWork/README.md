@@ -520,19 +520,30 @@ Agent 现在能直接操作工作区文件，而不是只会「说话」。
   - 界面只显示 `••••••••` + 末尾 4 位，前缀也不显示（避免截图/录屏泄露）。
   - `ProviderEntry` 手写 `Debug`，任何 `{:?}` 日志都只输出打码后的 Key。
   - **关于**：版本、依赖、仓库、统计。
-- **技能市场**（图标栏 ✦ 或 ⌘K）：
+- **技能市场**（图标栏 ✦ 或 ⌘K）：数据全部来自真实源，不再有内置的虚构目录。
   - 顶部「技能 / Agent 模板」两个 Tab；搜索框按名称、id、简介、作者过滤。
-  - 分类预览卡（办公效率 / 知识管理 / 开发编程 / 内容创作 / 设计多媒体），各显示安装量最高的 4 个。
-  - 11 个分类筛选 + 三种排序（综合评分 / 安装量 / 星标），45 个内置技能，卡片网格。
-  - 安装/卸载即时写入设置；Agent 模板可一键套用为当前团队（流水线三人组 / 并行探索团 / 单人对练）。
+  - 三个来源切换：**MCP 官方 Registry**（registry.modelcontextprotocol.io）、
+    **腾讯云 MCP 广场**（国内直达，30 条热门条目，安装时再抓详情页取真实启动命令）、
+    **GitHub 技能仓库**（anthropics/skills、vercel-labs/agent-skills，jsDelivr 加速下载 SKILL.md）。
+  - 结果按来源缓存到 `~/.neverwork/marketplace.json`：断网继续显示上次快照，
+    状态行标出「数据来自 … · 上次同步 …」；刷新失败只记错误，不清空旧数据。
+  - 分类预览卡（办公效率 / 知识管理 / 开发编程 / 内容创作 / 设计多媒体）与 11 个筛选，
+    三种排序（推荐 / 名称 / 热度）；推荐里可安装的排在「仅远程」前面。
+  - 安装：文本技能把正文落盘到 `skills/<id>/SKILL.md`；MCP 插件先取启动配置，
+    经用户确认后写入 `mcp_servers`，工具以 `mcp__<server>__<tool>` 出现且逐次审批。
+  - **国内镜像**（技能页右上角 / 设置 → 常规）：MCP 子进程注入
+    `npm_config_registry=https://registry.npmmirror.com` 与清华 PyPI 索引，
+    用户已设置的环境变量不覆盖；关掉开关则用系统默认源。
+  - Agent 模板可一键套用为当前团队（流水线三人组 / 并行探索团 / 单人对练）。
 - **多协议**：`neverwork-agent` 的 `ProviderConfig` 增加 `temperature`，OpenAI 兼容与
   Anthropic 都带上；对话优先用设置里的当前厂商，未配置时提示去设置页，仍兼容 `NW_API_KEY` 等环境变量。
 - **主题运行时切换**：`theme::set_theme_mode()` 写全局原子量，所有 `theme::xxx()`
   立刻返回新色板的颜色，视图代码零改动。
 
 新增/扩展：`core/settings.rs`、`app/settings_ops.rs`、`app/skills_catalog.rs`、
-`views/settings.rs`、`views/skills.rs`；`Session` 之外新增 `Settings` / `ProviderEntry` /
-`ProviderPreset` / `Protocol` / `Skill` / `SkillCategory` / `ThemeMode`。
+`app/marketplace.rs`（三源客户端 + 缓存）、`views/settings.rs`、`views/skills.rs`；
+`Session` 之外新增 `Settings` / `ProviderEntry` / `ProviderPreset` / `Protocol` /
+`Skill` / `SkillCategory` / `ThemeMode`。
 
 ## 运行
 

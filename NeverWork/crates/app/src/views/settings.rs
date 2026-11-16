@@ -280,6 +280,14 @@ impl AppState {
                     },
                 ));
 
+                g = g.child(toggle_row(
+                    "国内镜像",
+                    "MCP 安装依赖走 npmmirror / 清华 PyPI，已设的环境变量不覆盖",
+                    self.settings.mcp_mirror,
+                    cx,
+                    |this, cx| this.toggle_mcp_mirror(cx),
+                ));
+
                 g
             },
         ));

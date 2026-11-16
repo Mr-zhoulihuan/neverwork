@@ -29,6 +29,7 @@ use neverwork_ui::theme;
 use crate::filesystem;
 use crate::keymap::{self, KeyAction, Motion};
 use crate::line_cache::LineCache;
+use crate::marketplace::{MarketEntry, MarketSource};
 use crate::text_buffer::TextBuffer;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -251,8 +252,8 @@ pub struct AppState {
     /// 设置页表单当前编辑的字段与它的缓冲区。
     pub active_field: Option<FormField>,
     pub field_buf: TextBuffer,
-    /// 技能市场：分类过滤（None = 全部）。
-    pub skill_filter: Option<neverwork_core::SkillCategory>,
+    /// 技能市场：标签过滤（真实来源标签，如「文档工具」「npm」；None = 全部）。
+    pub market_tag: Option<String>,
     /// 技能市场排序：0=综合 1=安装量 2=星标。
     pub skill_sort: u8,
     /// 技能页顶部 Tab：0=技能 1=Agent 模板。
@@ -282,6 +283,25 @@ pub struct AppState {
     pub role_skill_picker: Option<usize>,
     /// 角色插件搜索词。
     pub role_skill_search: String,
+    /// 待确认的 MCP 插件安装（技能 id）。
+    /// MCP 插件安装 = 注册并启动外部进程，必须用户点头后才接。
+    pub pending_mcp_install: Option<String>,
+    /// MCP 确认通过后要绑定到的角色下标（从团队编辑器发起时记录）。
+    pub pending_mcp_attach: Option<usize>,
+    /// 技能导入（.md）输入行是否展开。
+    pub skill_import_open: bool,
+    /// 技能市场当前来源（官方 / 腾讯云 / GitHub）。
+    pub market_source: MarketSource,
+    /// 各来源最近一次拉到的条目（内存，不序列化）。
+    pub market_entries: std::collections::HashMap<MarketSource, Vec<MarketEntry>>,
+    /// 各来源上次成功同步的时间。
+    pub market_fetched_at: std::collections::HashMap<MarketSource, u64>,
+    /// 正在拉取市场数据。
+    pub market_loading: bool,
+    /// 最近一次拉取失败的原因（有缓存时仍展示缓存）。
+    pub market_error: Option<String>,
+    /// 正在抓详情配置的腾讯云条目 id。
+    pub market_installing: Option<String>,
     /// 团队会话里正在发言的角色下标（顶部流水线高亮用）。
     pub active_role: Option<usize>,
     /// 等待用户批准的写操作。同一时刻最多一个。
@@ -514,6 +534,7 @@ impl AppState {
         neverwork_ui::theme::set_theme_mode(settings.theme);
         // MCP 工具在启动时配置一次。连接是惰性的（第一次真要用工具才起进程），
         // 没配 MCP 的用户零开销；改完配置需重启生效。
+        neverwork_agent::mcp::set_mirror(settings.mcp_mirror);
         let mcp_servers = neverwork_agent::mcp::servers_from_env()
             .unwrap_or_else(|| settings.mcp_servers.clone());
         neverwork_agent::mcp::configure(mcp_servers);
@@ -537,6 +558,17 @@ impl AppState {
             .iter()
             .position(|s| s.id == store.active_id)
             .unwrap_or(0);
+
+        // 技能市场：先读缓存（离线也能看到上次同步的真实条目），启动后后台刷新。
+        let market_cache = crate::marketplace::load_cache();
+        let mut market_entries = std::collections::HashMap::new();
+        let mut market_fetched_at = std::collections::HashMap::new();
+        for src in MarketSource::all() {
+            if let Some(snap) = market_cache.snapshot(src) {
+                market_fetched_at.insert(src, snap.fetched_at);
+                market_entries.insert(src, snap.entries.clone());
+            }
+        }
 
         let mut me = Self {
             workspace: ws,
@@ -581,7 +613,7 @@ impl AppState {
             settings,
             active_field: None,
             field_buf: TextBuffer::single_line(),
-            skill_filter: None,
+            market_tag: None,
             skill_sort: 0,
             skills_tab: 0,
             skill_search: String::new(),
@@ -595,6 +627,15 @@ impl AppState {
             new_session_picker: false,
             role_skill_picker: None,
             role_skill_search: String::new(),
+            pending_mcp_install: None,
+            pending_mcp_attach: None,
+            skill_import_open: false,
+            market_source: MarketSource::Official,
+            market_entries,
+            market_fetched_at,
+            market_loading: false,
+            market_error: None,
+            market_installing: None,
             active_role: None,
             pending: None,
             auto_approve: false,
@@ -663,6 +704,37 @@ impl AppState {
         // 验证用：预置角色插件搜索词（配合 NW_PICK_ROLE_SKILL 截图用）。
         if let Ok(q) = std::env::var("NW_ROLE_SKILL_QUERY") {
             me.role_skill_search = q;
+        }
+        // 验证用：启动即安装一个技能（文本技能直接落盘；MCP 进入待确认）。
+        if let Ok(id) = std::env::var("NW_INSTALL_SKILL") {
+            if let Some(sk) = me.find_skill(&id) {
+                me.install_skill(sk, cx);
+            }
+        }
+        // 验证用：MCP 插件直接确认安装（配合 NW_INSTALL_SKILL=mcp.* 验证真实写入）。
+        if std::env::var("NW_CONFIRM_MCP").map(|v| v == "1").unwrap_or(false) {
+            me.confirm_mcp_install(cx);
+        }
+        // 验证用：展开技能导入输入行。
+        if std::env::var("NW_SKILL_IMPORT").map(|v| v == "1").unwrap_or(false) {
+            me.skill_import_open = true;
+        }
+        // 验证用：预置技能市场搜索词。
+        if let Ok(q) = std::env::var("NW_SKILL_QUERY") {
+            me.skill_search = q;
+        }
+        // 验证用：预选市场来源（official|tencent|github）。
+        if let Ok(k) = std::env::var("NW_MARKET_SOURCE") {
+            if let Some(src) = MarketSource::from_key(&k) {
+                me.market_source = src;
+            }
+        }
+        // 启动即刷新当前来源；NW_MARKET_NO_REFRESH=1 时只读缓存（离线验收用）。
+        if !std::env::var("NW_MARKET_NO_REFRESH")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            me.refresh_market(cx);
         }
         // 验证用：展开所有工具步骤组 / 收起右栏 / 预置查找词，
         // 便于在无法点击的环境（高 DPI 远程桌面）下截图核对界面。
@@ -1852,12 +1924,14 @@ impl AppState {
         self.send_text(hint, Some(original), cx);
     }
 
-    /// 把角色绑定的插件（技能）摘要拼进 prompt。
+    /// 把角色绑定的插件（技能）内容拼进 prompt。
     ///
-    /// `Role.skills` 存的是技能 id，而模型只看得到 prompt —— 不拼进去，
-    /// 绑了插件等于没绑。只在内存里的团队副本上追加，不回写配置。
+    /// `Role.skills` 存的是技能 id：
+    /// - 文本技能：读 `skills/<id>/SKILL.md` 的正文整段注入（未落盘时回退目录简介）；
+    /// - MCP 插件：告知可用工具前缀，模型需要时直接调用（进程由 mcp 模块按需拉起）。
+    /// 只在内存里的团队副本上追加，不回写配置。
     fn enrich_team_skills(&self, team: &mut neverwork_core::Team) {
-        let catalog = crate::skills_catalog::catalog();
+        let catalog = self.known_skills();
         for role in &mut team.roles {
             let section = role_skills_section(&role.skills, &self.settings.skills, &catalog);
             if !section.is_empty() {
@@ -1867,12 +1941,18 @@ impl AppState {
     }
 
     /// 在团队编辑器里给角色挂一个插件：没装过先安装，再记到 `Role.skills`。
+    /// MCP 插件需要用户确认（启动外部进程），确认通过后自动绑到这个角色。
     pub(crate) fn attach_skill_to_role(
         &mut self,
         role_idx: usize,
         skill: neverwork_core::Skill,
         cx: &mut Context<Self>,
     ) {
+        if skill.is_mcp() && !self.is_skill_installed(&skill.id) {
+            self.pending_mcp_attach = Some(role_idx);
+            self.install_skill(skill, cx);
+            return;
+        }
         if !self.is_skill_installed(&skill.id) {
             self.install_skill(skill.clone(), cx);
         }
@@ -1903,18 +1983,60 @@ impl AppState {
         cx.notify();
     }
 
-    /// 按 id 找技能的展示信息：已安装的优先，其次内置市场目录。
-    pub(crate) fn find_skill(&self, id: &str) -> Option<neverwork_core::Skill> {
-        self.settings
+    /// 所有已知技能（已安装 + 内建 + 各来源市场条目），按 id 去重。
+    ///
+    /// 市场数据来自真实源，随刷新变化；注入提示词、按 id 查配置都走这里。
+    pub(crate) fn known_skills(&self) -> Vec<neverwork_core::Skill> {
+        let mut out: Vec<neverwork_core::Skill> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for s in self
+            .settings
             .skills
             .iter()
-            .find(|s| s.id == id)
             .cloned()
-            .or_else(|| {
-                crate::skills_catalog::catalog()
-                    .into_iter()
-                    .find(|s| s.id == id)
-            })
+            .chain(crate::skills_catalog::builtin())
+        {
+            if seen.insert(s.id.clone()) {
+                out.push(s);
+            }
+        }
+        for entries in self.market_entries.values() {
+            for e in entries {
+                if seen.insert(e.skill.id.clone()) {
+                    out.push(e.skill.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// 当前来源的市场条目（内建示例只在官方来源里合并展示）。
+    pub(crate) fn current_market_items(&self) -> Vec<MarketEntry> {
+        let mut out: Vec<MarketEntry> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        if self.market_source == MarketSource::Official {
+            for s in crate::skills_catalog::builtin() {
+                if seen.insert(s.id.clone()) {
+                    let mut e = MarketEntry::new(s);
+                    // 内建示例真实来自 npm 包 server-everything
+                    e.tags = vec!["npm".into()];
+                    out.push(e);
+                }
+            }
+        }
+        if let Some(list) = self.market_entries.get(&self.market_source) {
+            for e in list {
+                if seen.insert(e.skill.id.clone()) {
+                    out.push(e.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// 按 id 找技能的展示信息：已安装优先，其次内建与各来源市场条目。
+    pub(crate) fn find_skill(&self, id: &str) -> Option<neverwork_core::Skill> {
+        self.known_skills().into_iter().find(|s| s.id == id)
     }
 
     /// 带工具的 Agent 链：按角色顺序串行执行，事件经 flume 回到 UI 线程。
@@ -3554,6 +3676,29 @@ fn role_skills_section(
             .iter()
             .find(|x| &x.id == id)
             .or_else(|| catalog.iter().find(|x| &x.id == id));
+        // MCP 插件：告诉模型可用前缀，工具描述里已有参数，不必展开正文
+        if found.map(|sk| sk.is_mcp()).unwrap_or(false) {
+            let sk = found.unwrap();
+            let prefix = sk
+                .mcp
+                .as_ref()
+                .map(|m| format!("mcp__{}__", m.sanitized()))
+                .unwrap_or_else(|| "mcp__".into());
+            s.push_str(&format!(
+                "\n- {}（MCP 插件，工具前缀 {}，需要时直接调用）",
+                sk.name.trim(),
+                prefix
+            ));
+            continue;
+        }
+        // 真实安装的技能：把落盘正文带上（截断防止塞满上下文）
+        if let Some(body) = crate::skills_ops::read_body(id) {
+            let name = found
+                .map(|sk| sk.name.trim().to_string())
+                .unwrap_or_else(|| id.clone());
+            s.push_str(&format!("\n\n### {name}\n{}", truncate_chars(&body, 1500)));
+            continue;
+        }
         match found {
             Some(sk) if !sk.summary.trim().is_empty() => {
                 s.push_str(&format!("\n- {}：{}", sk.name.trim(), sk.summary.trim()));
@@ -3565,10 +3710,20 @@ fn role_skills_section(
     s
 }
 
+/// 按字符截断（中文安全），超长补省略号。
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod role_skills_tests {
-    use super::role_skills_section;
-    use neverwork_core::{Skill, SkillCategory};
+    use super::{role_skills_section, truncate_chars};
+    use neverwork_core::{McpServerConfig, Skill, SkillCategory, SkillKind};
 
     fn sk(id: &str, name: &str, summary: &str) -> Skill {
         Skill {
@@ -3582,6 +3737,20 @@ mod role_skills_tests {
             stars: 0,
             glyph: String::new(),
             installed: true,
+            kind: SkillKind::Text,
+            mcp: None,
+        }
+    }
+
+    fn mcp_sk(id: &str, name: &str, server: &str) -> Skill {
+        Skill {
+            kind: SkillKind::Mcp,
+            mcp: Some(McpServerConfig {
+                name: server.into(),
+                command: "npx".into(),
+                ..Default::default()
+            }),
+            ..sk(id, name, "")
         }
     }
 
@@ -3611,6 +3780,22 @@ mod role_skills_tests {
         let s = role_skills_section(&["ghost".into()], &[], &[]);
         assert!(s.contains("- ghost"), "{s}");
         assert!(s.contains("已绑定插件"), "{s}");
+    }
+
+    #[test]
+    fn mcp_plugin_reports_tool_prefix() {
+        let installed = vec![mcp_sk("mcp.everything", "MCP 示例服务器", "everything")];
+        let s = role_skills_section(&["mcp.everything".into()], &installed, &[]);
+        assert!(s.contains("MCP 插件"), "{s}");
+        assert!(s.contains("mcp__everything__"), "{s}");
+    }
+
+    #[test]
+    fn truncate_chars_is_cjk_safe() {
+        assert_eq!(truncate_chars("需求分析", 10), "需求分析");
+        let cut = truncate_chars("需求分析需求分析", 4);
+        assert_eq!(cut, "需求分析…");
+        assert_eq!(cut.chars().count(), 5);
     }
 }
 

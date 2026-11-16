@@ -10,6 +10,7 @@ use neverwork_core::{
     config, AppResult, ProviderEntry, ProviderPreset, Settings, Skill, ThemeMode,
 };
 
+use crate::marketplace::{MarketEntry, MarketSource};
 use crate::state::{AppState, CenterView, FormField, InputTarget, SettingsTab};
 
 impl AppState {
@@ -291,12 +292,8 @@ impl AppState {
 
     // ===== 技能 =====
 
-    pub(crate) fn set_skill_filter(
-        &mut self,
-        cat: Option<neverwork_core::SkillCategory>,
-        cx: &mut Context<Self>,
-    ) {
-        self.skill_filter = cat;
+    pub(crate) fn set_market_tag(&mut self, tag: Option<String>, cx: &mut Context<Self>) {
+        self.market_tag = tag;
         cx.notify();
     }
 
@@ -310,36 +307,305 @@ impl AppState {
         cx.notify();
     }
 
+    /// 是否已安装：内存标记 + 磁盘文件（文本技能以磁盘为准，卸载后不会再误报）。
     pub(crate) fn is_skill_installed(&self, id: &str) -> bool {
         self.settings.skills.iter().any(|s| s.id == id && s.installed)
+            || crate::skills_ops::is_installed(id)
     }
 
+    /// 安装技能。
+    ///
+    /// - 文本技能：把正文落盘到 `skills/<id>/SKILL.md`，发送时整段注入提示词。
+    /// - MCP 技能：先置 `pending_mcp_install` 等用户确认（安装 = 引入外部进程）。
     pub(crate) fn install_skill(&mut self, skill: Skill, cx: &mut Context<Self>) {
         if self.is_skill_installed(&skill.id) {
+            return;
+        }
+        if skill.is_mcp() {
+            let cmd = skill
+                .mcp
+                .as_ref()
+                .map(|m| m.command.clone())
+                .unwrap_or_default();
+            self.pending_mcp_install = Some(skill.id.clone());
+            self.notice = Some(format!(
+                "「{}」是 MCP 插件：安装会写入 mcp_servers 并在首次使用时启动 `{cmd}`，需要你确认",
+                skill.name
+            ));
+            cx.notify();
+            return;
+        }
+        // 文本技能：真正落盘
+        if let Err(e) = crate::skills_ops::install_text(&skill) {
+            self.action_msg = Some(format!("安装失败：{e}"));
+            cx.notify();
             return;
         }
         let mut s = skill.clone();
         s.installed = true;
         self.settings.skills.retain(|x| x.id != s.id);
         self.settings.skills.push(s.clone());
-        let name = s.name.clone();
         self.update_settings(|_| {}, cx);
-        self.action_msg = Some(format!("已安装「{name}」"));
+        self.action_msg = Some(format!(
+            "已安装「{}」→ {}",
+            s.name,
+            crate::skills_ops::skill_file(&s.id).display()
+        ));
         cx.notify();
     }
 
+    /// 确认安装 MCP 插件：写 `mcp_servers` 并重配 agent（下次工具列表生效）。
+    pub(crate) fn confirm_mcp_install(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.pending_mcp_install.take() else {
+            return;
+        };
+        let Some(skill) = self.find_skill(&id) else {
+            self.action_msg = Some("找不到该插件条目".into());
+            cx.notify();
+            return;
+        };
+        let Some(cfg) = skill.mcp.clone() else {
+            self.action_msg = Some(format!("「{}」没有 MCP 启动配置", skill.name));
+            cx.notify();
+            return;
+        };
+        if !self.settings.skills.iter().any(|s| s.id == id) {
+            let mut s = skill.clone();
+            s.installed = true;
+            self.settings.skills.push(s);
+        }
+        // 同名 server 只保留一份，重复安装视为覆盖启动参数
+        if let Some(existing) = self.settings.mcp_servers.iter_mut().find(|m| m.name == cfg.name) {
+            existing.command = cfg.command.clone();
+            existing.args = cfg.args.clone();
+            existing.enabled = true;
+        } else {
+            self.settings.mcp_servers.push(cfg.clone());
+        }
+        let servers = self.settings.mcp_servers.clone();
+        self.update_settings(|_| {}, cx);
+        neverwork_agent::mcp::configure(servers);
+        self.action_msg = Some(format!(
+            "已安装 MCP 插件「{}」：工具前缀 mcp__{}__，首次调用会启动外部进程并逐次审批",
+            skill.name,
+            cfg.sanitized()
+        ));
+        // 从团队编辑器发起时，装完顺手绑给那个角色
+        if let Some(role_idx) = self.pending_mcp_attach.take() {
+            self.attach_skill_to_role(role_idx, skill, cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_mcp_install(&mut self, cx: &mut Context<Self>) {
+        self.pending_mcp_install = None;
+        self.pending_mcp_attach = None;
+        cx.notify();
+    }
+
+    // ===== 真实市场 =====
+
+    /// 切换市场来源；没有缓存且没在拉时自动拉一次。
+    pub(crate) fn set_market_source(&mut self, source: MarketSource, cx: &mut Context<Self>) {
+        if self.market_source == source {
+            return;
+        }
+        self.market_source = source;
+        self.skill_search.clear();
+        self.market_tag = None;
+        self.field_buf.reset("");
+        cx.notify();
+        let empty = self
+            .market_entries
+            .get(&source)
+            .map(|e| e.is_empty())
+            .unwrap_or(true);
+        if empty {
+            self.refresh_market(cx);
+        }
+    }
+
+    /// 拉当前来源的真实条目（后台线程 + 写缓存；失败保留旧缓存）。
+    pub(crate) fn refresh_market(&mut self, cx: &mut Context<Self>) {
+        if self.market_loading {
+            return;
+        }
+        let source = self.market_source;
+        self.market_loading = true;
+        self.market_error = None;
+        cx.notify();
+        let (tx, rx) =
+            flume::unbounded::<(MarketSource, Result<(Vec<MarketEntry>, u64), String>)>();
+        std::thread::spawn(move || {
+            let r = crate::marketplace::fetch_and_cache(source);
+            let _ = tx.send((source, r));
+        });
+        cx.spawn(async move |weak, async_cx| {
+            let Ok((source, result)) = rx.recv_async().await else {
+                return;
+            };
+            let _ = weak.update(async_cx, |this, cx| {
+                this.apply_market_refresh(source, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn apply_market_refresh(
+        &mut self,
+        source: MarketSource,
+        result: Result<(Vec<MarketEntry>, u64), String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.market_loading = false;
+        match result {
+            Ok((entries, at)) => {
+                self.market_entries.insert(source, entries);
+                self.market_fetched_at.insert(source, at);
+                self.market_error = None;
+            }
+            // 有缓存就继续展示缓存，只把错误显示在状态行
+            Err(e) => self.market_error = Some(e),
+        }
+        cx.notify();
+    }
+
+    /// 安装市场条目：文本技能直接落盘；MCP 插件先取启动配置，再进入确认流程。
+    pub(crate) fn install_market_entry(&mut self, entry: MarketEntry, cx: &mut Context<Self>) {
+        if entry.remote_only {
+            self.action_msg = Some(
+                "该条目只提供远程端点（SSE/HTTP），当前版本只支持 stdio 安装".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let skill = entry.skill.clone();
+        if skill.is_mcp() && skill.mcp.is_none() {
+            // 腾讯云等来源的列表不带启动配置：安装时再抓详情页
+            let Some(mcp_id) = skill
+                .id
+                .strip_prefix("tencent.mcp.")
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                self.action_msg = Some(format!("「{}」缺少安装配置", skill.name));
+                cx.notify();
+                return;
+            };
+            if self.market_installing.is_some() {
+                return;
+            }
+            self.market_installing = Some(skill.id.clone());
+            self.notice = Some(format!("正在获取「{}」的安装配置…", skill.name));
+            cx.notify();
+            let (tx, rx) = flume::unbounded::<Result<neverwork_core::McpServerConfig, String>>();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::marketplace::fetch_tencent_detail(mcp_id));
+            });
+            cx.spawn(async move |weak, async_cx| {
+                let Ok(result) = rx.recv_async().await else {
+                    return;
+                };
+                let _ = weak.update(async_cx, move |this, cx| {
+                    this.market_installing = None;
+                    match result {
+                        Ok(cfg) => {
+                            let mut s = skill.clone();
+                            s.mcp = Some(cfg.clone());
+                            // 回写市场条目：确认条要显示真实命令
+                            if let Some(list) = this.market_entries.get_mut(&MarketSource::Tencent)
+                            {
+                                if let Some(e) = list.iter_mut().find(|e| e.skill.id == s.id) {
+                                    e.skill.mcp = Some(cfg);
+                                }
+                            }
+                            this.install_skill(s, cx);
+                        }
+                        Err(e) => {
+                            this.action_msg = Some(format!("获取安装配置失败：{e}"));
+                            cx.notify();
+                        }
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+        self.install_skill(skill, cx);
+    }
+
+    /// 国内镜像开关：MCP 子进程启动时注入 npm / PyPI 镜像。
+    pub(crate) fn toggle_mcp_mirror(&mut self, cx: &mut Context<Self>) {
+        self.settings.mcp_mirror = !self.settings.mcp_mirror;
+        neverwork_agent::mcp::set_mirror(self.settings.mcp_mirror);
+        self.update_settings(|_| {}, cx);
+        self.action_msg = Some(if self.settings.mcp_mirror {
+            "已开启国内镜像：MCP 进程用 npmmirror / 清华 PyPI 拉包".into()
+        } else {
+            "已关闭国内镜像：MCP 进程使用系统默认源".into()
+        });
+        cx.notify();
+    }
+
+    /// 卸载：文本技能删目录；MCP 插件从 `mcp_servers` 移除并重配（进程随之退出）。
     pub(crate) fn uninstall_skill(&mut self, id: &str, cx: &mut Context<Self>) {
-        let name = self
-            .settings
-            .skills
-            .iter()
-            .find(|s| s.id == id)
-            .map(|s| s.name.clone())
-            .unwrap_or_default();
+        let found = self.settings.skills.iter().find(|s| s.id == id).cloned();
+        let name = found.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+        if let Some(skill) = &found {
+            if let Some(cfg) = &skill.mcp {
+                self.settings.mcp_servers.retain(|m| m.name != cfg.name);
+                let servers = self.settings.mcp_servers.clone();
+                neverwork_agent::mcp::configure(servers);
+            }
+        }
+        let mut err = None;
+        if crate::skills_ops::skill_dir(id).exists() {
+            if let Err(e) = crate::skills_ops::uninstall_text(id) {
+                err = Some(e);
+            }
+        }
         self.settings.skills.retain(|s| s.id != id);
         self.update_settings(|_| {}, cx);
-        self.action_msg = Some(format!("已卸载「{name}」"));
+        self.action_msg = Some(match err {
+            Some(e) => format!("已清除标记，但文件删除失败：{e}"),
+            None => format!("已卸载「{name}」"),
+        });
         cx.notify();
+    }
+
+    /// 从本地 `.md` 导入技能：解析 front-matter → 落盘安装（同名覆盖）。
+    pub(crate) fn import_skill_from_path(&mut self, cx: &mut Context<Self>) {
+        let raw = self.import_path.trim().to_string();
+        if raw.is_empty() {
+            self.action_msg = Some("请先填写 .md 文件路径".into());
+            cx.notify();
+            return;
+        }
+        if !raw.to_ascii_lowercase().ends_with(".md") {
+            self.action_msg = Some("技能导入需要 .md 文件；JSON 配置请在「设置 → 同步」导入".into());
+            cx.notify();
+            return;
+        }
+        let path = std::path::Path::new(&raw);
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.action_msg = Some(format!("读取失败：{e}"));
+                cx.notify();
+                return;
+            }
+        };
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "imported".into());
+        let skill = crate::skills_ops::parse_md(&text, &stem);
+        // 覆盖导入：先去掉旧标记，再走正常安装（会重写文件）
+        self.settings.skills.retain(|s| s.id != skill.id);
+        self.install_skill(skill, cx);
+        self.skill_import_open = false;
+        self.active_field = None;
+        self.field_buf.reset("");
     }
 
     // ===== 升级 =====
