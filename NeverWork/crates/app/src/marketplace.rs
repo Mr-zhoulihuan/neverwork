@@ -38,6 +38,10 @@ const GITHUB_MAX_PER_REPO: usize = 24;
 const GITHUB_CONCURRENCY: usize = 12;
 /// 正文缓存上限：超过就截断（只用于安装初始正文，避免缓存文件过大）。
 const GITHUB_BODY_LIMIT: usize = 60_000;
+/// 单个图标上限：超过就不缓存（有的图标地址指向的是大截图）。
+const ICON_MAX_BYTES: u64 = 256 * 1024;
+/// 并发下载图标的线程数（TLS 握手占大头，并发能线性提速）。
+const ICON_CONCURRENCY: usize = 8;
 
 // ============ 来源 ============
 
@@ -119,6 +123,13 @@ pub struct MarketEntry {
     /// 全部来自上游字段，不做关键词猜测；旧缓存没有该字段时为空。
     #[serde(default)]
     pub tags: Vec<String>,
+    /// 上游图标地址（腾讯云 `iconUrl`、GitHub 仓库 owner 头像）。
+    /// 刷新时下载到本地缓存，渲染层用 [`icon_path`] 取文件，不在这里存字节。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
+    /// 上游详情页（详情抽屉里的「打开来源」）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
 }
 
 impl MarketEntry {
@@ -128,6 +139,8 @@ impl MarketEntry {
             github_path: None,
             remote_only: false,
             tags: Vec::new(),
+            icon_url: None,
+            source_url: None,
         }
     }
 }
@@ -273,6 +286,109 @@ fn http_error(url: &str, e: ureq::Error) -> String {
     }
 }
 
+// ============ 图标缓存 ============
+
+/// 图标缓存目录（`~/.neverwork/market-icons`）。
+pub fn icon_cache_dir() -> PathBuf {
+    neverwork_core::config::config_dir().join("market-icons")
+}
+
+/// URL → 本地缓存文件。FNV-1a 64 位足够避开撞名，且不引入额外 crate。
+pub fn icon_path_for(url: &str) -> PathBuf {
+    icon_cache_dir().join(format!("{:016x}.img", fnv1a(url)))
+}
+
+/// 条目图标的本地文件；没图标或还没下载完时返回 `None`（调用方回退字形）。
+pub fn icon_path(entry: &MarketEntry) -> Option<PathBuf> {
+    let url = entry.icon_url.as_deref()?;
+    let path = icon_path_for(url);
+    path.is_file().then_some(path)
+}
+
+/// 标准 FNV-1a 64 位（prime = 0x100000001B3）。
+/// 注意：改哈希算法/幂等错一个字都会让旧缓存名失配，图标会重新下载一轮。
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// 按魔数判断是不是图片。
+///
+/// 扩展名无关：缓存一律写成 `.img`，gpui 也按字节嗅探（`image::guess_format`，
+/// 失败再当 SVG 渲染）。SVG 也收：头像/logo 不少是矢量图。
+pub fn looks_like_image(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return true;
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return true;
+    }
+    if bytes.starts_with(b"GIF8") {
+        return true;
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return true;
+    }
+    let head = &bytes[..bytes.len().min(200)];
+    let text = String::from_utf8_lossy(head);
+    let text = text.trim_start();
+    text.starts_with("<svg")
+        || text.starts_with("<?xml")
+        || (text.starts_with('<') && text.contains("<svg"))
+}
+
+/// 把条目的 `icon_url` 下载到本地缓存；已存在跳过，失败静默忽略。
+///
+/// 图标只是装饰：任何一个失败都不影响列表展示（卡片回退字形）。
+pub fn cache_icons(entries: &[MarketEntry]) {
+    let mut urls: Vec<&str> = Vec::new();
+    for e in entries {
+        if let Some(u) = e.icon_url.as_deref() {
+            if !urls.contains(&u) {
+                urls.push(u);
+            }
+        }
+    }
+    let todo: Vec<&str> = urls
+        .into_iter()
+        .filter(|u| !icon_path_for(u).is_file())
+        .collect();
+    if todo.is_empty() || std::fs::create_dir_all(icon_cache_dir()).is_err() {
+        return;
+    }
+    let agent = agent_with_timeout(8);
+    for chunk in todo.chunks(ICON_CONCURRENCY) {
+        std::thread::scope(|scope| {
+            for url in chunk {
+                let agent = agent.clone();
+                scope.spawn(move || {
+                    if let Ok(bytes) = fetch_bytes(&agent, url, ICON_MAX_BYTES) {
+                        if looks_like_image(&bytes) {
+                            let _ = std::fs::write(icon_path_for(url), bytes);
+                        }
+                    }
+                });
+            }
+        });
+    }
+}
+
+fn fetch_bytes(agent: &ureq::Agent, url: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let mut resp = agent.get(url).call().map_err(|e| http_error(url, e))?;
+    resp.body_mut()
+        .with_config()
+        .limit(limit)
+        .read_to_vec()
+        .map_err(|e| format!("读取响应失败：{e}"))
+}
+
 // ============ 拉取入口 ============
 
 /// 拉取某个来源的全部条目。
@@ -287,6 +403,8 @@ pub fn fetch(source: MarketSource) -> Result<Vec<MarketEntry>, String> {
 /// 拉取并写入缓存。返回 (条目, 拉取时间)。
 pub fn fetch_and_cache(source: MarketSource) -> Result<(Vec<MarketEntry>, u64), String> {
     let entries = fetch(source)?;
+    // 图标在这里落盘：UI 线程拿到条目时本地文件已就绪，卡片首帧就能显示。
+    cache_icons(&entries);
     let at = neverwork_core::config::now_secs();
     let mut cache = load_cache();
     cache.put(source, entries.clone(), at);
@@ -348,6 +466,13 @@ pub fn parse_official(v: &serde_json::Value) -> Vec<MarketEntry> {
         let (cfg, envs) = official_package_config(server, raw_name, &mut used_names);
         let remote_only = cfg.is_none();
         let tags = official_tags(server, remote_only);
+        // registry 没有图标字段：有 GitHub 仓库就用 owner 头像，没有就回退字形。
+        let icon_url = repo_owner(repo).map(|o| github_avatar(&o));
+        let source_url = if repo.trim().is_empty() {
+            format!("{OFFICIAL_LIST}?search={}", raw_name.replace(' ', "%20"))
+        } else {
+            repo.trim().trim_end_matches(".git").to_string()
+        };
         let mut summary = clean_text(desc, 160);
         if summary.is_empty() {
             summary = format!("来自 MCP 官方 Registry：{raw_name}");
@@ -385,6 +510,8 @@ pub fn parse_official(v: &serde_json::Value) -> Vec<MarketEntry> {
             github_path: None,
             remote_only,
             tags,
+            icon_url,
+            source_url: Some(source_url),
         });
     }
     out
@@ -509,6 +636,16 @@ fn repo_owner(url: &str) -> Option<String> {
     parts.next().map(|s| s.to_string()).filter(|s| !s.is_empty())
 }
 
+/// GitHub owner 头像。
+///
+/// 必须走 `github.com/{owner}.png`：它会 302 到 `avatars.githubusercontent.com/u/<id>?v=4`
+/// 返回真实头像；而 `avatars.githubusercontent.com/{owner}` 不带 id 查询串时
+/// 只会返回 GitHub 的默认八爪猫图（实测 5065B，所有 owner 都一样），不能用。
+/// ureq 默认跟随重定向（上限 10 次），直接请求即可。
+fn github_avatar(owner: &str) -> String {
+    format!("https://github.com/{owner}.png")
+}
+
 // ============ 腾讯云广场 ============
 
 fn fetch_tencent() -> Result<Vec<MarketEntry>, String> {
@@ -590,6 +727,13 @@ pub fn parse_tencent_list(html: &str) -> Vec<MarketEntry> {
         if hosted {
             summary.push_str("（腾讯云托管版，远程端点，暂不支持安装）");
         }
+        // 上游自带的图标（qcloudimg CDN 或 github 头像），空串按没有处理。
+        let icon_url = item
+            .get("iconUrl")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
         let skill = Skill {
             id: format!("tencent.mcp.{id}"),
             name: clean_text(name, 40),
@@ -613,6 +757,8 @@ pub fn parse_tencent_list(html: &str) -> Vec<MarketEntry> {
             github_path: None,
             remote_only: hosted,
             tags,
+            icon_url,
+            source_url: Some(format!("{TENCENT_DETAIL}{id}")),
         });
     }
     out
@@ -788,6 +934,10 @@ fn download_github_skill(
         skill,
         remote_only: false,
         tags: vec![format!("{owner}/{repo}")],
+        icon_url: Some(github_avatar(owner)),
+        source_url: Some(format!(
+            "https://github.com/{owner}/{repo}/tree/{branch}/skills/{dir}"
+        )),
     })
 }
 
@@ -1013,11 +1163,26 @@ mod tests {
         assert!(npm.skill.summary.contains("WEATHER_KEY"));
         assert!(!npm.skill.summary.contains("DEBUG"), "非必填变量不该提示");
         assert_eq!(npm.tags, vec!["npm"]);
+        assert_eq!(
+            npm.icon_url.as_deref(),
+            Some("https://github.com/example.png"),
+            "有 GitHub 仓库就取 owner 头像（走 302 拿真实头像）"
+        );
+        assert_eq!(
+            npm.source_url.as_deref(),
+            Some("https://github.com/example/weather")
+        );
 
         let remote = &entries[1];
         assert!(remote.remote_only);
         assert!(remote.skill.mcp.is_none());
         assert_eq!(remote.tags, vec!["仅远程"]);
+        assert!(remote.icon_url.is_none(), "没有仓库就没有图标");
+        assert!(remote
+            .source_url
+            .as_deref()
+            .unwrap()
+            .starts_with(OFFICIAL_LIST), "没仓库时回落到 registry 搜索");
 
         let py = &entries[2];
         let cfg = py.skill.mcp.as_ref().unwrap();
@@ -1035,7 +1200,7 @@ mod tests {
     }
 
     // 真实页面里这段 JSON 是合法的（无转义），直接从 HTML 里截取。
-    const TENCENT_HTML: &str = r#"<html><script>{"mcp":{"list":[{"abstract":"云开发的一站式后端","categoryList":[{"categoryId":100,"name":"腾讯产品MCP"}],"isHosted":0,"mcpId":11698,"mcpName":"CloudBase-AI-ToolKit","readNum":35176,"srcAuthor":"TencentCloudBase","title":"云开发MCP"},{"abstract":"托管的浏览器工具","categoryList":[{"categoryId":101,"name":"开发者工具"}],"isHosted":1,"mcpId":10011,"mcpName":"edgeone-pages-mcp","readNum":31911,"srcAuthor":"TencentEdgeOne","title":"EdgeOne Pages"}]}}</script></html>"#;
+    const TENCENT_HTML: &str = r#"<html><script>{"mcp":{"list":[{"abstract":"云开发的一站式后端","categoryList":[{"categoryId":100,"name":"腾讯产品MCP"}],"iconUrl":"https://developer.qcloudimg.com/x/icon.png","isHosted":0,"mcpId":11698,"mcpName":"CloudBase-AI-ToolKit","readNum":35176,"srcAuthor":"TencentCloudBase","title":"云开发MCP"},{"abstract":"托管的浏览器工具","categoryList":[{"categoryId":101,"name":"开发者工具"}],"iconUrl":"","isHosted":1,"mcpId":10011,"mcpName":"edgeone-pages-mcp","readNum":31911,"srcAuthor":"TencentEdgeOne","title":"EdgeOne Pages"}]}}</script></html>"#;
 
     #[test]
     fn tencent_list_parses_escaped_payload() {
@@ -1061,6 +1226,15 @@ mod tests {
         assert_eq!(first.tags, vec!["腾讯产品MCP"], "标签直接用上游分类名");
         assert_eq!(entries[1].tags, vec!["开发者工具"]);
         assert!(entries[1].remote_only, "托管版应标注不可安装");
+        assert_eq!(
+            first.icon_url.as_deref(),
+            Some("https://developer.qcloudimg.com/x/icon.png")
+        );
+        assert_eq!(
+            first.source_url.as_deref(),
+            Some("https://cloud.tencent.com/developer/mcp/server/11698")
+        );
+        assert!(entries[1].icon_url.is_none(), "空 iconUrl 按没有处理");
     }
 
     const DETAIL_HTML: &str = r#"<details><summary>使用uvx</summary><pre><code class="hljs"><span class="hljs-punctuation">{</span>
@@ -1129,11 +1303,42 @@ mod tests {
         // 旧版本写的 marketplace.json 没有 tags 字段，不能因此整库丢失
         let mut v = serde_json::to_value(parse_official(&official_fixture())).unwrap();
         for e in v.as_array_mut().unwrap() {
-            e.as_object_mut().unwrap().remove("tags");
+            let obj = e.as_object_mut().unwrap();
+            obj.remove("tags");
+            obj.remove("icon_url");
+            obj.remove("source_url");
         }
         let entries: Vec<MarketEntry> = serde_json::from_value(v).unwrap();
         assert_eq!(entries.len(), 3);
         assert!(entries[0].tags.is_empty());
+        assert!(entries[0].icon_url.is_none());
+        assert!(entries[0].source_url.is_none());
+    }
+
+    #[test]
+    fn image_sniffing_accepts_real_headers_only() {
+        assert!(looks_like_image(&[0x89, b'P', b'N', b'G', 0x0d]));
+        assert!(looks_like_image(&[0xff, 0xd8, 0xff, 0xe0]));
+        assert!(looks_like_image(b"GIF89a..."));
+        assert!(looks_like_image(b"RIFF\0\0\0\0WEBPVP8 "));
+        assert!(looks_like_image(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"));
+        assert!(looks_like_image(b"  <?xml version=\"1.0\"?><svg></svg>"));
+        assert!(!looks_like_image(b"<!DOCTYPE html><html></html>"));
+        assert!(!looks_like_image(b"not an image"));
+        assert!(!looks_like_image(b"\x89PN"));
+    }
+
+    #[test]
+    fn icon_cache_path_is_stable_and_distinct() {
+        let a = icon_path_for("https://avatars.githubusercontent.com/anthropics");
+        let b = icon_path_for("https://avatar.githubusercontent.com/anthropics");
+        assert_eq!(
+            a,
+            icon_path_for("https://avatars.githubusercontent.com/anthropics"),
+            "同一 URL 必须映射到同一文件"
+        );
+        assert_ne!(a, b);
+        assert_eq!(a.extension().and_then(|e| e.to_str()), Some("img"));
     }
 
     #[test]

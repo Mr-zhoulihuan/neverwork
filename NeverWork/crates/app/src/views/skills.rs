@@ -1,15 +1,16 @@
-//! 技能市场：分类预览、搜索、筛选、排序与安装。
+//! 技能页：MCP 插件市场 / Skill（文本技能）两列。
 //!
-//! 布局对齐 `pic/Snipaste_2026-11-15_15-41-41.png`：
-//! 顶部「技能 / Agent 模板」+ 搜索框 → 分类卡片行 → 筛选条 + 排序 → 卡片网格。
+//! - MCP：官方 Registry + 腾讯云广场，安装后注册为外部进程工具；
+//! - Skill：`SKILL.md` 文本技能，GitHub 市场 + 已安装区，安装即落盘。
+//! 两列共用搜索 / 标签筛选 / 排序；点卡片主体从右侧打开详情抽屉。
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, FontWeight, SharedString};
+use gpui::{div, img, px, Context, FontWeight, SharedString};
 
 use neverwork_ui::theme;
 
 use crate::marketplace::{MarketEntry, MarketSource};
-use crate::state::{AppState, FormField, SettingsTab};
+use crate::state::{AppState, FormField};
 use crate::views::text_fit::fit_text;
 
 /// 卡片最小宽度（决定每行能放几张）。
@@ -33,14 +34,14 @@ impl AppState {
         // ===== 顶部：Tab + 搜索 =====
         col = col.child(self.skills_header(cx));
 
-        // 导入 .md：真实安装的另一个入口（解析 front-matter 后落盘）
-        if self.skill_import_open && self.skills_tab == 0 {
+        // 导入 .md：只属于 Skill 列（MCP 插件的入口是安装）
+        if self.skill_import_open && self.skills_tab == 1 {
             col = col.child(self.skill_import_row(cx));
         }
 
         col = col.child(match self.skills_tab {
-            0 => self.skills_market(cx).into_any_element(),
-            _ => self.agent_templates(cx).into_any_element(),
+            0 => self.mcp_market(cx).into_any_element(),
+            _ => self.skill_tab(cx).into_any_element(),
         });
 
         col
@@ -84,7 +85,7 @@ impl AppState {
                             } else {
                                 theme::muted()
                             })
-                            .child("✦ 技能"),
+                            .child("◇ MCP"),
                     ),
             )
             .child(
@@ -110,7 +111,7 @@ impl AppState {
                             } else {
                                 theme::muted()
                             })
-                            .child("◈ Agent 模板"),
+                            .child("✦ Skill"),
                     ),
             )
             .when(!narrow, |d| d.child(div().flex_1()));
@@ -192,38 +193,40 @@ impl AppState {
 
         head = head.child(search);
 
-        // 导入按钮：展开 .md 路径输入（技能要真实落盘，不只是市场里点安装）
-        head = head.child(
-            div()
-                .id("skill-import-toggle")
-                .px_3()
-                .py_1()
-                .rounded_full()
-                .border_1()
-                .border_color(if self.skill_import_open {
-                    theme::accent_line()
-                } else {
-                    theme::border()
-                })
-                .text_xs()
-                .text_color(theme::accent())
-                .cursor_pointer()
-                .hover(|d| d.bg(theme::raised()))
-                .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                    if this.skill_import_open {
-                        this.skill_import_open = false;
-                        this.active_field = None;
-                        this.field_buf.reset("");
+        // 导入按钮：只属于 Skill 列（MCP 插件的入口是安装）
+        if self.skills_tab == 1 {
+            head = head.child(
+                div()
+                    .id("skill-import-toggle")
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(if self.skill_import_open {
+                        theme::accent_line()
                     } else {
-                        this.skill_import_open = true;
-                        this.import_path.clear();
-                        this.begin_field(FormField::ImportPath, cx);
-                        window.focus(&this.editor_focus);
-                    }
-                    cx.notify();
-                }))
-                .child("⇪ 导入 SKILL.md"),
-        );
+                        theme::border()
+                    })
+                    .text_xs()
+                    .text_color(theme::accent())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()))
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                        if this.skill_import_open {
+                            this.skill_import_open = false;
+                            this.active_field = None;
+                            this.field_buf.reset("");
+                        } else {
+                            this.skill_import_open = true;
+                            this.import_path.clear();
+                            this.begin_field(FormField::ImportPath, cx);
+                            window.focus(&this.editor_focus);
+                        }
+                        cx.notify();
+                    }))
+                    .child("⇪ 导入 SKILL.md"),
+            );
+        }
         head
     }
 
@@ -339,9 +342,9 @@ impl AppState {
             )
     }
 
-    // ==================== 技能市场 ====================
+    // ==================== MCP 市场 ====================
 
-    fn skills_market(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn mcp_market(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut col = div().flex().flex_col().gap_4();
 
         // ---- 工具条：来源 + 同步状态 + 刷新 + 镜像（一行） ----
@@ -352,47 +355,10 @@ impl AppState {
         // ---- 卡片网格 ----
         let list = self.filtered_entries();
         if list.is_empty() {
-            let hint = if self.market_loading {
-                "正在从远端拉取…"
-            } else if self.market_error.is_some() {
-                "拉取失败，且本地没有缓存"
-            } else if self.skill_search.trim().is_empty() && self.market_tag.is_none() {
-                "该来源暂无条目，点「⟳」刷新重试"
-            } else {
-                "换个关键词，或点「全部」看完整列表"
-            };
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_2()
-                    .py_8()
-                    .text_sm()
-                    .text_color(theme::dim())
-                    .child("没有匹配的条目")
-                    .child(div().text_xs().child(hint)),
-            );
+            col = col.child(self.market_empty_hint());
             return col;
         }
-
-        // 列数按当前可用宽度算，窗口窄时自动减少。
-        let per_row = self.skill_columns();
-        let mut grid = div().flex().flex_col().gap_3();
-        for chunk in list.chunks(per_row) {
-            let mut r = div().flex().flex_row().gap_3();
-            for (entry, installed) in chunk {
-                r = r.child(self.skill_card(entry, *installed, cx));
-            }
-            // 补齐空位，保持卡片等宽
-            for _ in chunk.len()..per_row {
-                r = r.child(div().flex_1().min_w(px(MIN_CARD_W)));
-            }
-            grid = grid.child(r);
-        }
-        col = col.child(grid);
-
-        col
+        col.child(self.market_grid(list, cx))
     }
 
     /// 当前宽度下每行能放几张卡片。
@@ -403,10 +369,17 @@ impl AppState {
     }
 
     /// 市场工具条：来源切换 + 同步状态 + 刷新 + 镜像（一行）。
+    ///
+    /// 来源按 Tab 分组：MCP 列只有官方 / 腾讯云，Skill 列只有 GitHub。
     fn market_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = div().flex().items_center().gap_1().flex_wrap();
 
-        for src in MarketSource::all() {
+        let sources: Vec<MarketSource> = if self.skills_tab == 0 {
+            vec![MarketSource::Official, MarketSource::Tencent]
+        } else {
+            vec![MarketSource::GitHub]
+        };
+        for src in sources {
             let on = self.market_source == src;
             row = row.child(
                 div()
@@ -481,26 +454,28 @@ impl AppState {
         );
 
         // 镜像开关（MCP 安装依赖走国内源，与设置页同一个开关）
-        let mirror = self.settings.mcp_mirror;
-        row = row.child(
-            div()
-                .id("market-mirror")
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .text_xs()
-                .cursor_pointer()
-                .when(mirror, |d| {
-                    d.text_color(theme::accent()).bg(theme::accent_soft())
-                })
-                .when(!mirror, |d| {
-                    d.text_color(theme::dim()).hover(|d| d.bg(theme::raised()))
-                })
-                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
-                    this.toggle_mcp_mirror(cx);
-                }))
-                .child(if mirror { "镜像 开" } else { "镜像 关" }),
-        );
+        if self.skills_tab == 0 {
+            let mirror = self.settings.mcp_mirror;
+            row = row.child(
+                div()
+                    .id("market-mirror")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(mirror, |d| {
+                        d.text_color(theme::accent()).bg(theme::accent_soft())
+                    })
+                    .when(!mirror, |d| {
+                        d.text_color(theme::dim()).hover(|d| d.bg(theme::raised()))
+                    })
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                        this.toggle_mcp_mirror(cx);
+                    }))
+                    .child(if mirror { "镜像 开" } else { "镜像 关" }),
+            );
+        }
 
         row
     }
@@ -678,6 +653,8 @@ impl AppState {
     }
 
     /// 技能市场里的一张卡片（市场条目驱动，安装走 [`AppState::install_market_entry`]）。
+    ///
+    /// 点卡片主体打开详情抽屉；安装 / 卸载 / 确认按钮自己吃掉点击，不会连带打开。
     fn skill_card(
         &self,
         entry: &MarketEntry,
@@ -690,6 +667,7 @@ impl AppState {
         let id = skill.id.clone();
         let id_for_btn = id.clone();
         let entry_for_btn = entry.clone();
+        let entry_for_open = entry.clone();
         let mcp = skill.is_mcp();
         let remote_only = entry.remote_only;
         let busy_here = self.market_installing.as_deref() == Some(skill.id.as_str());
@@ -749,23 +727,34 @@ impl AppState {
         }
 
         // 头部：图标 + 名称 + 作者，阅读量靠右
+        let icon: gpui::AnyElement = match crate::marketplace::icon_path(entry) {
+            // 真实图标：本地缓存文件（gpui 按字节嗅探格式，扩展名无关）
+            Some(path) => div()
+                .size(px(26.0))
+                .flex_shrink_0()
+                .rounded_md()
+                .overflow_hidden()
+                .child(img(path).size(px(26.0)).object_fit(gpui::ObjectFit::Cover))
+                .into_any_element(),
+            // 没有图（或还没下载完）回退字形方块
+            None => div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(26.0))
+                .flex_shrink_0()
+                .rounded_md()
+                .bg(theme::with_alpha(hue, 0.16))
+                .text_xs()
+                .text_color(gpui::rgb(hue))
+                .child(SharedString::from(skill.glyph.clone()))
+                .into_any_element(),
+        };
         let mut head = div()
             .flex()
             .items_start()
             .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(26.0))
-                    .flex_shrink_0()
-                    .rounded_md()
-                    .bg(theme::with_alpha(hue, 0.16))
-                    .text_xs()
-                    .text_color(gpui::rgb(hue))
-                    .child(SharedString::from(skill.glyph.clone())),
-            )
+            .child(icon)
             .child(
                 div()
                     .flex()
@@ -801,6 +790,7 @@ impl AppState {
         }
 
         div()
+            .id(SharedString::from(format!("skill-card-{id_for_btn}")))
             .flex()
             .flex_col()
             .gap_2()
@@ -811,6 +801,11 @@ impl AppState {
             .border_1()
             .border_color(theme::border())
             .bg(theme::panel())
+            .cursor_pointer()
+            .hover(|d| d.border_color(theme::accent_line()).bg(theme::raised()))
+            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                this.open_market_detail(entry_for_open.clone(), cx);
+            }))
             .child(head)
             // 摘要：两行高度（行高固定 16px，否则文字会被压扁），带省略号
             .child(
@@ -846,6 +841,7 @@ impl AppState {
                                     .cursor_pointer()
                                     .hover(|d| d.bg(theme::with_alpha(0x22c55e, 0.2)))
                                     .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                                        cx.stop_propagation();
                                         this.uninstall_skill(&id, cx);
                                     }))
                             })
@@ -864,6 +860,7 @@ impl AppState {
                                 .cursor_pointer()
                                 .on_click(cx.listener(
                                     move |this, _: &gpui::ClickEvent, _w, cx| {
+                                        cx.stop_propagation();
                                         this.install_market_entry(entry_for_btn.clone(), cx);
                                     },
                                 ))
@@ -921,6 +918,7 @@ impl AppState {
                                         .cursor_pointer()
                                         .hover(|d| d.bg(theme::raised()))
                                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                            cx.stop_propagation();
                                             this.cancel_mcp_install(cx);
                                         }))
                                         .child("取消"),
@@ -937,6 +935,7 @@ impl AppState {
                                         .cursor_pointer()
                                         .hover(|d| d.opacity(0.88))
                                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                            cx.stop_propagation();
                                             this.confirm_mcp_install(cx);
                                         }))
                                         .child("确认安装"),
@@ -946,182 +945,195 @@ impl AppState {
             })
     }
 
-    // ==================== Agent 模板 ====================
+    // ==================== Skill（文本技能） ====================
 
-    fn agent_templates(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut col = div().flex().flex_col().gap_3();
+    /// Skill 列：已安装区 + GitHub `SKILL.md` 市场。
+    fn skill_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut col = div().flex().flex_col().gap_5();
+        col = col.child(self.installed_skills_section(cx));
+        col = col.child(self.market_bar(cx));
+        col = col.child(self.market_filters(cx));
 
+        let list = self.filtered_entries();
+        if list.is_empty() {
+            col = col.child(self.market_empty_hint());
+            return col;
+        }
+        col.child(self.market_grid(list, cx))
+    }
+
+    /// 已安装的文本技能（MCP 插件不在这里，它们归 MCP 列）。
+    fn installed_text_skills(&self) -> Vec<neverwork_core::Skill> {
+        let mut out: Vec<neverwork_core::Skill> = self
+            .settings
+            .skills
+            .iter()
+            .filter(|s| !s.is_mcp() && self.is_skill_installed(&s.id))
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        out
+    }
+
+    /// 已安装区：有技能时列小卡，没有时给一行提示。
+    fn installed_skills_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let skills = self.installed_text_skills();
+        let mut col = div().flex().flex_col().gap_2();
         col = col.child(
             div()
-                .text_xs()
-                .text_color(theme::dim())
-                .child("模板是预置的团队编排，套用后会成为「当前团队」。之后的增删角色在团队编辑器里做。"),
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::fg())
+                        .child(SharedString::from(format!("已安装 {}", skills.len()))),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::dim())
+                        .child("发送消息时整段注入提示词"),
+                ),
         );
-
-        let templates: [(&str, &str, &str, &str); 3] = [
-            (
-                "流水线三人组",
-                "⊞",
-                "Planner 拆解 → Coder 实现 → Reviewer 审查。适合有明确交付物的改造任务。",
-                "pipeline",
-            ),
-            (
-                "并行探索团",
-                "⋮⋮",
-                "三个角色同时从不同角度给方案，最后由你挑选。适合技术选型与方案评审。",
-                "parallel",
-            ),
-            (
-                "单人对练",
-                "◐",
-                "一个角色走完全程，回答更集中、token 更省。适合问答与代码片段生成。",
-                "solo",
-            ),
-        ];
-
-        for (name, glyph, desc, kind) in templates {
-            let kind = kind.to_string();
-            col = col.child(
+        if skills.is_empty() {
+            return col.child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .p_4()
+                    .px_3()
+                    .py_2()
                     .rounded_lg()
                     .border_1()
                     .border_color(theme::border())
                     .bg(theme::panel())
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(36.0))
-                            .flex_shrink_0()
-                            .rounded_lg()
-                            .bg(theme::accent_soft())
-                            .text_sm()
-                            .text_color(theme::accent())
-                            .child(SharedString::from(glyph)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme::fg())
-                                    .child(SharedString::from(name)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::muted())
-                                    .child(SharedString::from(fit_text(desc, 520.0, 12.0))),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("apply-{name}")))
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .bg(theme::accent())
-                            .text_xs()
-                            .text_color(gpui::rgb(0xffffff))
-                            .cursor_pointer()
-                            .hover(|d| d.opacity(0.88))
-                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
-                                this.apply_template(&kind, cx);
-                            }))
-                            .child("套用"),
-                    ),
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .child("还没有安装 Skill：从下面挑一个，或点右上「导入 SKILL.md」"),
             );
         }
-
-        col = col.child(
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    div()
-                        .id("goto-team")
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .bg(theme::raised())
-                        .text_xs()
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .hover(|d| d.bg(theme::border()))
-                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
-                            this.open_settings(SettingsTab::Skills, cx);
-                            this.set_settings_tab(SettingsTab::Skills, cx);
-                        }))
-                        .child("查看已安装技能 →"),
-                ),
-        );
-
-        col
-    }
-
-    /// 套用模板：替换当前团队的编排与角色。
-    pub(crate) fn apply_template(&mut self, kind: &str, cx: &mut Context<Self>) {
-        use neverwork_core::{FlowMode, Team};
-
-        let team = match kind {
-            "pipeline" => Team {
-                id: "tpl-pipeline".into(),
-                name: "流水线三人组".into(),
-                flow: FlowMode::Pipeline,
-                roles: vec![
-                    role("planner", "Planner", "规划者", "P", 0, "负责拆解任务、制定步骤与验收标准。"),
-                    role("coder", "Coder", "编码", "C", 1, "负责实现代码改动，产出可运行的补丁。"),
-                    role("reviewer", "Reviewer", "审查者", "R", 2, "负责审查正确性、边界与性能，指出风险。"),
-                ],
-            },
-            "parallel" => Team {
-                id: "tpl-parallel".into(),
-                name: "并行探索团".into(),
-                flow: FlowMode::Parallel,
-                roles: vec![
-                    role("a", "方案 A", "探索", "A", 0, "从最保守的角度给出可行方案。"),
-                    role("b", "方案 B", "探索", "B", 1, "从最激进/最优性能的角度给出方案。"),
-                    role("c", "评判", "决策", "J", 2, "对比其余方案的取舍，给出推荐与理由。"),
-                ],
-            },
-            _ => Team {
-                id: "tpl-solo".into(),
-                name: "单人对练".into(),
-                flow: FlowMode::Pipeline,
-                roles: vec![role("solo", "Assistant", "助手", "A", 0, "直接、准确地回答问题，必要时给出代码。")],
-            },
-        };
-
-        self.config.teams.push(team.clone());
-        self.config.active_team_id = team.id.clone();
-        let name = team.name.clone();
-        match neverwork_core::config::save(&self.config) {
-            Ok(()) => self.action_msg = Some(format!("已套用模板「{name}」")),
-            Err(e) => self.action_msg = Some(format!("保存失败：{e}")),
+        let mut grid = div().flex().flex_wrap().gap_2();
+        for s in skills {
+            grid = grid.child(self.installed_skill_card(s, cx));
         }
-        self.center = crate::state::CenterView::Chat;
-        cx.notify();
+        col.child(grid)
     }
-}
 
-fn role(id: &str, name: &str, kind: &str, initial: &str, color: usize, prompt: &str) -> neverwork_core::Role {
-    let mut r = neverwork_core::Role::new(id, name, initial);
-    r.kind_label = kind.into();
-    r.color_index = color;
-    r.model = "gpt-4o".into();
-    r.prompt = prompt.into();
-    r
+    /// 已安装技能的小卡：名称 + 卸载 + 作者/摘要；点卡看详情。
+    fn installed_skill_card(
+        &self,
+        skill: neverwork_core::Skill,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let id = skill.id.clone();
+        let entry = MarketEntry::new(skill.clone());
+        div()
+            .id(SharedString::from(format!("installed-skill-{}", skill.id)))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w(px(240.0))
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme::green_line())
+            .bg(theme::green_soft())
+            .cursor_pointer()
+            .hover(|d| d.border_color(theme::accent_line()))
+            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                this.open_market_detail(entry.clone(), cx);
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::fg())
+                            .child(SharedString::from(fit_text(&skill.name, 150.0, 14.0))),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("uninstall-{}", skill.id)))
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(theme::red()))
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                                cx.stop_propagation();
+                                this.uninstall_skill(&id, cx);
+                            }))
+                            .child("卸载"),
+                    ),
+            )
+            .child(
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .child(SharedString::from(fit_text(&skill.author, 200.0, 11.0))),
+            )
+            .child(
+                div()
+                    .h(px(16.0))
+                    .overflow_hidden()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .child(SharedString::from(fit_text(&skill.summary, 200.0, 11.0))),
+            )
+    }
+
+    /// 市场卡片网格（按当前宽度分列，末行补空位保证等宽）。
+    fn market_grid(
+        &self,
+        list: Vec<(MarketEntry, bool)>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let per_row = self.skill_columns();
+        let mut grid = div().flex().flex_col().gap_3();
+        for chunk in list.chunks(per_row) {
+            let mut r = div().flex().flex_row().gap_3();
+            for (entry, installed) in chunk {
+                r = r.child(self.skill_card(entry, *installed, cx));
+            }
+            for _ in chunk.len()..per_row {
+                r = r.child(div().flex_1().min_w(px(MIN_CARD_W)));
+            }
+            grid = grid.child(r);
+        }
+        grid
+    }
+
+    /// 列表为空时的提示（区分「还在拉」「拉失败」「搜不到」）。
+    fn market_empty_hint(&self) -> impl IntoElement {
+        let hint = if self.market_loading {
+            "正在从远端拉取…"
+        } else if self.market_error.is_some() {
+            "拉取失败，且本地没有缓存"
+        } else if self.skill_search.trim().is_empty() && self.market_tag.is_none() {
+            "该来源暂无条目，点「⟳」刷新重试"
+        } else {
+            "换个关键词，或点「全部」看完整列表"
+        };
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_2()
+            .py_8()
+            .text_sm()
+            .text_color(theme::dim())
+            .child("没有匹配的条目")
+            .child(div().text_xs().child(hint))
+    }
 }
 
 /// 两个颜色按比例混合（分类卡片的色点曾用它；保留给后续标签配色）。

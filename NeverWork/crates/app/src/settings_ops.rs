@@ -302,8 +302,35 @@ impl AppState {
         cx.notify();
     }
 
+    /// 切换 MCP / Skill 两列。
+    ///
+    /// 来源跟着 Tab 归一：Skill 只展示 GitHub 技能；MCP 回到上次用的
+    /// MCP 来源（默认官方）。搜索词与标签随来源一起清。
     pub(crate) fn set_skills_tab(&mut self, tab: u8, cx: &mut Context<Self>) {
-        self.skills_tab = tab.min(1);
+        let tab = tab.min(1);
+        if self.skills_tab == tab {
+            return;
+        }
+        self.skills_tab = tab;
+        let target = if tab == 1 {
+            MarketSource::GitHub
+        } else if self.market_source == MarketSource::GitHub {
+            self.mcp_source
+        } else {
+            self.market_source
+        };
+        self.set_market_source(target, cx);
+        cx.notify();
+    }
+
+    /// 打开条目详情抽屉（点卡片主体触发，安装按钮不触发）。
+    pub(crate) fn open_market_detail(&mut self, entry: MarketEntry, cx: &mut Context<Self>) {
+        self.market_detail = Some(entry);
+        cx.notify();
+    }
+
+    pub(crate) fn close_market_detail(&mut self, cx: &mut Context<Self>) {
+        self.market_detail = None;
         cx.notify();
     }
 
@@ -407,8 +434,17 @@ impl AppState {
     // ===== 真实市场 =====
 
     /// 切换市场来源；没有缓存且没在拉时自动拉一次。
+    ///
+    /// 来源与 Tab 绑定：GitHub 只属于 Skill 页，其余属于 MCP 页。
     pub(crate) fn set_market_source(&mut self, source: MarketSource, cx: &mut Context<Self>) {
+        if source == MarketSource::GitHub {
+            self.skills_tab = 1;
+        } else {
+            self.skills_tab = 0;
+            self.mcp_source = source;
+        }
         if self.market_source == source {
+            cx.notify();
             return;
         }
         self.market_source = source;

@@ -1381,7 +1381,9 @@ fn fmt_tokens(n: u64) -> String {
 }
 
 /// 渲染一个 Markdown 块。
-fn markdown_block(block: crate::markdown::Block, avail: f32) -> gpui::AnyElement {
+///
+/// `pub(crate)`：技能详情抽屉复用同一套渲染器。
+pub(crate) fn markdown_block(block: crate::markdown::Block, avail: f32) -> gpui::AnyElement {
     use crate::markdown::Block;
     match block {
         Block::Heading(level, text) => {

@@ -256,7 +256,7 @@ pub struct AppState {
     pub market_tag: Option<String>,
     /// 技能市场排序：0=综合 1=安装量 2=星标。
     pub skill_sort: u8,
-    /// 技能页顶部 Tab：0=技能 1=Agent 模板。
+    /// 技能页顶部 Tab：0=MCP 1=Skill。
     pub skills_tab: u8,
     /// 技能搜索关键词。
     pub skill_search: String,
@@ -290,8 +290,12 @@ pub struct AppState {
     pub pending_mcp_attach: Option<usize>,
     /// 技能导入（.md）输入行是否展开。
     pub skill_import_open: bool,
-    /// 技能市场当前来源（官方 / 腾讯云 / GitHub）。
+    /// 技能市场当前来源（MCP 页：官方 / 腾讯云；Skill 页：GitHub）。
     pub market_source: MarketSource,
+    /// MCP 页上次使用的来源；从 Skill 页切回来时恢复（默认官方）。
+    pub mcp_source: MarketSource,
+    /// 详情抽屉里的条目；`None` 表示抽屉关闭。
+    pub market_detail: Option<MarketEntry>,
     /// 各来源最近一次拉到的条目（内存，不序列化）。
     pub market_entries: std::collections::HashMap<MarketSource, Vec<MarketEntry>>,
     /// 各来源上次成功同步的时间。
@@ -631,6 +635,8 @@ impl AppState {
             pending_mcp_attach: None,
             skill_import_open: false,
             market_source: MarketSource::Official,
+            mcp_source: MarketSource::Official,
+            market_detail: None,
             market_entries,
             market_fetched_at,
             market_loading: false,
@@ -728,6 +734,34 @@ impl AppState {
             if let Some(src) = MarketSource::from_key(&k) {
                 me.market_source = src;
             }
+        }
+        // 验证用：预选技能页 Tab（0=MCP 1=Skill）。来源跟着 Tab 归一：
+        // Skill 页只展示 GitHub 技能，MCP 页不展示 GitHub。
+        if let Ok(v) = std::env::var("NW_SKILLS_TAB") {
+            if let Ok(tab) = v.parse::<u8>() {
+                me.skills_tab = tab.min(1);
+            }
+        }
+        if me.skills_tab == 1 {
+            me.market_source = MarketSource::GitHub;
+        } else if me.market_source == MarketSource::GitHub {
+            me.market_source = me.mcp_source;
+        }
+        // 验证用：启动即打开详情抽屉（`1` = 当前来源第一条，或写条目 id）。
+        if let Ok(v) = std::env::var("NW_MARKET_DETAIL") {
+            let id = v.trim();
+            me.market_detail = if id.is_empty() || id == "1" {
+                me.market_entries
+                    .get(&me.market_source)
+                    .and_then(|l| l.first().cloned())
+                    .or_else(|| me.current_market_items().into_iter().next())
+            } else {
+                me.market_entries
+                    .values()
+                    .flatten()
+                    .find(|e| e.skill.id == id)
+                    .cloned()
+            };
         }
         // 启动即刷新当前来源；NW_MARKET_NO_REFRESH=1 时只读缓存（离线验收用）。
         if !std::env::var("NW_MARKET_NO_REFRESH")
@@ -1724,7 +1758,10 @@ impl AppState {
                 }
             }
             KeyAction::Escape => {
-                if self.new_session_picker {
+                if self.market_detail.is_some() {
+                    // 详情抽屉在最上层，Esc 先关它
+                    self.close_market_detail(cx);
+                } else if self.new_session_picker {
                     self.close_new_session_picker(cx);
                 } else if self.model_picker.is_some() {
                     self.close_model_picker(cx);
@@ -3141,6 +3178,10 @@ impl Render for AppState {
 
         if self.palette_open {
             root = root.child(self.palette_overlay(cx).into_any_element());
+        }
+        // 条目详情：从右侧抽出 420px 抽屉（技能页里点卡片打开）。
+        if self.market_detail.is_some() {
+            root = root.child(self.market_detail_overlay(cx).into_any_element());
         }
         // 新建会话：先选运行模式（单助手 / 团队），选定后不可切换。
         if self.new_session_picker {
