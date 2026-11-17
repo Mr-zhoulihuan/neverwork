@@ -1,7 +1,7 @@
 use super::*;
 use gpui::{img, ClickEvent};
 
-use crate::state::FormField;
+use crate::state::{FormField, InputTarget, SettingsTab};
 use crate::views::text_fit::fit_text;
 
 impl AppState {
@@ -53,7 +53,7 @@ impl AppState {
 
         let mut body = div().id("team-scroll").flex().flex_col().gap_4().px_6().py_5().flex_1().overflow_scroll();
 
-        // 团队名 + 协作说明
+        // ---- 团队名 + 切换下拉 + 管理操作 ----
         body = body.child(
             div()
                 .flex()
@@ -77,10 +77,167 @@ impl AppState {
                         .flex_col()
                         .gap_1()
                         .flex_1()
-                        .child(div().text_sm().font_weight(FontWeight::BOLD).child(SharedString::from(team.name.clone())))
+                        .min_w(px(0.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("team-switch")
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .px_1()
+                                        .py_0p5()
+                                        .rounded_md()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .cursor_pointer()
+                                        .hover(|d| d.bg(theme::raised()))
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                            this.team_menu_open = !this.team_menu_open;
+                                            this.team_delete_confirm = false;
+                                            this.commit_role_prompt();
+                                            cx.notify();
+                                        }))
+                                        .child(SharedString::from(team.name.clone()))
+                                        .child(div().text_xs().text_color(theme::dim()).child("▾")),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::dim())
+                                        .child(SharedString::from(format!("{} 个角色", team.roles.len()))),
+                                ),
+                        )
                         .child(div().text_xs().text_color(theme::muted()).child("协作：@ 点名或首角色先行")),
+                )
+                .child(
+                    div()
+                        .id("team-rename")
+                        .flex_shrink_0()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme::raised())
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::border()))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.rename_team(window, cx);
+                        }))
+                        .child("重命名"),
+                )
+                .child(
+                    div()
+                        .id("team-delete")
+                        .flex_shrink_0()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(theme::red())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::border()))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.delete_team(cx);
+                        }))
+                        .child(if self.team_delete_confirm { "确认删除？" } else { "删除" }),
                 ),
         );
+
+        // 重命名输入行（回车 / 失焦提交，立即写盘）
+        if self.active_field == Some(FormField::TeamName) {
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pl(px(52.0))
+                    .child(crate::views::settings::input_box(
+                        SharedString::from("team-name-input"),
+                        self.field_buf.text().to_string(),
+                        "团队名称",
+                        true,
+                        self.editor_focus.clone(),
+                        self.field_area_bounds.clone(),
+                        cx,
+                        FormField::TeamName,
+                    ))
+                    .child(div().text_xs().text_color(theme::dim()).child("回车保存")),
+            );
+        }
+
+        // 团队切换下拉（内联展开，不遮住下面的角色卡）
+        if self.team_menu_open {
+            let mut menu = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme::border())
+                .bg(theme::panel());
+            for (ti, t) in self.config.teams.iter().enumerate() {
+                let on = t.id == self.config.active_team_id;
+                let id = t.id.clone();
+                let name = t.name.clone();
+                let n = t.roles.len();
+                menu = menu.child(
+                    div()
+                        .id(SharedString::from(format!("team-option-{ti}")))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1p5()
+                        .rounded_md()
+                        .when(on, |d| d.bg(theme::accent_soft()))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::raised()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                            this.select_team(id.clone(), cx);
+                        }))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(if on { theme::accent() } else { theme::fg() })
+                                .child(SharedString::from(name)),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::dim())
+                                .child(SharedString::from(format!("{n} 个角色"))),
+                        ),
+                );
+            }
+            menu = menu.child(
+                div()
+                    .id("team-new")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .py_1p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme::border())
+                    .text_xs()
+                    .text_color(theme::accent())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.add_team(window, cx);
+                    }))
+                    .child("＋ 新建团队"),
+            );
+            body = body.child(menu);
+        }
 
         // 角色卡
         let mut roles = div().flex().flex_col().gap_2();
@@ -200,27 +357,27 @@ impl AppState {
                             .text_xs()
                             .text_color(theme::muted())
                             .child(div().text_color(theme::accent()).child("◆"))
-                            .child(SharedString::from(format!("模型：{}", role.model)))
+                            .child(SharedString::from(format!("模型：{}", self.role_model_label(role))))
                             .child(div().flex_1())
                             .child(div().text_xs().text_color(theme::dim()).child(SharedString::from(truncate(&role.prompt, 28)))),
                     ),
             )
             .child(
                 div()
-                    .id(SharedString::from(format!("toggle-model-{idx}")))
+                    .id(SharedString::from(format!("edit-role-{idx}")))
                     .flex_shrink_0()
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(theme::raised())
+                    .bg(if self.role_edit_index == Some(idx) { theme::accent_soft() } else { theme::raised() })
                     .text_xs()
-                    .text_color(theme::muted())
+                    .text_color(if self.role_edit_index == Some(idx) { theme::accent() } else { theme::muted() })
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::border()))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                        this.cycle_role_model(idx, cx);
+                        this.toggle_role_edit(idx, cx);
                     }))
-                    .child("换模型"),
+                    .child(if self.role_edit_index == Some(idx) { "收起" } else { "编辑" }),
             )
             .child(
                 div()
@@ -271,6 +428,11 @@ impl AppState {
         );
         card = card.child(plugins);
 
+        // ---- 内联展开的角色编辑 ----
+        if self.role_edit_index == Some(idx) {
+            card = card.child(self.role_edit_panel(idx, role, cx));
+        }
+
         // ---- 展开的插件市场面板 ----
         if open {
             card = card.child(self.role_skill_panel(idx, role, cx));
@@ -287,45 +449,318 @@ impl AppState {
     }
 
     pub(crate) fn add_role(&mut self, cx: &mut Context<Self>) {
+        // 先提交上一个角色的提示词/字段，再改列表（下标会变）。
+        self.close_role_edit(cx);
+        self.close_role_skill_picker(cx);
         let ti = self.active_team_index();
+        let mut new_idx = None;
         if let Some(team) = self.config.teams.get_mut(ti) {
             let n = team.roles.len();
             let id = format!("role-{n}");
             let mut role = neverwork_core::Role::new(id, format!("角色{}", n + 1), "A");
             role.kind_label = "自定义".into();
             role.color_index = n % 6;
-            role.model = "gpt-4o".into();
             role.prompt = "负责你分配的职责。".into();
             team.roles.push(role);
+            new_idx = Some(n);
+        }
+        // 新角色直接展开编辑，省一次点击。
+        if let Some(i) = new_idx {
+            self.role_edit_index = Some(i);
+            let prompt = self.edited_role().map(|r| r.prompt.clone()).unwrap_or_default();
+            self.role_prompt_buf.reset(prompt);
+            self.role_prompt_buf.move_doc_end(false);
         }
         cx.notify();
     }
 
     pub(crate) fn remove_role(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.close_role_edit(cx);
+        self.close_role_skill_picker(cx);
         let ti = self.active_team_index();
         if let Some(team) = self.config.teams.get_mut(ti) {
             if team.roles.len() > 1 && idx < team.roles.len() {
                 team.roles.remove(idx);
-            }
-        }
-        // 下标会变，面板直接收起，避免后面的角色被误展开。
-        self.close_role_skill_picker(cx);
-    }
-
-    pub(crate) fn cycle_role_model(&mut self, idx: usize, cx: &mut Context<Self>) {
-        const MODELS: [&str; 4] = ["gpt-4o", "claude-sonnet-4-5", "deepseek-chat", "gpt-4o-mini"];
-        let ti = self.active_team_index();
-        if let Some(team) = self.config.teams.get_mut(ti) {
-            if let Some(role) = team.roles.get_mut(idx) {
-                let cur = role.model.clone();
-                let pos = MODELS.iter().position(|m| *m == cur).unwrap_or(0);
-                role.model = MODELS[(pos + 1) % MODELS.len()].to_string();
+            } else {
+                self.notice = Some("至少保留一个角色".into());
             }
         }
         cx.notify();
     }
 
+    /// 当前正在内联编辑的角色。
+    pub(crate) fn edited_role(&self) -> Option<&neverwork_core::Role> {
+        let idx = self.role_edit_index?;
+        self.config.active_team().and_then(|t| t.roles.get(idx))
+    }
+
+    pub(crate) fn edited_role_mut(&mut self) -> Option<&mut neverwork_core::Role> {
+        let idx = self.role_edit_index?;
+        let ti = self.active_team_index();
+        self.config.teams.get_mut(ti).and_then(|t| t.roles.get_mut(idx))
+    }
+
+    /// 角色当前生效模型的展示标签。
+    pub(crate) fn role_model_label(&self, role: &neverwork_core::Role) -> String {
+        if !role.provider_id.trim().is_empty() {
+            if let Some(p) = self
+                .settings
+                .providers
+                .iter()
+                .find(|p| p.id == role.provider_id && p.enabled && p.ready())
+            {
+                let model = if role.model.trim().is_empty() {
+                    p.effective_model()
+                } else {
+                    role.model.clone()
+                };
+                return format!("{} · {}", p.name, model);
+            }
+        }
+        if role.model.trim().is_empty() {
+            "跟随会话默认".into()
+        } else {
+            format!("跟随会话 · {}", role.model)
+        }
+    }
+
+    /// 展开 / 收起角色的内联编辑（与插件面板互斥）。
+    pub(crate) fn toggle_role_edit(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.role_edit_index == Some(idx) {
+            self.close_role_edit(cx);
+            return;
+        }
+        self.close_role_edit(cx);
+        let Some(role) = self.config.active_team().and_then(|t| t.roles.get(idx)) else {
+            return;
+        };
+        let prompt = role.prompt.clone();
+        self.role_edit_index = Some(idx);
+        self.role_model_picker = None;
+        self.role_prompt_buf.reset(prompt);
+        self.role_prompt_buf.move_doc_end(false);
+        self.close_role_skill_picker(cx);
+        self.team_delete_confirm = false;
+        cx.notify();
+    }
+
+    /// 收起编辑：先提交提示词缓冲与单行字段，再清状态。
+    pub(crate) fn close_role_edit(&mut self, cx: &mut Context<Self>) {
+        if self.input_target == InputTarget::RolePrompt {
+            let text = self.role_prompt_buf.text().to_string();
+            if !text.trim().is_empty() {
+                if let Some(role) = self.edited_role_mut() {
+                    role.prompt = text;
+                }
+            }
+            self.input_target = InputTarget::Chat;
+            self.marked_range = None;
+        }
+        if matches!(
+            self.active_field,
+            Some(FormField::RoleName) | Some(FormField::RoleKind) | Some(FormField::RoleInitial)
+        ) {
+            self.commit_field(cx);
+        }
+        self.role_edit_index = None;
+        self.role_model_picker = None;
+        self.role_prompt_buf.reset("");
+        self.team_delete_confirm = false;
+        cx.notify();
+    }
+
+    /// 点击提示词块：装入缓冲并切换输入目标。
+    pub(crate) fn begin_role_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.role_edit_index.is_none() || self.input_target == InputTarget::RolePrompt {
+            return;
+        }
+        if self.active_field.is_some() {
+            self.commit_field(cx);
+        }
+        let text = self.edited_role().map(|r| r.prompt.clone()).unwrap_or_default();
+        self.role_prompt_buf.reset(text);
+        self.role_prompt_buf.move_doc_end(false);
+        self.switch_input_target(InputTarget::RolePrompt);
+        cx.notify();
+    }
+
+    /// 把提示词缓冲写回角色（不收起面板；保存 / 切团队前调用）。
+    pub(crate) fn commit_role_prompt(&mut self) {
+        if self.input_target != InputTarget::RolePrompt {
+            return;
+        }
+        let text = self.role_prompt_buf.text().to_string();
+        if !text.trim().is_empty() {
+            if let Some(role) = self.edited_role_mut() {
+                role.prompt = text;
+            }
+        }
+    }
+
+    pub(crate) fn toggle_role_model_picker(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.role_edit_index != Some(idx) {
+            return;
+        }
+        self.role_model_picker = if self.role_model_picker == Some(idx) {
+            None
+        } else {
+            Some(idx)
+        };
+        cx.notify();
+    }
+
+    /// 选中已配置模型；厂商 id 与模型 id 一起写入角色。
+    pub(crate) fn select_role_model(
+        &mut self,
+        idx: usize,
+        provider_id: String,
+        model: String,
+        cx: &mut Context<Self>,
+    ) {
+        let ti = self.active_team_index();
+        if let Some(role) = self.config.teams.get_mut(ti).and_then(|t| t.roles.get_mut(idx)) {
+            role.provider_id = provider_id;
+            role.model = model;
+        }
+        self.role_model_picker = None;
+        cx.notify();
+    }
+
+    // ===== 团队 CRUD =====
+
+    /// 切换团队/删除前后的统一清场：所有面板下标都失去意义。
+    fn clear_team_edit_state(&mut self) {
+        self.role_skill_picker = None;
+        self.role_skill_search.clear();
+        self.role_skill_filter = 0;
+        self.role_edit_index = None;
+        self.role_model_picker = None;
+        self.role_prompt_buf.reset("");
+        if matches!(
+            self.active_field,
+            Some(FormField::RoleName)
+                | Some(FormField::RoleKind)
+                | Some(FormField::RoleInitial)
+                | Some(FormField::RoleSkillSearch)
+                | Some(FormField::TeamName)
+        ) {
+            self.active_field = None;
+        }
+        if self.input_target == InputTarget::RolePrompt {
+            self.input_target = InputTarget::Chat;
+        }
+        self.marked_range = None;
+        self.field_buf.reset("");
+        self.market_detail_role = None;
+        self.pending_mcp_attach = None;
+    }
+
+    pub(crate) fn select_team(&mut self, id: String, cx: &mut Context<Self>) {
+        self.team_menu_open = false;
+        self.team_delete_confirm = false;
+        if self.config.active_team_id == id {
+            cx.notify();
+            return;
+        }
+        if self.active_field.is_some() {
+            self.commit_field(cx);
+        }
+        self.commit_role_prompt();
+        self.clear_team_edit_state();
+        self.config.active_team_id = id;
+        match neverwork_core::config::save(&self.config) {
+            Ok(()) => {}
+            Err(e) => self.notice = Some(format!("切换团队保存失败：{e}")),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn add_team(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        if self.active_field.is_some() {
+            self.commit_field(cx);
+        }
+        self.commit_role_prompt();
+        self.clear_team_edit_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut id = format!("team-{now}");
+        let mut n = 2;
+        while self.config.teams.iter().any(|t| t.id == id) {
+            id = format!("team-{now}-{n}");
+            n += 1;
+        }
+        let team_no = self.config.teams.len() + 1;
+        let mut role = neverwork_core::Role::new(format!("role-{now}"), "助手", "A");
+        role.kind_label = "自定义".into();
+        role.prompt = "负责你分配的职责。".into();
+        role.color_index = 0;
+        self.config.teams.push(neverwork_core::Team {
+            id: id.clone(),
+            name: format!("新团队 {team_no}"),
+            flow: neverwork_core::FlowMode::Pipeline,
+            roles: vec![role],
+        });
+        self.config.active_team_id = id;
+        match neverwork_core::config::save(&self.config) {
+            Ok(()) => self.notice = Some("已新建团队，接着给它起个名字".into()),
+            Err(e) => self.notice = Some(format!("保存失败：{e}")),
+        }
+        self.team_menu_open = false;
+        self.begin_field(FormField::TeamName, cx);
+        window.focus(&self.editor_focus);
+        cx.notify();
+    }
+
+    pub(crate) fn rename_team(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        self.team_menu_open = false;
+        self.team_delete_confirm = false;
+        self.begin_field(FormField::TeamName, cx);
+        window.focus(&self.editor_focus);
+        cx.notify();
+    }
+
+    pub(crate) fn delete_team(&mut self, cx: &mut Context<Self>) {
+        self.team_menu_open = false;
+        if self.config.teams.len() <= 1 {
+            self.team_delete_confirm = false;
+            self.notice = Some("至少保留一个团队".into());
+            cx.notify();
+            return;
+        }
+        if !self.team_delete_confirm {
+            self.team_delete_confirm = true;
+            cx.notify();
+            return;
+        }
+        if self.active_field.is_some() {
+            self.commit_field(cx);
+        }
+        self.commit_role_prompt();
+        self.clear_team_edit_state();
+        let ti = self.active_team_index();
+        let removed = self.config.teams.remove(ti);
+        self.config.active_team_id = self
+            .config
+            .teams
+            .first()
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        self.team_delete_confirm = false;
+        match neverwork_core::config::save(&self.config) {
+            Ok(()) => self.notice = Some(format!("已删除团队「{}」", removed.name)),
+            Err(e) => self.notice = Some(format!("保存失败：{e}")),
+        }
+        cx.notify();
+    }
+
     pub(crate) fn save_team(&mut self, cx: &mut Context<Self>) {
+        // 先把正在编辑的字段与提示词缓冲写回内存，再落盘。
+        if self.active_field.is_some() {
+            self.commit_field(cx);
+        }
+        self.commit_role_prompt();
         // 确保 active_team_id 指向存在的团队。
         if !self.config.teams.iter().any(|t| t.id == self.config.active_team_id) {
             if let Some(first) = self.config.teams.first() {
@@ -344,6 +779,10 @@ impl AppState {
         if self.role_skill_picker == Some(idx) {
             self.close_role_skill_picker(cx);
             return;
+        }
+        // 同一张卡上两个大面板会互相挤，编辑面板先收起来。
+        if self.role_edit_index.is_some() {
+            self.close_role_edit(cx);
         }
         self.role_skill_picker = Some(idx);
         self.role_skill_search.clear();
@@ -364,6 +803,372 @@ impl AppState {
             self.active_field = None;
         }
         cx.notify();
+    }
+
+    /// 角色卡内联编辑面板：名称 / 类型 / 首字母 / 模型下拉 / 多行提示词。
+    fn role_edit_panel(&self, idx: usize, role: &neverwork_core::Role, cx: &mut Context<Self>) -> impl IntoElement {
+        // 单行字段：编辑态显示 field_buf（边打边看），否则显示角色现值。
+        let field_text = |field: FormField, cur: String| -> String {
+            if self.active_field == Some(field) {
+                self.field_buf.text().to_string()
+            } else {
+                cur
+            }
+        };
+        let editing_prompt = self.input_target == InputTarget::RolePrompt;
+        let label_w = px(44.0);
+
+        let name_row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().w(label_w).flex_shrink_0().text_xs().text_color(theme::dim()).child("名称"))
+            .child(crate::views::settings::input_box(
+                SharedString::from(format!("role-name-input-{idx}")),
+                field_text(FormField::RoleName, role.name.clone()),
+                "角色名称",
+                self.active_field == Some(FormField::RoleName),
+                self.editor_focus.clone(),
+                self.field_area_bounds.clone(),
+                cx,
+                FormField::RoleName,
+            ));
+
+        let kind_row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().w(label_w).flex_shrink_0().text_xs().text_color(theme::dim()).child("类型"))
+            .child(crate::views::settings::input_box(
+                SharedString::from(format!("role-kind-input-{idx}")),
+                field_text(FormField::RoleKind, role.kind_label.clone()),
+                "如：架构 / 编码 / 审查",
+                self.active_field == Some(FormField::RoleKind),
+                self.editor_focus.clone(),
+                self.field_area_bounds.clone(),
+                cx,
+                FormField::RoleKind,
+            ))
+            .child(div().flex_shrink_0().text_xs().text_color(theme::dim()).child("首字母"))
+            .child(
+                div().w(px(56.0)).flex_shrink_0().child(crate::views::settings::input_box(
+                    SharedString::from(format!("role-initial-input-{idx}")),
+                    field_text(FormField::RoleInitial, role.initial.clone()),
+                    "A",
+                    self.active_field == Some(FormField::RoleInitial),
+                    self.editor_focus.clone(),
+                    self.field_area_bounds.clone(),
+                    cx,
+                    FormField::RoleInitial,
+                )),
+            );
+
+        // 模型行：显示当前生效标签，点「选择」展开已配置模型下拉。
+        let model_row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().w(label_w).flex_shrink_0().text_xs().text_color(theme::dim()).child("模型"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(div().text_xs().text_color(theme::accent()).child("◆"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::fg())
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(SharedString::from(self.role_model_label(role))),
+                    ),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("role-model-btn-{idx}")))
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(if self.role_model_picker == Some(idx) {
+                        theme::accent_line()
+                    } else {
+                        theme::border()
+                    })
+                    .text_xs()
+                    .text_color(theme::accent())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::panel()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.toggle_role_model_picker(idx, cx);
+                    }))
+                    .child("选择 ▾"),
+            );
+
+        // ---- 提示词：逐字符渲染，能看到光标，也能点任意位置改字 ----
+        let prompt_text = if editing_prompt {
+            self.role_prompt_buf.text().to_string()
+        } else {
+            role.prompt.clone()
+        };
+        let mut prompt_box = div()
+            .id(SharedString::from(format!("role-prompt-{idx}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_wrap()
+            .min_h(px(64.0))
+            .p_2()
+            .rounded_md()
+            .bg(theme::panel())
+            .border_1()
+            .border_color(if editing_prompt {
+                theme::accent_line()
+            } else {
+                theme::border()
+            })
+            .text_xs()
+            .line_height(px(18.0))
+            .cursor(gpui::CursorStyle::IBeam)
+            .when(editing_prompt, |d| d.track_focus(&self.editor_focus))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.begin_role_prompt(cx);
+                window.focus(&this.editor_focus);
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
+                this.on_role_prompt_key(ev, cx);
+            }));
+
+        if prompt_text.is_empty() {
+            if editing_prompt {
+                prompt_box = prompt_box.child(role_caret());
+            } else {
+                prompt_box = prompt_box
+                    .child(div().text_color(theme::dim()).child("点这里编写角色提示词"));
+            }
+        } else {
+            let cursor = self.role_prompt_buf.cursor();
+            let mut caret_drawn = !editing_prompt;
+            for (i, ch) in prompt_text.char_indices() {
+                if editing_prompt && cursor == i {
+                    prompt_box = prompt_box.child(role_caret());
+                    caret_drawn = true;
+                }
+                if ch == '\n' {
+                    // 换行：零高整行元素在 flex_wrap 里强制断行。
+                    prompt_box = prompt_box.child(div().w_full().h(px(0.0)));
+                    continue;
+                }
+                let display: SharedString = if ch == ' ' {
+                    SharedString::from("\u{00A0}")
+                } else {
+                    SharedString::from(ch.to_string())
+                };
+                prompt_box = prompt_box.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(theme::fg())
+                        .child(display)
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |this, ev: &gpui::MouseDownEvent, window, cx| {
+                                this.begin_role_prompt(cx);
+                                this.role_prompt_buf.move_to(i, ev.modifiers.shift);
+                                window.focus(&this.editor_focus);
+                                cx.notify();
+                            }),
+                        ),
+                );
+            }
+            if !caret_drawn {
+                prompt_box = prompt_box.child(role_caret());
+            }
+        }
+
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_2()
+            .rounded_md()
+            .bg(theme::raised())
+            .border_1()
+            .border_color(theme::accent_line())
+            .child(name_row)
+            .child(kind_row)
+            .child(model_row);
+        if self.role_model_picker == Some(idx) {
+            panel = panel.child(self.role_model_menu(idx, cx));
+        }
+        panel
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .child("提示词（角色指令，运行时拼在团队协作说明之后）"),
+            )
+            .child(prompt_box)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::dim())
+                            .child("改动先留在内存，点页面底部「保存」写盘"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("role-edit-done-{idx}")))
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme::accent())
+                            .text_xs()
+                            .text_color(gpui::rgb(0xffffff))
+                            .cursor_pointer()
+                            .hover(|d| d.opacity(0.88))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                this.close_role_edit(cx);
+                            }))
+                            .child("完成"),
+                    ),
+            )
+    }
+
+    /// 角色编辑里的模型下拉：只列设置里启用且就绪的厂商与模型。
+    fn role_model_menu(&self, idx: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let (cur_pid, cur_model) = self
+            .config
+            .active_team()
+            .and_then(|t| t.roles.get(idx))
+            .map(|r| (r.provider_id.clone(), r.model.clone()))
+            .unwrap_or_default();
+        let groups = self.picker_groups("");
+
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .bg(theme::panel())
+            .border_1()
+            .border_color(theme::border());
+
+        // 第一行：跟随会话默认（清空角色的厂商与模型绑定）。
+        let on_default = cur_pid.is_empty() && cur_model.is_empty();
+        list = list.child(
+            div()
+                .id(SharedString::from(format!("role-model-follow-{idx}")))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .when(on_default, |d| d.bg(theme::accent_soft()))
+                .cursor_pointer()
+                .hover(|d| d.bg(theme::raised()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    this.select_role_model(idx, String::new(), String::new(), cx);
+                }))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if on_default { theme::accent() } else { theme::fg() })
+                        .child("跟随会话默认"),
+                )
+                .child(div().flex_1())
+                .when(on_default, |d| {
+                    d.child(div().text_xs().text_color(theme::accent()).child("✓"))
+                }),
+        );
+
+        if groups.is_empty() {
+            list = list
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_xs()
+                        .text_color(theme::dim())
+                        .child("没有可用模型：先到设置里添加厂商并勾选模型"),
+                )
+                .child(
+                    div()
+                        .id("role-model-go-settings")
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme::raised())
+                        .text_xs()
+                        .text_color(theme::accent())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::border()))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.open_settings(SettingsTab::Models, cx);
+                        }))
+                        .child("去设置模型 →"),
+                );
+        }
+
+        for g in groups {
+            let provider_id = g.provider_id.clone();
+            list = list.child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .child(SharedString::from(format!("{} · {}", g.name, g.kind))),
+            );
+            for m in g.models {
+                let on = provider_id == cur_pid && m == cur_model;
+                let pid = provider_id.clone();
+                let model = m.clone();
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("role-model-{idx}-{provider_id}-{m}")))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .when(on, |d| d.bg(theme::accent_soft()))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::raised()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                            this.select_role_model(idx, pid.clone(), model.clone(), cx);
+                        }))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(if on { theme::accent() } else { theme::fg() })
+                                .child(SharedString::from(m)),
+                        )
+                        .child(div().flex_1())
+                        .when(on, |d| {
+                            d.child(div().text_xs().text_color(theme::accent()).child("✓"))
+                        }),
+                );
+            }
+        }
+
+        div()
+            .id(SharedString::from(format!("role-model-menu-{idx}")))
+            .max_h(px(220.0))
+            .overflow_y_scroll()
+            .child(list)
     }
 
     /// 角色卡展开的插件市场：搜索框 + 候选行（取自离线技能市场目录）。
@@ -517,6 +1322,78 @@ impl AppState {
             );
         }
 
+        // 来源切换 + 刷新 + 拉取状态：绑定插件前先把市场数据拉顺。
+        let mut sources = div().flex().items_center().gap_1().pl_1();
+        for src in crate::marketplace::MarketSource::all() {
+            let on = self.market_source == src;
+            let has_cache = self
+                .market_entries
+                .get(&src)
+                .map(|l| !l.is_empty())
+                .unwrap_or(false);
+            sources = sources.child(
+                div()
+                    .id(SharedString::from(format!("role-market-src-{idx}-{}", src.key())))
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .text_xs()
+                    .when(on, |d| d.bg(theme::fg()).text_color(theme::surface()))
+                    .when(!on, |d| {
+                        d.border_1()
+                            .border_color(theme::border())
+                            .text_color(theme::muted())
+                            .hover(|d| d.text_color(theme::fg()))
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.set_market_source(src, cx);
+                        let has = this
+                            .market_entries
+                            .get(&src)
+                            .map(|l| !l.is_empty())
+                            .unwrap_or(false);
+                        if !has && !this.market_loading {
+                            this.refresh_market(cx);
+                        }
+                    }))
+                    .child(SharedString::from(if has_cache {
+                        format!("{} ✓", src.label())
+                    } else {
+                        src.label().to_string()
+                    })),
+            );
+        }
+        let loading = self.market_loading;
+        sources = sources.child(div().flex_1()).child(
+            div()
+                .id(SharedString::from(format!("role-market-refresh-{idx}")))
+                .flex_shrink_0()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .text_xs()
+                .text_color(if loading { theme::dim() } else { theme::accent() })
+                .cursor_pointer()
+                .hover(|d| d.bg(theme::border()))
+                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                    this.refresh_market(cx);
+                }))
+                .child(if loading { "拉取中…" } else { "⟳ 刷新市场" }),
+        );
+        let error_line: Option<AnyElement> = self.market_error.as_ref().map(|e| {
+            div()
+                .px_1()
+                .text_xs()
+                .text_color(theme::red())
+                .child(SharedString::from(fit_text(
+                    &format!("市场拉取失败：{e}"),
+                    520.0,
+                    12.0,
+                )))
+                .into_any_element()
+        });
+
         // MCP 安装确认条：注册外部进程前让用户点头（确认后自动绑到本角色）
         let pending_bar: Option<gpui::AnyElement> =
             self.pending_mcp_install.as_ref().map(|pid| {
@@ -639,6 +1516,8 @@ impl AppState {
                     ),
             )
             .child(chips)
+            .child(sources)
+            .children(error_line)
             .child(
                 div()
                     .id(SharedString::from(format!("role-skill-list-{idx}")))
@@ -676,6 +1555,8 @@ impl AppState {
         let summary = fit_text(&skill.summary, 520.0, 12.0);
         let source = crate::marketplace::source_label(&skill.id);
         let mcp = skill.is_mcp();
+        // 正在抓详情 / 解析正文的条目：按钮位显示「安装中…」，防重复点。
+        let busy_here = self.market_installing.as_deref() == Some(skill.id.as_str());
         // 远程托管条目没有本地启动配置，不能安装 / 绑定。
         let remote_only = entry.as_ref().map(|e| e.remote_only).unwrap_or(false);
 
@@ -702,7 +1583,17 @@ impl AppState {
                 .into_any_element(),
         };
 
-        let action = if added {
+        let action = if busy_here {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(theme::with_alpha(0xf59e0b, 0.14))
+                .text_xs()
+                .text_color(theme::yellow())
+                .child("安装中…")
+                .into_any_element()
+        } else if added {
             div()
                 .px_2()
                 .py_0p5()
@@ -828,6 +1719,15 @@ impl AppState {
             .child(action)
     }
 
+}
+
+/// 角色提示词框里的光标。
+fn role_caret() -> impl IntoElement {
+    div()
+        .w(px(2.0))
+        .h(px(16.0))
+        .flex_shrink_0()
+        .bg(theme::accent())
 }
 
 /// 已绑定插件 chip：`✦ 名称 ✕`，点 ✕ 解除绑定。

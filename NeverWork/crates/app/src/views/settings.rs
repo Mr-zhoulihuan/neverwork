@@ -1038,7 +1038,10 @@ pub(crate) fn input_box(
         .cursor(gpui::CursorStyle::IBeam)
         .when(editing, |d| d.track_focus(&focus))
         .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
-            this.begin_field(field, cx);
+            // 已在该字段编辑态时再点不要重置缓冲（否则会把刚打的字抹回旧值）。
+            if !editing {
+                this.begin_field(field, cx);
+            }
             window.focus(&this.editor_focus);
             cx.notify();
         }))

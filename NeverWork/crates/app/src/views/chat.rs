@@ -58,6 +58,8 @@ impl AppState {
         let session = self.session();
         // 本会话实际用的厂商/模型（会话没选过就回落全局当前厂商）。
         let (model_provider, model_id) = self.session_model_labels(self.active_session);
+        // 本会话对应的团队：切换「当前团队」不影响已建的旧会话。
+        let session_team = self.team_for_session(self.active_session);
         let mut col = div().flex().flex_col().flex_1().h_full().overflow_hidden().bg(theme::surface());
 
         col = col.child(
@@ -78,7 +80,7 @@ impl AppState {
                         // 团队模式才显示角色点；单助手模式不放任何说明文字。
                         // 「能问答也能读文件」这种事说了也没用：用户直接问就行，
                         // 挂在标题下面只会一直占着一行。
-                        .when(self.is_team_mode(), |d| d.child(role_dots_row(&self.config))),
+                        .when(self.is_team_mode(), |d| d.child(role_dots_row(session_team.as_ref()))),
                 )
                 .child(div().flex_1())
                 .child(self.model_chip(&model_provider, &model_id, cx))
@@ -100,8 +102,8 @@ impl AppState {
                         .child(if self.is_team_mode() {
                             SharedString::from(format!(
                                 "◈ {} · 团队",
-                                self.config
-                                    .active_team()
+                                session_team
+                                    .as_ref()
                                     .map(|t| t.name.clone())
                                     .unwrap_or_default()
                             ))
@@ -123,7 +125,7 @@ impl AppState {
         // 只有正在生成时才给一条，让用户知道它在干活、能停止。
         if self.is_team_mode() {
             let mut steps = div().flex().items_center().gap_2().flex_wrap();
-            match self.config.active_team() {
+            match session_team.as_ref() {
                 Some(t) if !t.roles.is_empty() => {
                     for (i, role) in t.roles.iter().enumerate() {
                         if i > 0 {
@@ -405,7 +407,7 @@ impl AppState {
 
         // ===== 团队 @ 入口：角色 chips 与「本轮交给」提示 =====
         if self.is_team_mode() {
-            if let Some(team) = self.config.active_team().cloned() {
+            if let Some(team) = self.team_for_session(self.active_session) {
                 if !self.streaming {
                     let mut chips = div().flex().items_center().gap_2().flex_wrap();
                     for (i, role) in team.roles.iter().enumerate() {
@@ -1485,16 +1487,15 @@ impl AppState {
                 let (model, provider) = self.model_labels();
                 let body = m.body.clone();
                 if self.is_team_mode() {
-                    // 角色类型标签是展示信息，跟着团队配置走；配置里找不到就只显名字。
+                    // 角色类型标签是展示信息，跟着会话所属团队走；找不到就只显名字。
                     let kind_label = self
-                        .config
-                        .active_team()
+                        .team_for_session(self.active_session)
                         .and_then(|t| {
                             t.roles
                                 .iter()
                                 .find(|r| r.name.trim() == participant.role_name.trim())
+                                .map(|r| r.kind_label.clone())
                         })
-                        .map(|r| r.kind_label.clone())
                         .unwrap_or_default();
                     team_bubble(
                         &participant.role_name,
@@ -2599,10 +2600,10 @@ pub(crate) fn role_dot(name: &str, idx: usize) -> impl IntoElement {
         .child(div().text_xs().text_color(theme::muted()).child(SharedString::from(name.to_string())))
 }
 
-/// 顶栏角色圆点行（来自当前团队）。
-pub(crate) fn role_dots_row(config: &neverwork_core::Config) -> impl IntoElement {
+/// 顶栏角色圆点行（来自会话所属团队）。
+pub(crate) fn role_dots_row(team: Option<&neverwork_core::Team>) -> impl IntoElement {
     let mut row = div().flex().items_center().gap_2();
-    if let Some(team) = config.active_team() {
+    if let Some(team) = team {
         for role in &team.roles {
             row = row.child(role_dot(&role.name, role.color_index));
         }

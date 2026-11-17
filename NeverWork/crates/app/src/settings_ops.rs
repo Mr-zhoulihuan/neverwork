@@ -228,6 +228,20 @@ impl AppState {
             FormField::ModelSearch => self.model_query.clone(),
             FormField::FindQuery => self.find.query.clone(),
             FormField::FindReplace => self.find.replace.clone(),
+            FormField::TeamName => self
+                .config
+                .active_team()
+                .map(|t| t.name.clone())
+                .unwrap_or_default(),
+            FormField::RoleName => self.edited_role().map(|r| r.name.clone()).unwrap_or_default(),
+            FormField::RoleKind => self
+                .edited_role()
+                .map(|r| r.kind_label.clone())
+                .unwrap_or_default(),
+            FormField::RoleInitial => self
+                .edited_role()
+                .map(|r| r.initial.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -275,6 +289,49 @@ impl AppState {
             }
             FormField::FindReplace => {
                 self.find.replace = value;
+                cx.notify();
+                return;
+            }
+            // 团队 / 角色字段：改内存，团队名立即写盘（与新建/删除/切换一致）；
+            // 角色字段等用户点团队页「保存」再落盘。
+            FormField::TeamName => {
+                let name = value.trim().to_string();
+                if !name.is_empty() {
+                    let ti = self.active_team_index();
+                    if let Some(t) = self.config.teams.get_mut(ti) {
+                        t.name = name.clone();
+                    }
+                    let msg = match neverwork_core::config::save(&self.config) {
+                        Ok(()) => format!("团队已重命名为「{name}」"),
+                        Err(e) => format!("保存失败：{e}"),
+                    };
+                    self.notice = Some(msg);
+                }
+                cx.notify();
+                return;
+            }
+            FormField::RoleName => {
+                let name = value.trim().to_string();
+                if !name.is_empty() {
+                    if let Some(role) = self.edited_role_mut() {
+                        role.name = name;
+                    }
+                }
+                cx.notify();
+                return;
+            }
+            FormField::RoleKind => {
+                if let Some(role) = self.edited_role_mut() {
+                    role.kind_label = value.trim().to_string();
+                }
+                cx.notify();
+                return;
+            }
+            FormField::RoleInitial => {
+                let initial = value.trim().chars().next().map(|c| c.to_string());
+                if let (Some(initial), Some(role)) = (initial, self.edited_role_mut()) {
+                    role.initial = initial;
+                }
                 cx.notify();
                 return;
             }
@@ -669,6 +726,58 @@ impl AppState {
                     .unwrap_or_default(),
             },
         ))
+    }
+
+    /// 角色级运行配置：角色绑定了「启用且就绪」的厂商就用它（连带该厂商的
+    /// Key / BaseURL），否则跟随会话默认。
+    ///
+    /// 旧配置里 `role.model` 可能是展示标签（`Claude Opus` / `GPT-5`），
+    /// 只有看起来像**真实模型 id**（全小写且含数字/-/.）才拿来覆盖默认模型，
+    /// 否则会把标签当模型 id 发给服务端得到 400。
+    pub(crate) fn role_runtime(
+        &self,
+        role: &neverwork_core::Role,
+        session_idx: usize,
+        fallback_provider: &str,
+        fallback: &neverwork_agent::ProviderConfig,
+    ) -> (String, neverwork_agent::ProviderConfig) {
+        // 思考档位是会话级的：换角色不换深度。
+        let thinking = self
+            .sessions
+            .get(session_idx)
+            .map(|s| s.thinking)
+            .unwrap_or_default();
+        if !role.provider_id.trim().is_empty() {
+            if let Some(p) = self.settings.providers.iter().find(|p| {
+                p.id == role.provider_id && p.enabled && p.ready()
+            }) {
+                let model = if role.model.trim().is_empty() {
+                    p.effective_model()
+                } else {
+                    role.model.trim().to_string()
+                };
+                return (
+                    protocol_name(p.protocol()).to_string(),
+                    neverwork_agent::ProviderConfig {
+                        api_key: p.api_key.clone(),
+                        base_url: p.base_url.clone(),
+                        model,
+                        temperature: p.temperature,
+                        thinking,
+                    },
+                );
+            }
+        }
+        let mut cfg = fallback.clone();
+        let raw = role.model.trim();
+        let looks_like_id = !raw.is_empty()
+            && !raw.contains(' ')
+            && !raw.chars().any(|c| c.is_ascii_uppercase())
+            && raw.chars().any(|c| c.is_ascii_digit() || c == '-' || c == '.');
+        if looks_like_id {
+            cfg.model = raw.to_string();
+        }
+        (fallback_provider.to_string(), cfg)
     }
 
     /// 指定会话的（厂商展示名, 模型 id）：头部 chip 与回答页脚共用。

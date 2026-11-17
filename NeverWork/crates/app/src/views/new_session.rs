@@ -175,6 +175,61 @@ impl AppState {
             }
         }
 
+        // 团队下拉：新建时选整支团队（选中即成为当前团队）。
+        let team_menu: Option<gpui::AnyElement> = if self.ns_team_open {
+            let mut menu = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .mt_2()
+                .p_2()
+                .rounded_md()
+                .bg(theme::panel())
+                .border_1()
+                .border_color(theme::border());
+            for (ti, t) in self.config.teams.iter().enumerate() {
+                let on = t.id == self.config.active_team_id;
+                let id = t.id.clone();
+                let name = t.name.clone();
+                let n = t.roles.len();
+                menu = menu.child(
+                    div()
+                        .id(SharedString::from(format!("ns-team-{ti}")))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .when(on, |d| d.bg(theme::accent_soft()))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::raised()))
+                        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                            // 不让点击冒泡到整张卡片（否则会顺手创建会话）。
+                            cx.stop_propagation();
+                            this.ns_team_open = false;
+                            this.select_team(id.clone(), cx);
+                        }))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(if on { theme::accent() } else { theme::fg() })
+                                .child(SharedString::from(name)),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::dim())
+                                .child(SharedString::from(format!("{n} 个角色"))),
+                        ),
+                );
+            }
+            Some(menu.into_any_element())
+        } else {
+            None
+        };
+
         card = card.child(
             div()
                 .id("pick-team")
@@ -237,6 +292,27 @@ impl AppState {
                                         .text_xs()
                                         .text_color(theme::accent())
                                         .child("多角色交接"),
+                                )
+                                .child(
+                                    div()
+                                        .id("ns-team-switch")
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(theme::border())
+                                        .text_xs()
+                                        .text_color(theme::accent())
+                                        .cursor_pointer()
+                                        .hover(|d| d.bg(theme::border()))
+                                        .on_click(cx.listener(
+                                            |this, _: &gpui::ClickEvent, _w, cx| {
+                                                cx.stop_propagation();
+                                                this.ns_team_open = !this.ns_team_open;
+                                                cx.notify();
+                                            },
+                                        ))
+                                        .child("切换 ▾"),
                                 ),
                         )
                         .child(
@@ -245,7 +321,8 @@ impl AppState {
                                 .text_color(theme::muted())
                                 .child("多角色按交接顺序协作；用 @角色名 指定入口角色，每个角色可绑定插件（技能）。适合分阶段的大任务。"),
                         )
-                        .child(roles_row),
+                        .child(roles_row)
+                        .children(team_menu),
                 ),
         );
 

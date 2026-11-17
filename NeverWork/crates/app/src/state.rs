@@ -93,6 +93,8 @@ pub enum InputTarget {
     SessionSearch,
     /// 会话重命名输入框（回车提交，Esc 取消）。
     RenameSession,
+    /// 团队角色编辑里的多行提示词输入框。
+    RolePrompt,
     /// 设置页 / 技能页里的某个表单字段。
     Field(FormField),
 }
@@ -124,6 +126,14 @@ pub enum FormField {
     FindQuery,
     /// 编辑器替换框。
     FindReplace,
+    /// 团队编辑器：团队名称（重命名 / 新建后直接改名）。
+    TeamName,
+    /// 团队编辑器：角色名称。
+    RoleName,
+    /// 团队编辑器：角色类型标签。
+    RoleKind,
+    /// 团队编辑器：角色头像首字母。
+    RoleInitial,
 }
 
 impl FormField {
@@ -376,8 +386,20 @@ pub struct AppState {
     /// 模式在新建时选定、之后不可切换（见 `SessionMode`），
     /// 所以这个浮层是唯一的入口：点「＋」或命令面板「新建会话」都先到这儿。
     pub new_session_picker: bool,
+    /// 新建会话浮层里团队下拉是否展开。
+    pub ns_team_open: bool,
     /// 团队编辑器里正在挑插件的角色下标；`None` 表示未展开。
     pub role_skill_picker: Option<usize>,
+    /// 团队编辑器里正在内联编辑的角色下标；`None` 表示未展开。
+    pub role_edit_index: Option<usize>,
+    /// 角色编辑里的模型下拉是否展开（值为角色下标）。
+    pub role_model_picker: Option<usize>,
+    /// 角色提示词的多行缓冲（展开编辑时装入，提交时写回角色）。
+    pub role_prompt_buf: TextBuffer,
+    /// 团队页顶部的团队下拉是否展开。
+    pub team_menu_open: bool,
+    /// 删除团队的一次性确认（点一次变成「确认删除？」）。
+    pub team_delete_confirm: bool,
     /// 角色插件搜索词。
     pub role_skill_search: String,
     /// 团队插件面板的筛选页签：0=全部 1=MCP 2=技能 3=已安装。
@@ -623,23 +645,33 @@ fn default_session_mode() -> SessionMode {
 ///
 /// id 带时间戳：只用 `s{len+1}` 的话，删掉一个再新建就会撞号，
 /// 而 id 是会话在磁盘上的唯一标识（`active_id` 靠它恢复）。
-fn blank_session(seq: usize, config: &Config, mode: SessionMode) -> Session {
+/// `team` 仅团队模式使用：`None` 时回落当前 active team。
+fn blank_session(
+    seq: usize,
+    config: &Config,
+    mode: SessionMode,
+    team: Option<&neverwork_core::Team>,
+) -> Session {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let team = if mode.is_team() {
+        team.cloned()
+            .or_else(|| config.active_team().cloned())
+            .or_else(|| Some(neverwork_core::Team::default_team()))
+    } else {
+        None
+    };
     Session {
         id: format!("s{now}-{seq}"),
         title: "新会话".into(),
         subtitle: "空白会话".into(),
-        team_name: if mode.is_team() {
-            config
-                .active_team()
-                .map(|t| t.name.clone())
-                .unwrap_or_else(|| "默认协作团队".into())
-        } else {
-            "单助手".into()
-        },
+        team_name: team
+            .as_ref()
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "单助手".into()),
+        team_id: team.as_ref().map(|t| t.id.clone()).unwrap_or_default(),
         mode,
         messages: Vec::new(),
         updated_label: "刚刚".into(),
@@ -699,7 +731,7 @@ fn adopt_store(
 ) -> (Vec<Session>, usize) {
     let mut sessions = store.sessions;
     if sessions.is_empty() {
-        sessions.push(blank_session(0, config, default_session_mode()));
+        sessions.push(blank_session(0, config, default_session_mode(), None));
     }
     // 文件里存的「3分钟前」是写盘那一刻的快照，按真实时间戳重算：
     // 否则隔一周打开，列表还写着「3分钟前」。
@@ -970,7 +1002,13 @@ impl AppState {
             turn_started: None,
             tools_enabled: true,
             new_session_picker: false,
+            ns_team_open: false,
             role_skill_picker: None,
+            role_edit_index: None,
+            role_model_picker: None,
+            role_prompt_buf: TextBuffer::multi_line(),
+            team_menu_open: false,
+            team_delete_confirm: false,
             role_skill_search: String::new(),
             role_skill_filter: 0,
             pending_mcp_install: None,
@@ -1266,6 +1304,54 @@ impl AppState {
         if std::env::var("NW_WS_INPUT").map(|v| v == "1").unwrap_or(false) {
             me.open_workspace_folder_input(cx);
         }
+        // 验证专用：团队编辑器抬头下拉 / 角色内联编辑 / 角色模型下拉。
+        if std::env::var("NW_TEAM_MENU").map(|v| v == "1").unwrap_or(false) {
+            me.center = CenterView::Team;
+            me.team_menu_open = true;
+        }
+        if let Ok(v) = std::env::var("NW_ROLE_EDIT") {
+            let idx = v.trim().parse::<usize>().unwrap_or(0);
+            let n = me.config.active_team().map(|t| t.roles.len()).unwrap_or(0);
+            if idx < n {
+                me.center = CenterView::Team;
+                me.toggle_role_edit(idx, cx);
+            }
+        }
+        if let Ok(v) = std::env::var("NW_ROLE_MODEL") {
+            let idx = v.trim().parse::<usize>().unwrap_or(0);
+            let n = me.config.active_team().map(|t| t.roles.len()).unwrap_or(0);
+            if idx < n {
+                me.center = CenterView::Team;
+                if me.role_edit_index != Some(idx) {
+                    me.toggle_role_edit(idx, cx);
+                }
+                me.role_model_picker = Some(idx);
+            }
+        }
+        // 验证专用：启动即展开某个角色的插件面板（来源切换 / 刷新市场 / 安装态）。
+        if let Ok(v) = std::env::var("NW_ROLE_SKILL") {
+            let idx = v.trim().parse::<usize>().unwrap_or(0);
+            let n = me.config.active_team().map(|t| t.roles.len()).unwrap_or(0);
+            if idx < n {
+                me.center = CenterView::Team;
+                me.toggle_role_skill_picker(idx, cx);
+            }
+        }
+        // 验证专用：新建会话浮层直接展开团队列表。
+        if std::env::var("NW_NEW_SESSION_TEAM")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            me.new_session_picker = true;
+            me.ns_team_open = true;
+        }
+        // 验证专用：启动即切到指定团队（按 id）。
+        if let Ok(id) = std::env::var("NW_TEAM_PICK") {
+            let id = id.trim().to_string();
+            if me.config.teams.iter().any(|t| t.id == id) {
+                me.config.active_team_id = id;
+            }
+        }
         if std::env::var("NW_ARCHIVE_OPEN").map(|v| v == "1").unwrap_or(false) {
             me.archive_open = true;
         }
@@ -1363,6 +1449,21 @@ impl AppState {
         self.session_mode().is_team()
     }
 
+    /// 会话对应的团队：团队会话按 `session.team_id` 找；旧会话没有 team_id
+    /// 或团队已被删时回落当前团队。单助手会话返回 `None`。
+    pub(crate) fn team_for_session(&self, session_idx: usize) -> Option<neverwork_core::Team> {
+        let s = self.sessions.get(session_idx)?;
+        if !s.mode.is_team() {
+            return None;
+        }
+        if !s.team_id.is_empty() {
+            if let Some(t) = self.config.teams.iter().find(|t| t.id == s.team_id) {
+                return Some(t.clone());
+            }
+        }
+        self.config.active_team().cloned()
+    }
+
     /// 会话库键：远程用连接串，本地用路径（兼容旧文件），无工作区用 `scratch`。
     pub(crate) fn session_key(&self) -> String {
         if let Some(t) = &self.remote {
@@ -1423,7 +1524,31 @@ impl AppState {
     /// 接着开 B 会话干活是最常见的节奏，回到默认会让人觉得「白切了」。
     /// 厂商已被删或停用时回落到「跟随默认」。
     pub(crate) fn new_session(&mut self, mode: SessionMode, cx: &mut Context<Self>) {
-        let mut s = blank_session(self.sessions.len(), &self.config, mode);
+        self.new_session_with_team(mode, None, cx);
+    }
+
+    /// 新建会话并切过去；`team_id` 只在团队模式下生效。
+    ///
+    /// 选了团队就把它同步成当前团队：团队页 / 下一次侧栏「＋」的默认入口
+    /// 跟着用户刚选的走，而不是跳回旧团队。
+    pub(crate) fn new_session_with_team(
+        &mut self,
+        mode: SessionMode,
+        team_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let chosen = team_id
+            .as_deref()
+            .and_then(|id| self.config.teams.iter().find(|t| t.id == id).cloned());
+        if let Some(t) = &chosen {
+            if self.config.active_team_id != t.id {
+                self.config.active_team_id = t.id.clone();
+                if let Err(e) = neverwork_core::config::save(&self.config) {
+                    self.notice = Some(format!("团队选择保存失败：{e}"));
+                }
+            }
+        }
+        let mut s = blank_session(self.sessions.len(), &self.config, mode, chosen.as_ref());
         let (provider_id, model) = inherit_session_model(
             self.sessions.get(self.active_session),
             &self.settings.providers,
@@ -1435,6 +1560,7 @@ impl AppState {
         self.center = CenterView::Chat;
         self.palette_open = false;
         self.new_session_picker = false;
+        self.ns_team_open = false;
         self.active_role = None;
         self.save_sessions();
         cx.notify();
@@ -1465,12 +1591,14 @@ impl AppState {
     /// 打开「新建会话」的模式选择浮层。
     pub(crate) fn open_new_session_picker(&mut self, cx: &mut Context<Self>) {
         self.new_session_picker = true;
+        self.ns_team_open = false;
         self.palette_open = false;
         cx.notify();
     }
 
     pub(crate) fn close_new_session_picker(&mut self, cx: &mut Context<Self>) {
         self.new_session_picker = false;
+        self.ns_team_open = false;
         cx.notify();
     }
 
@@ -1604,7 +1732,7 @@ impl AppState {
         let removed = self.sessions.remove(idx);
         let short: String = removed.title.chars().take(16).collect();
         if self.sessions.is_empty() {
-            self.sessions.push(blank_session(0, &self.config, default_session_mode()));
+            self.sessions.push(blank_session(0, &self.config, default_session_mode(), None));
         }
         // active_session 是索引引用：删当前会话落到相邻的，删前面的则前移一格
         if idx == self.active_session {
@@ -1648,7 +1776,7 @@ impl AppState {
             .retain(|s| !neverwork_core::is_archived_session(s));
         let removed = before - self.sessions.len();
         if self.sessions.is_empty() {
-            self.sessions.push(blank_session(0, &self.config, default_session_mode()));
+            self.sessions.push(blank_session(0, &self.config, default_session_mode(), None));
         }
         self.active_session = self
             .sessions
@@ -2808,6 +2936,7 @@ impl AppState {
             }
             InputTarget::SessionSearch => &self.session_search,
             InputTarget::RenameSession => &self.rename_buf,
+            InputTarget::RolePrompt => &self.role_prompt_buf,
             InputTarget::Field(_) => &self.field_buf,
         }
     }
@@ -2825,6 +2954,7 @@ impl AppState {
             }
             InputTarget::SessionSearch => &mut self.session_search,
             InputTarget::RenameSession => &mut self.rename_buf,
+            InputTarget::RolePrompt => &mut self.role_prompt_buf,
             InputTarget::Field(_) => &mut self.field_buf,
         }
     }
@@ -3024,6 +3154,22 @@ impl AppState {
         }
     }
 
+    /// 角色提示词（多行）：非文本键交给通用处理；Esc 收起编辑并提交。
+    pub(crate) fn on_role_prompt_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        self.switch_input_target(InputTarget::RolePrompt);
+        // 输入法组合期间的 Enter 属于上屏，不当换行；不丢给键盘路由。
+        if self.marked_range.is_some() {
+            return;
+        }
+        if let Some(action) = keymap::route(&ev.keystroke) {
+            if matches!(action, KeyAction::Escape) {
+                self.close_role_edit(cx);
+                return;
+            }
+            self.apply_action(InputTarget::RolePrompt, action, cx);
+        }
+    }
+
     fn apply_action(&mut self, target: InputTarget, action: KeyAction, cx: &mut Context<Self>) {
         match action {
             KeyAction::Motion { motion, extend } => {
@@ -3138,6 +3284,11 @@ impl AppState {
                     cx.notify();
                 }
                 InputTarget::RenameSession => self.commit_rename_session(cx),
+                // 角色提示词是多行文本：Enter 就是换行，不提交。
+                InputTarget::RolePrompt => {
+                    self.role_prompt_buf.newline();
+                    cx.notify();
+                }
                 InputTarget::Field(_) => self.commit_field(cx),
             },
             KeyAction::Tab { shift } => {
@@ -3231,11 +3382,10 @@ impl AppState {
             return;
         };
 
-        // 团队配置随取随用；把角色绑定的插件摘要拼进 prompt（仅内存，不回写配置）。
+        // 团队配置随会话取：会话记住自己选的团队，不回落到「当前团队」；
+        // 把角色绑定的插件摘要拼进 prompt（仅内存，不回写配置）。
         let mut team = self
-            .config
-            .active_team()
-            .cloned()
+            .team_for_session(session_idx)
             .unwrap_or_else(neverwork_core::Team::default_team);
         self.enrich_team_skills(&mut team);
         // 模式在新建会话时选定，不能切换；需要另一种就新建一个会话。
@@ -3261,6 +3411,10 @@ impl AppState {
             } else {
                 "单助手".to_string()
             };
+            if team_mode {
+                // 旧会话第一次发言时补上 team_id，后续切换团队不影响它。
+                session.team_id = team.id.clone();
+            }
             if session.title.is_empty() || session.title == "新会话" {
                 session.title = text.chars().take(16).collect();
                 // 图标跟标题一起换成首字：列表里比「＋」好认
@@ -3304,13 +3458,17 @@ impl AppState {
             if team.roles.is_empty() {
                 team.roles = roles.clone();
             }
-            // 模型与厂商以本会话的选择为准（会话没选过才回落全局默认）；
-            // role.model 只是展示标签，不参与路由。
+            // 每个角色用自己的运行配置：角色绑了已就绪厂商就用它，否则跟随会话默认。
+            let runtimes: Vec<(String, neverwork_agent::ProviderConfig)> = roles
+                .iter()
+                .map(|r| self.role_runtime(r, session_idx, &provider_id, &config))
+                .collect();
             let entry = team_entry_index(&text, &roles);
             self.spawn_agents_chain(
                 session_idx,
                 text,
                 roles,
+                runtimes,
                 Some((team, entry)),
                 provider_id,
                 config,
@@ -3324,7 +3482,17 @@ impl AppState {
                 .get(entry)
                 .cloned()
                 .unwrap_or_else(|| neverwork_core::Role::new("agent", "Assistant", "A"));
-            self.spawn_agents_chain(session_idx, text, vec![role], None, provider_id, config, cx);
+            let runtimes = vec![self.role_runtime(&role, session_idx, &provider_id, &config)];
+            self.spawn_agents_chain(
+                session_idx,
+                text,
+                vec![role],
+                runtimes,
+                None,
+                provider_id,
+                config,
+                cx,
+            );
         } else {
             // 单个助手：不套任何角色 prompt，避免「规划者 / 编码」这类
             // 与具体诉求无关的角色约束把问答带偏。但已安装的文本技能仍要
@@ -3344,10 +3512,12 @@ impl AppState {
                     &self.known_skills(),
                 ));
             }
+            let runtimes = vec![self.role_runtime(&solo, session_idx, &provider_id, &config)];
             self.spawn_agents_chain(
                 session_idx,
                 text,
                 vec![solo],
+                runtimes,
                 None,
                 provider_id,
                 config,
@@ -3536,11 +3706,15 @@ impl AppState {
     /// 传 `handoff = Some((team, entry))` 时进入「@ 入口」模式：只从被点名
     /// 角色开始，由 `handoff` 工具决定下一跳；`None` 保持原有按 roles 顺序
     /// 全部跑一遍的行为。两条路径共用同一套 UI 事件泵。
+    ///
+    /// `runtimes` 与 `roles` 一一对应：每个角色的（协议名, 厂商配置）。
+    /// 团队成员可以绑不同厂商/模型，不能全员共用会话那一份配置。
     fn spawn_agents_chain(
         &mut self,
         session_idx: usize,
         text: String,
         roles: Vec<neverwork_core::Role>,
+        runtimes: Vec<(String, neverwork_agent::ProviderConfig)>,
         handoff: Option<(neverwork_core::Team, usize)>,
         provider: String,
         config: neverwork_agent::ProviderConfig,
@@ -3598,6 +3772,11 @@ impl AppState {
                     }
                 };
                 let Some(role) = roles.get(ri) else { break };
+                // 按角色路由：绑了厂商用绑的，否则用会话默认那份。
+                let (role_provider, role_config) = runtimes
+                    .get(ri)
+                    .cloned()
+                    .unwrap_or_else(|| (provider.clone(), config.clone()));
                 let mut collected = String::new();
                 let mut hop: Option<neverwork_agent::HandoffPayload> = None;
                 {
@@ -3613,8 +3792,8 @@ impl AppState {
                     match &handoff {
                         // 团队交接链：用角色身份跑，工具清单里带 handoff。
                         Some((team, _)) => neverwork_agent::run_agent_in_team(
-                            &provider,
-                            config.clone(),
+                            &role_provider,
+                            role_config.clone(),
                             history.clone(),
                             &input,
                             ctx.clone(),
@@ -3628,8 +3807,8 @@ impl AppState {
                         ),
                         // 单 Agent / 团队顺序路径：不带 handoff 工具。
                         None => neverwork_agent::run_agent(
-                            &provider,
-                            config.clone(),
+                            &role_provider,
+                            role_config.clone(),
                             &role.prompt,
                             history.clone(),
                             &input,
@@ -4489,7 +4668,9 @@ impl Render for AppState {
         }
         {
             let want = match self.input_target {
-                InputTarget::Editor | InputTarget::Field(_) => Some(self.editor_focus.clone()),
+                InputTarget::Editor | InputTarget::Field(_) | InputTarget::RolePrompt => {
+                    Some(self.editor_focus.clone())
+                }
                 InputTarget::Workspace => Some(self.ws_focus.clone()),
                 InputTarget::Chat
                 | InputTarget::SessionSearch
@@ -4608,7 +4789,7 @@ fn input_bridge(
         // 且中栏是单选渲染——设置页打开时对话输入框不在渲染树里，
         // 把字段归到 chat handle 会让焦点落在一个无节点的句柄上，
         // 按键派发回退到 root，打字与粘贴全部无效。
-        InputTarget::Editor | InputTarget::Field(_) => editor_focus.clone(),
+        InputTarget::Editor | InputTarget::Field(_) | InputTarget::RolePrompt => editor_focus.clone(),
         InputTarget::Workspace => ws_focus.clone(),
         InputTarget::Chat
         | InputTarget::SessionSearch
@@ -5686,7 +5867,7 @@ mod session_inherit_tests {
     use neverwork_core::{Config, ProviderEntry, ProviderPreset, SessionMode};
 
     fn session_with(pid: &str, model: &str) -> neverwork_core::Session {
-        let mut s = blank_session(0, &Config::default(), SessionMode::Solo);
+        let mut s = blank_session(0, &Config::default(), SessionMode::Solo, None);
         s.provider_id = pid.into();
         s.model = model.into();
         s

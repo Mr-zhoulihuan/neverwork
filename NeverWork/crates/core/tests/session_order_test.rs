@@ -12,6 +12,7 @@ fn sp(id: &str, updated_at: u64, tag: SessionTag, pinned: bool) -> Session {
         title: id.into(),
         subtitle: String::new(),
         team_name: String::new(),
+        team_id: String::new(),
         mode: SessionMode::Solo,
         messages: Vec::new(),
         updated_label: String::new(),

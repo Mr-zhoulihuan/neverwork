@@ -78,6 +78,9 @@ pub struct Role {
     pub kind_label: String,
     /// 使用的模型。
     pub model: String,
+    /// 绑定的已配置厂商 id；空 = 跟随会话默认。
+    #[serde(default)]
+    pub provider_id: String,
     /// 系统提示词 / 职责。
     pub prompt: String,
     /// 身份色索引（对应 theme::role_color）。
@@ -94,7 +97,8 @@ impl Role {
             id: id.into(),
             name: name.into(),
             kind_label: String::new(),
-            model: String::from("Claude Opus"),
+            model: String::new(),
+            provider_id: String::new(),
             prompt: String::new(),
             color_index: 0,
             initial: initial.into(),
@@ -139,6 +143,7 @@ impl Team {
                     name: "Planner".into(),
                     kind_label: "规划者".into(),
                     model: "Claude Opus".into(),
+                    provider_id: String::new(),
                     prompt: "负责拆解任务、制定步骤。".into(),
                     color_index: 0,
                     initial: "P".into(),
@@ -149,6 +154,7 @@ impl Team {
                     name: "Coder".into(),
                     kind_label: "编码".into(),
                     model: "GPT-5".into(),
+                    provider_id: String::new(),
                     prompt: "负责实现代码改动。".into(),
                     color_index: 1,
                     initial: "C".into(),
@@ -159,6 +165,7 @@ impl Team {
                     name: "Reviewer".into(),
                     kind_label: "审查者".into(),
                     model: "GPT-5-mini".into(),
+                    provider_id: String::new(),
                     prompt: "负责审查正确性、边界与性能。".into(),
                     color_index: 2,
                     initial: "R".into(),
@@ -765,6 +772,9 @@ pub struct Session {
     pub title: String,
     pub subtitle: String,
     pub team_name: String,
+    /// 创建时选择的团队 id；旧会话为空 → 回落当前 active team。
+    #[serde(default)]
+    pub team_id: String,
     /// 运行模式（旧配置没有这个字段时按单助手处理）。
     #[serde(default)]
     pub mode: SessionMode,
@@ -1089,6 +1099,36 @@ mod mention_tests {
     }
 
     #[test]
+    fn role_provider_id_defaults_for_old_configs() {
+        // 旧团队配置没有 provider_id：反序列化为空 = 跟随会话默认，
+        // 展示标签 `Claude Opus` 不能被当成模型 id 去路由。
+        let json = r#"{"id":"planner","name":"规划者","kind_label":"架构","model":"Claude Opus","prompt":"p","color_index":0,"initial":"P","skills":[]}"#;
+        let role: Role = serde_json::from_str(json).unwrap();
+        assert!(role.provider_id.is_empty());
+        assert_eq!(role.model, "Claude Opus");
+    }
+
+    #[test]
+    fn role_roundtrips_provider_binding() {
+        let mut r = Role::new("dev", "开发者", "D");
+        r.provider_id = "deepseek".into();
+        r.model = "deepseek-chat".into();
+        let json = serde_json::to_string(&r).unwrap();
+        let back: Role = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.provider_id, "deepseek");
+        assert_eq!(back.model, "deepseek-chat");
+    }
+
+    #[test]
+    fn session_team_id_defaults_for_old_sessions() {
+        // 旧会话没有 team_id：反序列化为空，团队会话回落「当前团队」。
+        let json = r#"{"id":"s1","title":"t","subtitle":"","team_name":"默认团队","messages":[],"updated_label":"刚刚"}"#;
+        let s: Session = serde_json::from_str(json).unwrap();
+        assert!(s.team_id.is_empty());
+        assert!(!s.mode.is_team());
+    }
+
+    #[test]
     fn tool_call_thread_round_default_for_old_sessions() {
         // 旧会话没有 thread/round 字段：反序列化必须是 None，否则统计行会编造数字。
         let json = r#"{"type":"tool_call","name":"list_dir","summary":"","status":"ok","output":"","diff":[],"added":0,"removed":0}"#;
@@ -1195,6 +1235,7 @@ mod session_list_tests {
             title: "标题".into(),
             subtitle: String::new(),
             team_name: String::new(),
+            team_id: String::new(),
             mode: SessionMode::Solo,
             messages: Vec::new(),
             updated_label: String::new(),

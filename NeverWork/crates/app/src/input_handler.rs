@@ -90,6 +90,7 @@ impl AppState {
             }
             InputTarget::SessionSearch => &mut self.session_search,
             InputTarget::RenameSession => &mut self.rename_buf,
+            InputTarget::RolePrompt => &mut self.role_prompt_buf,
             InputTarget::Field(_) => &mut self.field_buf,
         }
     }
@@ -108,6 +109,7 @@ impl AppState {
             }
             InputTarget::SessionSearch => &self.session_search,
             InputTarget::RenameSession => &self.rename_buf,
+            InputTarget::RolePrompt => &self.role_prompt_buf,
             InputTarget::Field(_) => &self.field_buf,
         }
     }

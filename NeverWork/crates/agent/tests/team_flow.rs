@@ -54,6 +54,7 @@ fn team_with_roles(flow: FlowMode, names: &[(&str, &str)]) -> Team {
                 kind_label: "".into(),
                 // 用 gpt 系列避免切换 anthropic
                 model: "gpt-4o".into(),
+                provider_id: String::new(),
                 prompt: String::new(),
                 color_index: i,
                 initial: initial.to_string(),
