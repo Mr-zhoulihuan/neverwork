@@ -1,0 +1,46 @@
+# -*- coding: utf-8 -*-
+"""生成 NeverWork 安装包 / 快捷方式图标（多尺寸 ICO）。
+
+品牌绿 #22C55E 与左侧栏头像一致；白字 N 居中。
+由 build.ps1 调用，产物写回本目录 neverwork.ico。
+"""
+import os
+
+from PIL import Image, ImageDraw, ImageFont
+
+GREEN = (34, 197, 94, 255)  # #22C55E
+WHITE = (255, 255, 255, 255)
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(HERE, "neverwork.ico")
+FONTS = ("seguisb.ttf", "segoeuib.ttf", "arialbd.ttf")
+
+
+def make(size: int) -> Image.Image:
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    radius = int(size * 0.22)
+    draw.rounded_rectangle([0, 0, size - 1, size - 1], radius=radius, fill=GREEN)
+    font = None
+    for name in FONTS:
+        try:
+            font = ImageFont.truetype(
+                os.path.join(os.environ["WINDIR"], "Fonts", name), int(size * 0.64)
+            )
+            break
+        except OSError:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    draw.text((size / 2, size / 2), "N", font=font, fill=WHITE, anchor="mm")
+    return img
+
+
+def main() -> None:
+    base = make(256)
+    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+    base.save(OUT, format="ICO", sizes=sizes)
+    print("icon:", OUT)
+
+
+if __name__ == "__main__":
+    main()

@@ -12,6 +12,7 @@ cd NeverWork
 cargo run -p neverwork        # 启动主界面
 cargo test --workspace        # 全部测试（40 个）
 cargo build -p neverwork      # 只编应用
+powershell -ExecutionPolicy Bypass -File installer\build.ps1   # Windows 安装包 → dist\NeverWork-0.1.0-setup.exe
 ```
 
 需要 Rust stable + MSVC 工具链（开发机为 rustc 1.100.0）。

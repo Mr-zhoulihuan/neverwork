@@ -1,5 +1,10 @@
 //! NeverWork 应用入口。
 
+// Release 版不能弹控制台：Rust 默认按控制台子系统编译，双击 exe（或从快捷方式启动）
+// 时 Windows 会额外挂一个终端窗口，tracing 日志全打在里面。debug 保留控制台，
+// 方便 `cargo run` 直接看到启动日志。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod assets;
 mod filesystem;
 mod brackets;

@@ -10,6 +10,7 @@
 cargo run -p neverwork          # 主界面
 cargo test --workspace          # 全部测试（3 条打真实 DeepSeek，需 NW_DEEPSEEK_KEY）
 cargo build -p neverwork        # 只编应用（增量约 6s）
+powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 → dist\NeverWork-0.1.0-setup.exe（dist/ 与生成图标已 gitignore，需 NSIS + Python/Pillow）
 ```
 
 运行期变量：`NW_ROOT`、`NW_REMOTE`（`user@host:/path`）、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_RIGHT_COLLAPSED`/`NW_SESSION_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_PROVIDER_VIEW`（`add`|下标）/`NW_COMPOSER`（`thinking`|`menu`）/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_SKILLS_TAB`/`NW_SKILL_QUERY`/`NW_INSTALL_SKILL`/`NW_SESSION_QUERY`/`NW_SESSION_MENU`/`NW_ARCHIVE_OPEN`/`NW_WORKSPACE_POPUP`/`NW_DEMO_STATUS`/`NW_SWITCH_WS`；`NW_ASKPASS_MODE`/`NW_ASKPASS_SECRET` 由 ssh 回调应用自身时使用，不要手动设置；密码往返测试用 `NW_ASKPASS_EXE` 指向 `target/debug/neverwork.exe`。
@@ -40,6 +41,7 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - 图标栏只有对话/团队/技能（主组垂直居中）+ 底部一个设置入口；编辑器页靠右栏文件树打开文件进入，不占图标；命令面板只走会话面板「⋯」入口（标题栏不再放 ⌘K 按钮）。三个主图标是手绘 SVG（`crates/app/assets/icons/rail-*.svg`，样式参考 `pic/minimal-dark-mode-sidebar-icon-1.jpg`），经 `src/assets.rs` 的 `EmbeddedAssets`（`Application::new().with_assets(...)`）内嵌，用 `gpui::svg().path("icons/…").text_color(...)` 按 alpha 蒙版上色、随主题与悬停变色——不要写死颜色，也不要退回字符图标（设置 ⚙ 仍是字符版 `rail_button`）；外观验收图 `pic/rail-icons.png`。
 - **弹层遮罩必须 `.occlude()`**：gpui 的滚轮命中取「鼠标下所有 hitbox」（`should_handle_scroll`），遮罩不 occlude 时滚弹层内容会同时滚背后的滚动容器（技能详情抽屉踩过：滚正文整页跟着下移）。palette / session_menu / workspace_picker / new_session / market_detail 五个遮罩都走 occlude。
 - **窗口是无边框自绘的**（`main.rs` 里 `titlebar: Some(TitlebarOptions { appears_transparent: true, .. })`）。**别退回 `WindowOptions::default()` 的 `appears_transparent: false`**——那样 Windows 会在最上面叠一条系统原生标题栏（浅色横条 + 左上角白色默认窗口图标 + 右键「还原/移动/关闭」菜单）。
+- **Release 不得弹控制台**：`main.rs` 顶部必须有 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`——否则双击 exe / 快捷方式启动时 Windows 会额外挂一个终端窗口，tracing 日志全打在里面；debug 保留控制台方便 `cargo run` 看日志。
 - 标题栏拖动 / 最小化 / 最大化(还原) / 关闭由 `views::titlebar_hitboxes`（绝对定位 canvas）注册系统热区 `Drag`/`Min`/`Max`/`Close` 处理，点击不经过 `on_click`；右侧 300px 不铺 Drag 热区，否则 HTCAPTION 会吞掉「专注/窗口按钮」的点击。
 - 窗口按钮图标必须用 `div` 画（横线/方框/错位双框），**不要用 `□`/`❐` 字符**：字体回退后两者几乎一样，最大化前后看不出区别。最大化状态在 `render` 里用 `window.is_maximized()` 传给 `titlebar`，窗口尺寸变化会触发重绘。
 
