@@ -918,11 +918,17 @@ impl AppState {
             let expanded =
                 awaiting || self.expand_steps_all || self.expanded_steps.contains(&step.idx);
 
-            // 参数：优先显示真实路径（绝对路径，同参考稿），为空时只留动词
+            // 参数：优先显示真实路径（绝对路径，同参考稿），为空时只留动词。
+            // 无工作区时工具以主目录为基准，绝对路径 join 会直接沿用。
             let arg = if step.path.is_empty() {
                 String::new()
+            } else if let Some(root) = &self.root {
+                root.join(&step.path).display().to_string()
             } else {
-                self.root.join(&step.path).display().to_string()
+                neverwork_agent::tools::ToolContext::home_dir()
+                    .join(&step.path)
+                    .display()
+                    .to_string()
             };
             let verb = tool_verb(&step.name);
 

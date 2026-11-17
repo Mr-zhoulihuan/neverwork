@@ -6,7 +6,6 @@
 //! - 用户随时可以取消（`cancel`），每轮开头与每个工具执行前都检查。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -364,7 +363,7 @@ pub fn run_agent(
     system_prompt: &str,
     history: Vec<ChatMessage>,
     user_text: &str,
-    root: PathBuf,
+    ctx: ToolContext,
     enable_tools: bool,
     // 单次运行的硬上限；字段为 `0` 表示该项不限。
     limits: RunLimits,
@@ -377,7 +376,7 @@ pub fn run_agent(
         system_prompt,
         history,
         user_text,
-        root,
+        ctx,
         enable_tools,
         limits,
         None,
@@ -398,7 +397,7 @@ pub fn run_agent_in_team(
     config: ProviderConfig,
     history: Vec<ChatMessage>,
     user_text: &str,
-    root: PathBuf,
+    ctx: ToolContext,
     enable_tools: bool,
     limits: RunLimits,
     team: &neverwork_core::Team,
@@ -417,7 +416,7 @@ pub fn run_agent_in_team(
         &persona,
         history,
         user_text,
-        root,
+        ctx,
         enable_tools,
         limits,
         Some((team, role_idx)),
@@ -433,7 +432,7 @@ fn run_agent_impl(
     system_prompt: &str,
     history: Vec<ChatMessage>,
     user_text: &str,
-    root: PathBuf,
+    ctx: ToolContext,
     enable_tools: bool,
     // 单次运行的硬上限；字段为 `0` 表示该项不限。
     limits: RunLimits,
@@ -441,7 +440,6 @@ fn run_agent_impl(
     emit: &mut dyn FnMut(AgentEvent),
     cancel: Arc<AtomicBool>,
 ) {
-    let ctx = ToolContext::new(root.clone());
     let mut specs = if enable_tools {
         tools::tool_specs()
     } else {
@@ -449,7 +447,7 @@ fn run_agent_impl(
     };
 
     let mut messages: Vec<ChatMessage> = Vec::new();
-    let mut sys = build_system_prompt(system_prompt, &root);
+    let mut sys = build_system_prompt(system_prompt, &ctx);
     if let Some((t, i)) = team {
         if let Some(role) = t.roles.get(i) {
             sys.push_str(&team_roster_prompt(t, role));
@@ -876,17 +874,28 @@ fn handoff_misuse(calls: &[ToolCall]) -> Option<&'static str> {
 /// 之前的提示词通篇在讲怎么读写文件、还要求「改文件之前先用 read_file」，
 /// 模型于是把**任何输入**都当成代码任务：问一句常识也先去翻目录、
 /// 解释一个概念也去搜文件，既慢又答不到点上。
-pub(crate) fn build_system_prompt(persona: &str, root: &std::path::Path) -> String {
+pub(crate) fn build_system_prompt(persona: &str, ctx: &ToolContext) -> String {
     let persona = if persona.trim().is_empty() {
         "你是一个在 IDE 里工作的编程助手。"
     } else {
         persona
     };
-    let root_p = root.display();
+    let root_p = ctx.root.display();
+    let (where_line, path_hint) = if ctx.is_unrestricted() {
+        (
+            "当前没有指定工作区（用户还没选文件夹）。".to_string(),
+            "当前没有指定工作区：相对路径以用户主目录为基准，也可以直接使用绝对路径。",
+        )
+    } else {
+        (
+            format!("当前工作区根目录：{root_p}"),
+            "路径一律用相对工作区根的路径。",
+        )
+    };
     format!(
         "{persona}
 
-你工作在一个代码编辑器里，当前工作区根目录：{root_p}
+你工作在一个代码编辑器里，{where_line}
 
 ## 先判断用户要什么
 
@@ -909,7 +918,7 @@ pub(crate) fn build_system_prompt(persona: &str, root: &std::path::Path) -> Stri
 
 ## 可用工具（仅在 B 类任务时使用）
 
-路径一律用相对工作区根的路径。
+{path_hint}
 
 - read_file(path, offset?, limit?)：读文件，返回带行号的内容
 - list_dir(path?)：列目录

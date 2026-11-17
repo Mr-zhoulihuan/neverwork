@@ -44,7 +44,11 @@ impl AppState {
         );
 
         // ---- 最近列表 ----
-        let root_str = self.root.to_string_lossy().to_string();
+        let root_str = self
+            .root
+            .as_ref()
+            .map(|r| r.to_string_lossy().to_string())
+            .unwrap_or_default();
         let mut list = div()
             .id("ws-list")
             .flex()
@@ -307,9 +311,24 @@ impl AppState {
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                            this.open_workspace_folder_input(cx);
+                            this.pick_workspace_folder(cx);
                         }))
                         .child("＋ 打开文件夹…"),
+                )
+                .child(
+                    div()
+                        .id("ws-type-path")
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(theme::dim())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::raised()).text_color(theme::muted()))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.open_workspace_folder_input(cx);
+                        }))
+                        .child("⌨ 手动输入路径…"),
                 )
                 .child(div().flex_1())
                 .child(

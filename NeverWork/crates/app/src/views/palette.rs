@@ -120,7 +120,10 @@ impl AppState {
                                     .text_color(theme::dim())
                                     .child(SharedString::from(format!(
                                         "当前：{}",
-                                        self.root.display()
+                                        self.root
+                                            .as_ref()
+                                            .map(|r| r.display().to_string())
+                                            .unwrap_or_else(|| "未选择".into())
                                     ))),
                             )
                             .child(div().flex_1())

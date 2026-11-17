@@ -45,10 +45,10 @@ pub(crate) fn titlebar(
     maximized: bool,
     cx: &mut Context<AppState>,
 ) -> impl IntoElement {
-    let kind = if state.workspace.kind == ConnectionKind::Remote {
-        "· 远程"
-    } else {
-        ""
+    let (ws_name, kind) = match state.workspace.as_ref() {
+        Some(w) if w.kind == ConnectionKind::Remote => (w.name.as_str(), " · 远程"),
+        Some(w) => (w.name.as_str(), ""),
+        None => ("未选择工作区", ""),
     };
     div()
         .relative()
@@ -70,10 +70,7 @@ pub(crate) fn titlebar(
                 .child(
                     div()
                         .text_color(theme::muted())
-                        .child(SharedString::from(format!(
-                            "— {} {kind}",
-                            state.workspace.name
-                        ))),
+                        .child(SharedString::from(format!("— {ws_name}{kind}"))),
                 ),
         )
         .child(div().flex_1())

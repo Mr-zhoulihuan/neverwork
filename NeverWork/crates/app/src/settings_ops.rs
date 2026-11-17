@@ -305,6 +305,18 @@ impl AppState {
     // ===== 厂商 =====
 
     pub(crate) fn set_active_provider(&mut self, id: String, cx: &mut Context<Self>) {
+        // 没填 Key 的厂商设成默认也发不出请求。直接说清楚，
+        // 别让「默认」标记停在一条永远发不出去的行上。
+        let ready = self
+            .settings
+            .providers
+            .iter()
+            .any(|p| p.id == id && p.ready());
+        if !ready {
+            self.action_msg = Some("这个厂商还没有可用的模型（先填 Key / 启用模型）".into());
+            cx.notify();
+            return;
+        }
         self.update_settings(|s| s.active_provider_id = id, cx);
     }
 
@@ -559,17 +571,69 @@ impl AppState {
         .detach();
     }
 
-    /// 指定会话实际使用的厂商：会话指定且存在就用它，否则回落全局当前厂商。
+    /// 会话自己选的厂商（仍在且启用）。没选过、被删或被停用都算没选。
+    fn session_provider_choice(&self, session_idx: usize) -> Option<&ProviderEntry> {
+        let id = self.sessions.get(session_idx)?.provider_id.trim();
+        if id.is_empty() {
+            return None;
+        }
+        self.settings
+            .providers
+            .iter()
+            .find(|p| p.id == id && p.enabled)
+    }
+
+    /// 指定会话实际使用的厂商：会话选的可用就用它，否则回落全局默认，
+    /// 再不行找第一个可用厂商。
+    ///
+    /// 这里只认**已就绪**的厂商：切工作区后会话里可能存着旧厂商（没填 Key），
+    /// 头部不能显示一个根本发不出去的模型。全都不可用时仍返回会话选的，
+    /// 让界面如实显示它，而不是假装未配置。
     pub(crate) fn provider_for_session(&self, session_idx: usize) -> Option<&ProviderEntry> {
-        if let Some(s) = self.sessions.get(session_idx) {
-            let id = s.provider_id.trim();
-            if !id.is_empty() {
-                if let Some(p) = self.settings.providers.iter().find(|p| p.id == id) {
-                    return Some(p);
-                }
+        let chosen = self.session_provider_choice(session_idx);
+        if let Some(p) = chosen.filter(|p| p.ready()) {
+            return Some(p);
+        }
+        let default = self.settings.active_provider();
+        if let Some(p) = default.filter(|p| p.ready()) {
+            return Some(p);
+        }
+        self.settings
+            .providers
+            .iter()
+            .find(|p| p.enabled && p.ready())
+            .or(chosen)
+            .or(default)
+    }
+
+    /// 会话真正要发的模型 id。
+    ///
+    /// 只有仍在使用会话自己选的厂商时，才用会话里存的模型；回落默认厂商时
+    /// 用它当前的默认模型——否则会把 OpenAI 的 `gpt-4o` 发给 DeepSeek。
+    fn session_model_for(&self, session_idx: usize, provider: &ProviderEntry) -> String {
+        let using_choice = self
+            .session_provider_choice(session_idx)
+            .map(|c| c.id == provider.id)
+            .unwrap_or(false);
+        if using_choice {
+            if let Some(m) = self
+                .sessions
+                .get(session_idx)
+                .map(|s| s.model.trim())
+                .filter(|m| !m.is_empty())
+            {
+                return m.to_string();
             }
         }
-        self.settings.active_provider()
+        provider.effective_model()
+    }
+
+    /// 当前会话实际生效的（厂商 id, 模型 id）：模型选择器高亮用。
+    pub(crate) fn session_model_selection(&self, session_idx: usize) -> (String, String) {
+        let Some(p) = self.provider_for_session(session_idx) else {
+            return (String::new(), String::new());
+        };
+        (p.id.clone(), self.session_model_for(session_idx, p))
     }
 
     /// 给 agent 用的指定会话厂商配置。
@@ -585,36 +649,23 @@ impl AppState {
         if !p.ready() {
             return None;
         }
-        let model = self
-            .sessions
-            .get(session_idx)
-            .map(|s| s.model.trim().to_string())
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| p.effective_model());
         Some((
             protocol_name(p.protocol()).to_string(),
             neverwork_agent::ProviderConfig {
                 api_key: p.api_key.clone(),
                 base_url: p.base_url.clone(),
-                model,
+                model: self.session_model_for(session_idx, p),
                 temperature: p.temperature,
             },
         ))
     }
 
     /// 指定会话的（厂商展示名, 模型 id）：头部 chip 与回答页脚共用。
-    /// 会话没选过厂商就回落全局当前厂商，模型空则用它当前的默认模型。
     pub(crate) fn session_model_labels(&self, session_idx: usize) -> (String, String) {
         let Some(p) = self.provider_for_session(session_idx) else {
             return (String::new(), String::new());
         };
-        let model = self
-            .sessions
-            .get(session_idx)
-            .map(|s| s.model.trim().to_string())
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| p.effective_model());
-        (p.name.clone(), model)
+        (p.name.clone(), self.session_model_for(session_idx, p))
     }
 
     // ===== 技能 =====

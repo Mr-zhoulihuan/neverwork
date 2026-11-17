@@ -20,7 +20,7 @@ fn ignores_comments_and_empty() {
 
 #[test]
 fn prompt_tells_model_qa_needs_no_tools() {
-    let p = crate::agent_loop::build_system_prompt("", std::path::Path::new("E:/go"));
+    let p = crate::agent_loop::build_system_prompt("", &crate::tools::ToolContext::new("E:/go"));
     // 明确指出问答类诉求不要动工具
     assert!(p.contains("直接回答，不要动工具"), "缺少「问答不用工具」的指令");
     assert!(p.contains("不要读文件"), "缺少「不要读文件」的指令");
@@ -31,8 +31,15 @@ fn prompt_tells_model_qa_needs_no_tools() {
 }
 
 #[test]
+fn prompt_notes_missing_workspace() {
+    let p = crate::agent_loop::build_system_prompt("", &crate::tools::ToolContext::unrestricted());
+    assert!(p.contains("没有指定工作区"), "无工作区要明确告知模型");
+    assert!(p.contains("绝对路径"), "无工作区时要允许绝对路径");
+}
+
+#[test]
 fn prompt_still_documents_write_tools() {
-    let p = crate::agent_loop::build_system_prompt("自定义人格", std::path::Path::new("E:/go"));
+    let p = crate::agent_loop::build_system_prompt("自定义人格", &crate::tools::ToolContext::new("E:/go"));
     // 改代码的能力不能因为强调问答而丢失
     assert!(p.contains("apply_patch"));
     assert!(p.contains("multi_patch"));
@@ -46,7 +53,7 @@ fn prompt_still_documents_write_tools() {
 fn prompt_does_not_demand_reading_before_answering() {
     // 旧提示词写的是「改文件之前先用 read_file」，被误读成「回答之前也要读」
     // 这里确认新提示词把读文件限定在动手类任务
-    let p = crate::agent_loop::build_system_prompt("", std::path::Path::new("E:/go"));
+    let p = crate::agent_loop::build_system_prompt("", &crate::tools::ToolContext::new("E:/go"));
     let occurrences = p.matches("read_file").count();
     assert!(occurrences >= 1);
     // 「B 类任务先 read_file」这个限定出现了

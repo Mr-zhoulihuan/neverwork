@@ -147,6 +147,36 @@ impl AppState {
     }
 
     fn files_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 无工作区：文件树没得显示，给一扇门
+        if !self.has_workspace() {
+            return div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_2()
+                .p_3()
+                .text_xs()
+                .text_color(theme::dim())
+                .child("还没有选择工作区")
+                .child(
+                    div()
+                        .id("files-open-folder")
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme::raised())
+                        .border_1()
+                        .border_color(theme::border())
+                        .text_color(theme::muted())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                            this.pick_workspace_folder(cx);
+                        }))
+                        .child("＋ 打开文件夹…"),
+                )
+                .into_any_element();
+        }
         let mut col = div().flex().flex_col().flex_1().min_h(px(0.0));
 
         col = col.child(
@@ -197,7 +227,12 @@ impl AppState {
                     div()
                         .text_xs()
                         .text_color(theme::dim())
-                        .child(SharedString::from(self.workspace.name.clone())),
+                        .child(SharedString::from(
+                            self.workspace
+                                .as_ref()
+                                .map(|w| w.name.clone())
+                                .unwrap_or_else(|| "无工作区".into()),
+                        )),
                 ),
         );
 
@@ -212,7 +247,7 @@ impl AppState {
 
         for f in &self.files {
             let indent = 8.0 + (f.level as f32) * 12.0;
-            let abs = self.root.join(&f.path);
+            let abs = self.abs_path(&f.path);
             let is_open = !f.is_dir && self.open_path.as_deref() == Some(abs.as_path());
 
             let icon = if f.is_dir {
@@ -271,11 +306,28 @@ impl AppState {
             );
         }
 
-        col.child(tree)
+        col.child(tree).into_any_element()
     }
 
     /// Git 面板：分支 + 改动文件 + diff + 提交历史。
     fn git_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 无工作区：没有仓库可看，直接给占位
+        if !self.has_workspace() {
+            return div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .text_xs()
+                .text_color(theme::dim())
+                .child("还没有选择工作区")
+                .child(
+                    div()
+                        .text_color(theme::muted())
+                        .child("点左侧会话栏顶部的工作区条，打开一个文件夹"),
+                )
+                .into_any_element();
+        }
         let st = &self.git;
 
         let mut col = div().flex().flex_col().flex_1().min_h(px(0.0));
@@ -357,7 +409,10 @@ impl AppState {
 
         // ---- 已有分支列表 ----
         if self.git_show_branches {
-            let branches = crate::git_ops::branches(&self.git_dir());
+            let branches = self
+                .git_dir()
+                .map(|d| crate::git_ops::branches(&d))
+                .unwrap_or_default();
             let cur = self.git.branch.clone();
             let mut bl = div()
                 .id("git-branch-list")
@@ -436,7 +491,7 @@ impl AppState {
             );
             let active = self.git_dir();
             for (name, path) in self.git_repos.iter() {
-                let on = path == &active;
+                let on = active.as_ref() == Some(path);
                 let p2 = path.clone();
                 bar = bar.child(
                     div()
@@ -552,7 +607,11 @@ impl AppState {
 
         // ---- 不是仓库：给出明确提示 ----
         if !self.git_is_repo {
-            let children = crate::git::child_repos(&self.root);
+            let children = self
+                .root
+                .as_ref()
+                .map(|r| crate::git::child_repos(r))
+                .unwrap_or_default();
             let mut wrap = div()
                 .flex()
                 .flex_col()
@@ -575,7 +634,7 @@ impl AppState {
                         .child(format!("下面这些子目录是仓库（{} 个）", children.len())),
                 );
                 for name in children {
-                    let path = self.root.join(&name);
+                    let path = self.abs_path(&name);
                     let label = name.clone();
                     wrap = wrap.child(
                         div()
@@ -902,7 +961,10 @@ impl AppState {
 
         // ---- 选中文件的 diff ----
         if let Some(sel) = &self.git_selected {
-            let diff = crate::git::file_diff(&self.git_dir(), sel);
+            let diff = match self.git_dir() {
+                Some(dir) => crate::git::file_diff(&dir, sel),
+                None => Vec::new(),
+            };
             let mut boxel = div()
                 .id("git-diff")
                 .flex()

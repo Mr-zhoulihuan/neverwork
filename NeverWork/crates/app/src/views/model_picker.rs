@@ -69,12 +69,10 @@ impl AppState {
         self.model_highlight = 0;
         // begin_field 会把 field_buf 填成 field_value(ModelSearch)（刚清空）。
         self.begin_field(FormField::ModelSearch, cx);
-        // 高亮定到本会话当前用的模型：打开后 ↑/↓ 就是「在当前位置上下换」，
-        // 而不是永远从顶上的「跟随默认」开始。
-        let (cur_pid, cur_model) = {
-            let s = self.session();
-            (s.provider_id.clone(), s.model.clone())
-        };
+        // 高亮定到本会话**实际生效**的模型：打开后 ↑/↓ 就是「在当前位置上下换」。
+        // 用生效值而不是会话里存的旧值——会话没选过、或选的厂商不可用时
+        // 会回落到默认厂商，头部 chip 显示的也是那个。
+        let (cur_pid, cur_model) = self.session_model_selection(self.active_session);
         self.model_highlight = highlight_for(&self.picker_choices(), &cur_pid, &cur_model);
     }
 

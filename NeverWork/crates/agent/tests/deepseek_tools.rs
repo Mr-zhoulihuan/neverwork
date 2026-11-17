@@ -118,7 +118,7 @@ fn run(
         system,
         Vec::new(),
         prompt,
-        dir.clone(),
+        neverwork_agent::tools::ToolContext::new(dir.clone()),
         true,
         // 测试里不设运行上限；上限判定由 RunLimits 的调用方负责。
         neverwork_agent::RunLimits::default(),

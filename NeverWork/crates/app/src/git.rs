@@ -104,8 +104,8 @@ impl RepoStatus {
 #[derive(Debug, Clone)]
 pub enum RepoQuery {
     Ok(RepoStatus),
-    /// 目录不在 git 仓库里（或没装 git）。
-    NotARepo(String),
+    /// 目录不在 git 仓库里（或没装 git）。面板自己会给占位文案，不需要消息。
+    NotARepo,
 }
 
 /// 在当前目录的**直接子目录**里找 git 仓库。
@@ -166,9 +166,7 @@ fn run(dir: &Path, args: &[&str]) -> Option<String> {
 /// 读一次完整状态。
 pub fn status(dir: &Path) -> RepoQuery {
     if repo_root(dir).is_none() {
-        return RepoQuery::NotARepo(
-            "当前工作区不是 git 仓库（或未安装 git）。可用 `git init` 初始化。".into(),
-        );
+        return RepoQuery::NotARepo;
     }
 
     let mut st = RepoStatus::default();
@@ -421,7 +419,7 @@ mod tests {
         // 临时目录通常不在 git 仓库里；万一在，跳过该断言
         if repo_root(&dir).is_none() {
             match status(&dir) {
-                RepoQuery::NotARepo(msg) => assert!(msg.contains("不是 git 仓库"), "{msg}"),
+                RepoQuery::NotARepo => {}
                 RepoQuery::Ok(_) => panic!("不应识别为仓库"),
             }
         }
@@ -445,7 +443,7 @@ mod tests {
                 assert!(!st.commits.is_empty(), "应能读出提交历史");
                 assert!(!st.commits[0].hash.is_empty());
             }
-            RepoQuery::NotARepo(m) => panic!("应识别为仓库：{m}"),
+            RepoQuery::NotARepo => panic!("应识别为仓库"),
         }
     }
 

@@ -276,7 +276,10 @@ impl AppState {
                         .text_xs()
                         .text_color(theme::muted())
                         .child(SharedString::from(crate::views::text_fit::fit_text(
-                            &self.workspace.name,
+                            self.workspace
+                                .as_ref()
+                                .map(|w| w.name.as_str())
+                                .unwrap_or("未选择工作区"),
                             120.0,
                             12.0,
                         ))),

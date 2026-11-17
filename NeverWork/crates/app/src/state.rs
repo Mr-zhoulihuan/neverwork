@@ -214,10 +214,14 @@ impl Command {
 
 pub struct AppState {
     // ===== 工作区 =====
-    pub workspace: Workspace,
-    pub root: PathBuf,
+    /// 当前工作区；`None` = 用户还没选（对话可用，工具不限制路径）。
+    pub workspace: Option<Workspace>,
+    /// 本地工作区根；`None` = 无工作区。
+    pub root: Option<PathBuf>,
     pub files: Vec<FileNode>,
     pub expanded: HashSet<PathBuf>,
+    /// 文件监听器的停止信号：切工作区时先停旧的，再监听新根。
+    watcher_stop: Option<flume::Sender<()>>,
     /// Git 仓库状态（进入 Git 面板或手动刷新时更新）。
     pub git: crate::git::RepoStatus,
     /// Git 面板里当前选中的文件（用于显示 diff）。
@@ -502,30 +506,45 @@ impl RoundBubbles {
 
 /// 决定启动时打开哪个工作区。
 ///
-/// 优先级：`NW_ROOT` → 上次用过的（`settings.last_workspace`）→ `~/.neverwork/workspace`。
+/// 优先级：`NW_ROOT` → 上次用过的（`settings.last_workspace`）→ 无工作区。
 ///
-/// 最后一级**不能**回落到「当前目录 / 向上找 `Cargo.toml`」：从 NeverWork 自己的
-/// 源码目录启动时，那正好把 IDE 的开发仓库当成用户工作区，看到的是本项目代码，
-/// 既不是用户选的也没有任何提示。改为自动创建的中立空目录。
-fn resolve_root(saved: &str) -> PathBuf {
-    if let Ok(p) = std::env::var("NW_ROOT") {
-        let path = PathBuf::from(p);
-        if path.is_dir() {
-            return path;
+/// 最后一级**不**回落到当前目录 / 向上找 `Cargo.toml`，也**不**自动造一个
+/// 中立目录：「没指定工作区」是真实状态——对话照常，工具不限制路径
+/// （`ToolContext::unrestricted`）。
+fn resolve_root(saved: &str) -> Option<PathBuf> {
+    pick_root(std::env::var_os("NW_ROOT").map(PathBuf::from), saved)
+}
+
+/// 纯函数版：两个候选都必须是真实存在的目录，否则返回 `None`。
+fn pick_root(nw_root: Option<PathBuf>, saved: &str) -> Option<PathBuf> {
+    if let Some(p) = nw_root.filter(|p| p.is_dir()) {
+        return Some(p);
+    }
+    let saved = saved.trim();
+    if !saved.is_empty() {
+        let p = PathBuf::from(saved);
+        if p.is_dir() {
+            return Some(p);
         }
     }
-    if !saved.trim().is_empty() {
-        let path = PathBuf::from(saved.trim());
-        if path.is_dir() {
-            return path;
-        }
+    None
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::pick_root;
+
+    #[test]
+    fn pick_root_prefers_valid_nw_root() {
+        let dir = std::env::temp_dir();
+        assert_eq!(pick_root(Some(dir.clone()), ""), Some(dir));
     }
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".into());
-    let ws = PathBuf::from(home).join(".neverwork").join("workspace");
-    let _ = std::fs::create_dir_all(&ws);
-    ws
+
+    #[test]
+    fn pick_root_falls_back_to_none_without_valid_dirs() {
+        assert_eq!(pick_root(None, ""), None);
+        assert_eq!(pick_root(None, "Z:\\no-such-dir-nw"), None);
+    }
 }
 
 /// 新建会话的默认模式：默认单助手；`NW_TEAM=1` 供自动化验收直接以团队模式启动。
@@ -578,7 +597,8 @@ fn blank_session(seq: usize, config: &Config, mode: SessionMode) -> Session {
     }
 }
 
-/// 新会话该继承的（厂商 id, 模型 id）：源会话得真选过，且厂商仍在、启用。
+/// 新会话该继承的（厂商 id, 模型 id）：源会话得真选过，且厂商仍在、启用、
+/// 已就绪。没填 Key 的厂商继承过去也发不出去，不如跟着默认走。
 fn inherit_session_model(
     src: Option<&Session>,
     providers: &[neverwork_core::ProviderEntry],
@@ -587,7 +607,9 @@ fn inherit_session_model(
         return (String::new(), String::new());
     };
     let usable = !src.provider_id.is_empty()
-        && providers.iter().any(|p| p.id == src.provider_id && p.enabled);
+        && providers
+            .iter()
+            .any(|p| p.id == src.provider_id && p.enabled && p.ready());
     if usable {
         (src.provider_id.clone(), src.model.clone())
     } else {
@@ -723,9 +745,15 @@ impl AppState {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = neverwork_core::config::load_settings();
         let root = resolve_root(&settings.last_workspace);
-        let expanded = filesystem::default_expanded(&root);
-        let files = filesystem::build_tree(&root, &expanded).unwrap_or_default();
-        let ws = Workspace {
+        let expanded = root
+            .as_ref()
+            .map(|r| filesystem::default_expanded(r))
+            .unwrap_or_default();
+        let files = root
+            .as_ref()
+            .and_then(|r| filesystem::build_tree(r, &expanded).ok())
+            .unwrap_or_default();
+        let ws = root.as_ref().map(|root| Workspace {
             name: root
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
@@ -734,7 +762,7 @@ impl AppState {
             kind: ConnectionKind::Local,
             remote_url: None,
             online: true,
-        };
+        });
         let config = neverwork_core::config::load();
         // 主题立即生效，首次渲染就是用户上次选的颜色。
         neverwork_ui::theme::set_theme_mode(settings.theme);
@@ -747,9 +775,14 @@ impl AppState {
         let ai_ready = settings.usable_provider_count() > 0
             || neverwork_agent::config_from_env().is_some();
         // 会话来自磁盘，不再是演示数据：重启后要能看到上次聊到哪。
-        // `load_with_recovery` 会把崩溃残留的 Running/AwaitingApproval 降级成
+        // `load_with_recovery_key` 会把崩溃残留的 Running/AwaitingApproval 降级成
         // `Interrupted`，并告诉这里降级了几条、丢弃了几条。
-        let (store, report) = neverwork_core::sessions::load_with_recovery(&root);
+        // 无工作区用固定键 `scratch`；本地工作区用路径字符串（兼容已有文件）。
+        let session_key = root
+            .as_ref()
+            .map(|r| r.to_string_lossy().to_string())
+            .unwrap_or_else(|| "scratch".to_string());
+        let (store, report) = neverwork_core::sessions::load_with_recovery_key(&session_key);
         let (sessions, active_session) = adopt_store(store, &config);
 
         // 技能市场：先读缓存（离线也能看到上次同步的真实条目），启动后后台刷新。
@@ -768,6 +801,7 @@ impl AppState {
             root,
             files,
             expanded,
+            watcher_stop: None,
             git: crate::git::RepoStatus::default(),
             git_selected: None,
             git_is_repo: false,
@@ -896,7 +930,7 @@ impl AppState {
             }
         }
 
-        start_watcher(me.root.clone(), cx);
+        me.watcher_stop = start_watcher_opt(me.root.clone(), cx);
         // 自动化验证用：`NW_SEND=<文本>` 启动后自动发送一条消息。
         let auto_send = std::env::var("NW_SEND").ok().filter(|t| !t.trim().is_empty());
         // 验证用：启动即展开对话区模型选择器（按厂商分组）。
@@ -1049,9 +1083,8 @@ impl AppState {
         if let Ok(spec) = std::env::var("NW_GIT_OP") {
             me.refresh_git(cx);
             // NW_GIT_REPO=<子目录名> 先切到该仓库
-            if let Ok(name) = std::env::var("NW_GIT_REPO") {
-                let p = me.root.join(name);
-                me.git_active = Some(p);
+            if let (Ok(name), Some(root)) = (std::env::var("NW_GIT_REPO"), me.root.clone()) {
+                me.git_active = Some(root.join(name));
                 me.git_selected = None;
                 me.refresh_git(cx);
             }
@@ -1098,6 +1131,10 @@ impl AppState {
         if std::env::var("NW_WORKSPACE_POPUP").map(|v| v == "1").unwrap_or(false) {
             me.workspace_popup = true;
         }
+        // 验证专用：启动即打开「手动输入路径」行（复现 Esc 后输入失效的回归）。
+        if std::env::var("NW_WS_INPUT").map(|v| v == "1").unwrap_or(false) {
+            me.open_workspace_folder_input(cx);
+        }
         if std::env::var("NW_ARCHIVE_OPEN").map(|v| v == "1").unwrap_or(false) {
             me.archive_open = true;
         }
@@ -1120,10 +1157,13 @@ impl AppState {
                 }
             }
         }
-        // 启动就把当前工作区记进最近列表（首次运行时列表里至少有一条）
-        me.settings
-            .record_workspace(&me.root.to_string_lossy().to_string(), now_secs());
-        let _ = neverwork_core::config::save_settings(&me.settings);
+        // 启动就把当前工作区记进最近列表（首次运行时列表里至少有一条）。
+        // 无工作区时不记——「还没选」不该变成一个最近项。
+        if let Some(root) = me.root.clone() {
+            me.settings
+                .record_workspace(&root.to_string_lossy(), now_secs());
+            let _ = neverwork_core::config::save_settings(&me.settings);
+        }
         // 用 NW_VIEW 直达同步页时也自动查一次版本。
         if me.settings_tab == SettingsTab::Sync && me.center == CenterView::Settings {
             me.check_update(cx);
@@ -1185,6 +1225,27 @@ impl AppState {
         self.session_mode().is_team()
     }
 
+    /// 会话库键：有工作区用本地路径（兼容旧文件），无工作区用固定 `scratch`。
+    pub(crate) fn session_key(&self) -> String {
+        self.root
+            .as_ref()
+            .map(|r| r.to_string_lossy().to_string())
+            .unwrap_or_else(|| "scratch".to_string())
+    }
+
+    pub(crate) fn has_workspace(&self) -> bool {
+        self.root.is_some()
+    }
+
+    /// 把工作区相对路径还原成绝对路径；无工作区时原样返回。
+    pub(crate) fn abs_path(&self, rel: &str) -> PathBuf {
+        let p = PathBuf::from(rel);
+        match &self.root {
+            Some(root) if p.is_relative() => root.join(p),
+            _ => p,
+        }
+    }
+
     /// 把会话写回磁盘。失败不中断对话，只提示一次。
     pub(crate) fn save_sessions(&mut self) {
         // `action` 只是 `stage` 的显示投影：每次落盘顺手对齐，
@@ -1200,7 +1261,7 @@ impl AppState {
                 .unwrap_or_default(),
             sessions: self.sessions.clone(),
         };
-        if let Err(e) = neverwork_core::sessions::save(&self.root, &store) {
+        if let Err(e) = neverwork_core::sessions::save_key(&self.session_key(), &store) {
             self.notice = Some(format!("会话保存失败：{e}"));
         }
         self.sessions_saved_at = std::time::Instant::now();
@@ -1523,40 +1584,44 @@ impl AppState {
         if self.streaming {
             self.notice = Some("正在生成，先停止再切换工作区".into());
             self.workspace_popup = false;
+            self.restore_input_target();
             cx.notify();
             return;
         }
         if !path.is_dir() {
             self.notice = Some(format!("不是一个目录：{}", path.display()));
+            self.workspace_popup = false;
+            self.restore_input_target();
             cx.notify();
             return;
         }
         // 先把旧工作区的会话落盘，否则下面改 root 后旧会话会写进新文件
         self.save_sessions();
-        self.root = path;
-        let root_str = self.root.to_string_lossy().to_string();
+        let root_str = path.to_string_lossy().to_string();
         self.settings.last_workspace = root_str.clone();
         self.settings.record_workspace(&root_str, now_secs());
         let _ = neverwork_core::config::save_settings(&self.settings);
-        self.expanded = filesystem::default_expanded(&self.root);
-        self.files = filesystem::build_tree(&self.root, &self.expanded).unwrap_or_default();
-        self.workspace = Workspace {
-            name: self
-                .root
+        self.expanded = filesystem::default_expanded(&path);
+        self.files = filesystem::build_tree(&path, &self.expanded).unwrap_or_default();
+        self.workspace = Some(Workspace {
+            name: path
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "workspace".into()),
-            path: self.root.to_string_lossy().to_string(),
+            path: root_str.clone(),
             kind: ConnectionKind::Local,
             remote_url: None,
             online: true,
-        };
+        });
+        self.root = Some(path);
+        // 监听跟着换根：不停旧的，旧目录的改动还会刷进新文件树。
+        self.watcher_stop = start_watcher_opt(self.root.clone(), cx);
         self.open_path = None;
         self.editor.reset("");
         self.dirty = false;
         self.folds.clear();
         self.center = CenterView::Chat;
-        self.adopt_session_store(neverwork_core::sessions::load_with_recovery(&self.root).0);
+        self.adopt_session_store(neverwork_core::sessions::load_with_recovery_key(&root_str).0);
         // 列表的搜索/菜单是上一个工作区的语境，全部复位
         self.session_search.reset("");
         self.session_menu = None;
@@ -1570,7 +1635,10 @@ impl AppState {
         self.ws_prompt_open = false;
         self.palette_open = false;
         self.ws_input.reset("");
-        self.notice = Some(format!("已切换到 {}", self.root.display()));
+        // 关闭路径行后把输入目标交回正文：目标留着 Workspace，
+        // 焦点会一直挂在只在该行渲染时才存在的句柄上，打字/回车全部失灵。
+        self.restore_input_target();
+        self.notice = Some(format!("已切换到 {root_str}"));
         self.refresh_git(cx);
     }
 
@@ -1585,6 +1653,7 @@ impl AppState {
         self.workspace_popup = false;
         self.ws_rename = None;
         self.ws_input.reset("");
+        self.restore_input_target();
         cx.notify();
     }
 
@@ -1597,6 +1666,56 @@ impl AppState {
         self.ws_input.reset("");
         self.input_target = InputTarget::Workspace;
         cx.notify();
+    }
+
+    /// 关闭浮层后把键盘交还正文：路径行/重命名行不在时，`Workspace` 目标必须复位。
+    ///
+    /// 不复位的后果：每帧焦点被拉向只在路径行渲染时才存在的 `ws_focus`，
+    /// 打字、Esc、回车全部派发到无节点句柄被丢弃。
+    pub(crate) fn restore_input_target(&mut self) {
+        if self.input_target != InputTarget::Workspace {
+            return;
+        }
+        if self.ws_prompt_open || self.ws_rename.is_some() {
+            return;
+        }
+        self.input_target = if self.center == CenterView::File && self.open_path.is_some() {
+            InputTarget::Editor
+        } else {
+            InputTarget::Chat
+        };
+        self.marked_range = None;
+    }
+
+    /// 「打开文件夹…」：弹系统原生目录选择器，选中后直接进工作区。
+    pub(crate) fn pick_workspace_folder(&mut self, cx: &mut Context<Self>) {
+        use gpui::PathPromptOptions;
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择工作区文件夹".into()),
+        });
+        self.workspace_popup = false;
+        self.restore_input_target();
+        cx.spawn(async move |weak, async_cx| {
+            match rx.await {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(p) = paths.into_iter().next() {
+                        let _ = weak.update(async_cx, |this, cx| this.enter_workspace(p, cx));
+                    }
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => {
+                    let _ = weak.update(async_cx, |this, cx| {
+                        this.notice = Some(format!("打开文件夹失败：{e}"));
+                        cx.notify();
+                    });
+                }
+                Err(_) => {}
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn switch_to_recent_workspace(&mut self, i: usize, cx: &mut Context<Self>) {
@@ -1683,7 +1802,10 @@ impl AppState {
     }
 
     pub(crate) fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        self.files = filesystem::build_tree(&self.root, &self.expanded).unwrap_or_default();
+        self.files = match &self.root {
+            Some(root) => filesystem::build_tree(root, &self.expanded).unwrap_or_default(),
+            None => Vec::new(),
+        };
         cx.notify();
     }
 
@@ -1699,9 +1821,9 @@ impl AppState {
         self.refresh_tree(cx);
     }
 
-    /// 当前 Git 面板操作的目录（选中的子仓库，或工作区根）。
-    pub(crate) fn git_dir(&self) -> PathBuf {
-        self.git_active.clone().unwrap_or_else(|| self.root.clone())
+    /// 当前 Git 面板操作的目录（选中的子仓库，或工作区根）；无工作区为 `None`。
+    pub(crate) fn git_dir(&self) -> Option<PathBuf> {
+        self.git_active.clone().or_else(|| self.root.clone())
     }
 
     /// 重新发现工作区里的仓库。
@@ -1709,15 +1831,18 @@ impl AppState {
     /// 规则：工作区根本身是仓库 → 只列它；否则列直接子目录里的仓库。
     /// 不递归深层找，避免在 node_modules 之类目录里翻出几百个仓库。
     fn discover_git_repos(&mut self) {
-        let mut repos: Vec<(String, PathBuf)> = Vec::new();
-        if crate::git::repo_root(&self.root).is_some() {
-            repos.push((".".to_string(), self.root.clone()));
+        self.git_repos.clear();
+        let Some(root) = self.root.clone() else {
+            self.git_active = None;
+            return;
+        };
+        if crate::git::repo_root(&root).is_some() {
+            self.git_repos.push((".".to_string(), root.clone()));
         } else {
-            for name in crate::git::child_repos(&self.root) {
-                repos.push((name.clone(), self.root.join(&name)));
+            for name in crate::git::child_repos(&root) {
+                self.git_repos.push((name.clone(), root.join(&name)));
             }
         }
-        self.git_repos = repos;
 
         // 当前选中的仓库若已不存在就清掉
         if let Some(active) = &self.git_active {
@@ -1744,7 +1869,14 @@ impl AppState {
     /// 刷新 Git 状态。
     pub(crate) fn refresh_git(&mut self, cx: &mut Context<Self>) {
         self.discover_git_repos();
-        let dir = self.git_dir();
+        let Some(dir) = self.git_dir() else {
+            // 无工作区：清空上一次的状态，面板显示占位而不是旧仓库的改动
+            self.git_is_repo = false;
+            self.git = crate::git::RepoStatus::default();
+            self.git_selected = None;
+            cx.notify();
+            return;
+        };
         match crate::git::status(&dir) {
             crate::git::RepoQuery::Ok(st) => {
                 self.git_is_repo = true;
@@ -1759,15 +1891,12 @@ impl AppState {
                     self.git_selected = self.git.changes.first().map(|c| c.path.clone());
                 }
             }
-            crate::git::RepoQuery::NotARepo(msg) => {
+            crate::git::RepoQuery::NotARepo => {
                 self.git_is_repo = false;
                 self.git = crate::git::RepoStatus::default();
                 self.git_selected = None;
-                // 只有在「连子仓库都没有」时才提示不是仓库；
-                // 多仓库工作区里这是正常状态，不该报错。
-                if self.git_repos.is_empty() {
-                    self.notice = Some(msg);
-                }
+                // 不往对话区发通知：Git 面板自己会显示「不是仓库」的占位。
+                // 打开一个非 Git 文件夹是正常用法，不该报错。
             }
         }
         cx.notify();
@@ -1804,7 +1933,11 @@ impl AppState {
 
     /// 真正执行（已确认或非破坏性）。
     fn exec_git_op(&mut self, op: crate::git_ops::GitOp, cx: &mut Context<Self>) {
-        let dir = self.git_dir();
+        let Some(dir) = self.git_dir() else {
+            self.notice = Some("还没有选择工作区".into());
+            cx.notify();
+            return;
+        };
         let is_commit = matches!(op, crate::git_ops::GitOp::Commit(_));
 
         let r = crate::git_ops::apply(&dir, &op);
@@ -2391,6 +2524,8 @@ impl AppState {
                 } else if self.streaming {
                     self.stop_streaming(cx);
                 }
+                // 浮层/路径行可能刚刚关闭：把输入目标拉回正文。
+                self.restore_input_target();
                 cx.notify();
             }
         }
@@ -2730,7 +2865,11 @@ impl AppState {
             seconds: self.settings.max_run_seconds,
         };
         let cancel = self.cancel.clone();
-        let root = self.root.clone();
+        // 无工作区时工具不限制路径（阶段一）；远程工作区在阶段二换成远程后端。
+        let ctx = match &self.root {
+            Some(root) => neverwork_agent::tools::ToolContext::new(root.clone()),
+            None => neverwork_agent::tools::ToolContext::unrestricted(),
+        };
         // 线程里用一份，UI 侧留一份（角色名/颜色要用来渲染气泡）
         // 本会话之前聊过的内容。不喂给模型它就「失忆」：第二轮问
         // 「刚才让你读的是哪个文件」必然答不出，也看不出用户在追问。
@@ -2782,7 +2921,7 @@ impl AppState {
                             config.clone(),
                             history.clone(),
                             &input,
-                            root.clone(),
+                            ctx.clone(),
                             with_tools,
                             limits,
                             team,
@@ -2797,7 +2936,7 @@ impl AppState {
                             &role.prompt,
                             history.clone(),
                             &input,
-                            root.clone(),
+                            ctx.clone(),
                             with_tools,
                             limits,
                             &mut emit,
@@ -3760,6 +3899,14 @@ impl Render for AppState {
         // 输入桥也不再注册输入处理器 —— 键盘和输入法事件全部丢弃，
         // 表现就是「明明有光标，怎么打字都没反应」。
         // 现在每帧检查一次，掉焦就补回来；用户无需先点一下输入框。
+        // 渲染 clamp：路径行与重命名行都不在时，`Workspace` 目标不能留。
+        // 否则焦点每帧被拉向无节点句柄，键盘输入全部丢失。
+        if self.input_target == InputTarget::Workspace
+            && !self.ws_prompt_open
+            && self.ws_rename.is_none()
+        {
+            self.restore_input_target();
+        }
         {
             let want = match self.input_target {
                 InputTarget::Editor | InputTarget::Field(_) => Some(self.editor_focus.clone()),
@@ -3904,16 +4051,26 @@ fn input_bridge(
 }
 
 /// 监听工作区变化，外部改动后刷新文件树（防抖 300ms）。
-fn start_watcher(root: PathBuf, cx: &mut Context<AppState>) {
+///
+/// 返回停止信号：切工作区时先丢掉旧的（线程随之退出），再起新的；
+/// 无工作区返回 `None`，不起线程。
+fn start_watcher_opt(
+    root: Option<PathBuf>,
+    cx: &mut Context<AppState>,
+) -> Option<flume::Sender<()>> {
     use std::time::Duration;
+    let root = root?;
     let (tx, rx) = flume::unbounded::<()>();
+    let (stop_tx, stop_rx) = flume::unbounded::<()>();
     std::thread::spawn(move || {
         let (etx, erx) = std::sync::mpsc::channel::<()>();
-        let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if res.is_ok() {
-                let _ = etx.send(());
-            }
-        }) {
+        let mut watcher = match notify::recommended_watcher(
+            move |res: notify::Result<notify::Event>| {
+                if res.is_ok() {
+                    let _ = etx.send(());
+                }
+            },
+        ) {
             Ok(w) => w,
             Err(_) => return,
         };
@@ -3922,24 +4079,35 @@ fn start_watcher(root: PathBuf, cx: &mut Context<AppState>) {
             return;
         }
         loop {
-            if erx.recv().is_err() {
-                break;
+            // 停止信号（信号 Sender 被丢弃也算）
+            match stop_rx.try_recv() {
+                Ok(()) | Err(flume::TryRecvError::Disconnected) => break,
+                Err(flume::TryRecvError::Empty) => {}
             }
-            while erx.recv_timeout(Duration::from_millis(300)).is_ok() {}
-            let _ = tx.send(());
+            match erx.recv_timeout(Duration::from_millis(200)) {
+                Ok(()) => {
+                    // 合并这一波连续改动
+                    while erx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+                    let _ = tx.send(());
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
         }
     });
 
     cx.spawn(async move |weak, async_cx| {
         while rx.recv_async().await.is_ok() {
             let _ = weak.update(async_cx, |this, cx| {
-                this.files =
-                    filesystem::build_tree(&this.root, &this.expanded).unwrap_or_default();
-                cx.notify();
+                if let Some(root) = this.root.clone() {
+                    this.files = filesystem::build_tree(&root, &this.expanded).unwrap_or_default();
+                    cx.notify();
+                }
             });
         }
     })
     .detach();
+    Some(stop_tx)
 }
 
 /// 单个会话送进模型的历史条数上限。
@@ -4923,13 +5091,31 @@ mod session_inherit_tests {
         s
     }
 
+    /// 填了 Key 的厂商（没 Key 的 Inherit 会被跳过）。
+    fn ready_provider(preset: ProviderPreset) -> ProviderEntry {
+        let mut p = ProviderEntry::from_preset(preset);
+        p.api_key = "sk-test".into();
+        p
+    }
+
     #[test]
-    fn inherits_when_provider_still_enabled() {
-        let providers = vec![ProviderEntry::from_preset(ProviderPreset::DeepSeek)];
+    fn inherits_when_provider_ready() {
+        let providers = vec![ready_provider(ProviderPreset::DeepSeek)];
         let src = session_with("deepseek", "deepseek-flash");
         let (pid, model) = inherit_session_model(Some(&src), &providers);
         assert_eq!(pid, "deepseek");
         assert_eq!(model, "deepseek-flash");
+    }
+
+    #[test]
+    fn skips_provider_without_key() {
+        // 旧会话里存着没填 Key 的厂商时，新会话不继承，跟全局默认走。
+        let providers = vec![ProviderEntry::from_preset(ProviderPreset::OpenAi)];
+        let src = session_with("openai", "gpt-4o");
+        assert_eq!(
+            inherit_session_model(Some(&src), &providers),
+            (String::new(), String::new())
+        );
     }
 
     #[test]

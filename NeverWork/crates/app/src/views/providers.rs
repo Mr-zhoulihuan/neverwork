@@ -73,16 +73,21 @@ impl AppState {
             );
         }
 
-        // 当前会话指定的厂商 / 模型（列表里标「本会话」）
+        // 当前会话**单独指定**的厂商（列表里标「本会话」）；没指定就不标，
+        // 否则会和「默认」标签叠在同一行上。
         let session_pid = self
             .sessions
             .get(self.active_session)
             .map(|s| s.provider_id.clone())
             .unwrap_or_default();
 
+        // 「默认」标记跟**实际生效**的厂商走：指定厂商没填 Key 时会回落到
+        // 第一个可用厂商，标记不能停在一条发不出去的行上。
+        let effective_default = self.settings.active_provider().map(|p| p.id.clone());
+
         for idx in 0..self.settings.providers.len() {
             let p = &self.settings.providers[idx];
-            let is_default = self.settings.active_provider_id == p.id;
+            let is_default = effective_default.as_deref() == Some(p.id.as_str());
             let in_use = !session_pid.is_empty() && session_pid == p.id;
             let ready = p.ready();
             let enabled_models = p.enabled_model_ids().len();
@@ -360,7 +365,11 @@ impl AppState {
                 .child(back_row(cx));
         };
         let i8 = idx as u8;
-        let is_default = self.settings.active_provider_id == p.id;
+        let is_default = self
+            .settings
+            .active_provider()
+            .map(|active| active.id == p.id)
+            .unwrap_or(false);
         let ready = p.ready();
         let local = p.preset.is_local();
         let masked = p.masked_key();

@@ -176,7 +176,7 @@ fn run_turn(
         cfg(port),
         vec![],
         user_text,
-        std::env::temp_dir(),
+        neverwork_agent::tools::ToolContext::new(std::env::temp_dir()),
         true,
         limits(),
         &team(),

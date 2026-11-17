@@ -39,11 +39,13 @@ fn fnv1a(s: &str) -> u32 {
     h
 }
 
-/// 工作区路径 → 文件名：`E:\AI\ide` → `E-AI-ide-xxxxxxxx.json`。
-fn file_name_for(root: &Path) -> String {
-    let raw = root.to_string_lossy();
+/// 工作区标识 → 文件名：`E:\AI\ide` → `E-AI-ide-xxxxxxxx.json`。
+///
+/// 本地工作区直接用路径字符串（与旧文件命名完全一致，历史会话照常加载）；
+/// 无工作区用固定键 `scratch`，远程工作区将来用 `ssh://host/path`。
+fn file_name_for_key(key: &str) -> String {
     let mut slug = String::new();
-    for c in raw.chars() {
+    for c in key.chars() {
         if c.is_ascii_alphanumeric() {
             slug.push(c);
         } else if !slug.ends_with('-') {
@@ -53,12 +55,17 @@ fn file_name_for(root: &Path) -> String {
     let slug = slug.trim_matches('-');
     // 文件名有 255 字符上限：深路径截断，尾部的哈希负责区分。
     let head: String = slug.chars().take(48).collect();
-    format!("{head}-{:08x}.json", fnv1a(&raw))
+    format!("{head}-{:08x}.json", fnv1a(key))
 }
 
-/// 某个工作区的会话文件路径。
+/// 某个工作区标识的会话文件路径。
+pub fn store_path_key(key: &str) -> PathBuf {
+    sessions_dir().join(file_name_for_key(key))
+}
+
+/// 某个工作区路径的会话文件路径（本地工作区的包装）。
 pub fn store_path(root: &Path) -> PathBuf {
-    sessions_dir().join(file_name_for(root))
+    store_path_key(&root.to_string_lossy())
 }
 
 /// 加载会话库；文件不存在或损坏时返回空库。
@@ -69,6 +76,11 @@ pub fn store_path(root: &Path) -> PathBuf {
 /// 加载后会做一次崩溃恢复（见 `normalize_after_crash`）。
 pub fn load(root: &Path) -> SessionStore {
     load_with_recovery(root).0
+}
+
+/// 按工作区标识加载会话库。
+pub fn load_key(key: &str) -> SessionStore {
+    load_with_recovery_key(key).0
 }
 
 /// 加载结果的损伤报告，供启动时提示。
@@ -82,7 +94,12 @@ pub struct LoadReport {
 
 /// 与 `load` 相同，但额外返回损伤报告，供启动时提示「可续跑 / 有记录损坏」。
 pub fn load_with_recovery(root: &Path) -> (SessionStore, LoadReport) {
-    let path = store_path(root);
+    load_with_recovery_key(&root.to_string_lossy())
+}
+
+/// 按工作区标识加载，并返回损伤报告。
+pub fn load_with_recovery_key(key: &str) -> (SessionStore, LoadReport) {
+    let path = store_path_key(key);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let mut report = LoadReport::default();
     let mut store = match serde_json::from_str::<SessionStore>(&text) {
@@ -156,9 +173,14 @@ pub fn normalize_after_crash(store: &mut SessionStore) -> usize {
 
 /// 原子保存会话库。
 pub fn save(root: &Path, store: &SessionStore) -> AppResult<()> {
+    save_key(&root.to_string_lossy(), store)
+}
+
+/// 按工作区标识原子保存会话库。
+pub fn save_key(key: &str, store: &SessionStore) -> AppResult<()> {
     let dir = sessions_dir();
     std::fs::create_dir_all(&dir)?;
-    let path = store_path(root);
+    let path = store_path_key(key);
     let tmp = path.with_extension("json.tmp");
     let text =
         serde_json::to_string(store).map_err(|e| AppError::Config(e.to_string()))?;
@@ -177,8 +199,8 @@ mod tests {
 
     #[test]
     fn same_path_maps_to_same_file() {
-        let a = file_name_for(Path::new("E:\\AI\\ide"));
-        let b = file_name_for(Path::new("E:\\AI\\ide"));
+        let a = file_name_for_key("E:\\AI\\ide");
+        let b = file_name_for_key("E:\\AI\\ide");
         assert_eq!(a, b);
         assert!(a.ends_with(".json"));
         assert!(a.starts_with("E-AI-ide-"), "文件名要能看出是哪个项目: {a}");
@@ -186,16 +208,30 @@ mod tests {
 
     #[test]
     fn different_paths_do_not_collide() {
-        let a = file_name_for(Path::new("E:\\AI\\a-b"));
-        let b = file_name_for(Path::new("E:\\AI\\a\\b"));
+        let a = file_name_for_key("E:\\AI\\a-b");
+        let b = file_name_for_key("E:\\AI\\a\\b");
         assert_ne!(a, b, "分隔符不同的两个工作区不能映射到同一个文件");
     }
 
     #[test]
     fn long_path_is_truncated_but_still_unique() {
         let deep = format!("E:\\{}", "verylongsegment\\".repeat(20));
-        let name = file_name_for(Path::new(&deep));
+        let name = file_name_for_key(&deep);
         assert!(name.len() <= 64, "文件名要短于上限: {}", name.len());
+    }
+
+    #[test]
+    fn path_wrapper_matches_key_variant() {
+        let root = Path::new("E:\\AI\\ide");
+        assert_eq!(store_path(root), store_path_key(&root.to_string_lossy()));
+    }
+
+    #[test]
+    fn scratch_key_is_stable_and_readable() {
+        let a = file_name_for_key("scratch");
+        let b = file_name_for_key("scratch");
+        assert_eq!(a, b);
+        assert!(a.starts_with("scratch-"), "{a}");
     }
 
     fn session(stage: crate::model::TaskStage) -> Session {

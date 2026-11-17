@@ -1090,11 +1090,20 @@ impl Settings {
         " ".repeat(self.tab_width.clamp(1, 8) as usize)
     }
 
+    /// 实际生效的默认厂商。
+    ///
+    /// 指定的厂商可用就听它的；没填 Key / 被停用时回落到第一个可用厂商，
+    /// 否则会话头部会显示一个根本发不出去的模型（切工作区后尤其明显）。
     pub fn active_provider(&self) -> Option<&ProviderEntry> {
+        let by_id = self.providers.iter().find(|p| p.id == self.active_provider_id);
+        if let Some(p) = by_id.filter(|p| p.enabled && p.ready()) {
+            return Some(p);
+        }
         self.providers
             .iter()
-            .find(|p| p.id == self.active_provider_id)
-            .or_else(|| self.providers.iter().find(|p| p.ready()))
+            .find(|p| p.enabled && p.ready())
+            .or(by_id)
+            .or_else(|| self.providers.iter().find(|p| p.enabled))
     }
 
     /// 已填 API Key 的厂商数量（本地服务不参与统计，它本来就不需要 Key）。
@@ -1253,6 +1262,39 @@ mod tests {
         p.model = "llama3.2".into();
         p.base_url = String::new();
         assert!(!p.ready(), "没有地址时不算就绪");
+    }
+
+    #[test]
+    fn active_provider_falls_back_to_ready_one() {
+        // 默认指向没填 Key 的 OpenAI 时，实际生效的是第一个可用厂商：
+        // 否则会话头部会显示一个根本发不出去的模型。
+        let mut s = Settings::default();
+        assert_eq!(s.active_provider().map(|p| p.id.clone()), Some("ollama".into()));
+        s.providers
+            .iter_mut()
+            .find(|p| p.id == "deepseek")
+            .unwrap()
+            .api_key = "sk-test".into();
+        s.active_provider_id = "openai".into();
+        assert_eq!(
+            s.active_provider().map(|p| p.id.clone()),
+            Some("deepseek".into())
+        );
+    }
+
+    #[test]
+    fn active_provider_keeps_configured_when_ready() {
+        let mut s = Settings::default();
+        s.providers
+            .iter_mut()
+            .find(|p| p.id == "openai")
+            .unwrap()
+            .api_key = "sk-test".into();
+        s.active_provider_id = "openai".into();
+        assert_eq!(
+            s.active_provider().map(|p| p.id.clone()),
+            Some("openai".into())
+        );
     }
 
     #[test]

@@ -235,25 +235,67 @@ fn app_retryable(e: &neverwork_core::AppError) -> bool {
 }
 
 /// 工具执行上下文。
+#[derive(Clone)]
 pub struct ToolContext {
-    /// 工作区根，所有路径都被限制在其内。
+    /// 工作区根；无限制模式下是用户主目录，仅作相对路径基准。
     pub root: PathBuf,
+    /// 未指定工作区：不限制在 root 内，绝对路径直接可用。
+    unrestricted: bool,
 }
 
 impl ToolContext {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let root = fs::canonicalize(&root).unwrap_or(root);
-        Self { root }
+        Self { root, unrestricted: false }
     }
 
-    /// 把模型给的路径解析成工作区内的真实路径。
+    /// 未指定工作区：绝对路径直接可用，相对路径以用户主目录为基准。
     ///
-    /// 拒绝：绝对路径越界、`..` 逃逸、解析后不在 root 内。
+    /// 写操作仍由 `requires_approval` → NeedApproval 流程把关，
+    /// 这里放开的是「能不能看/写到工作区之外」，不是「写不用确认」。
+    pub fn unrestricted() -> Self {
+        Self { root: Self::home_dir(), unrestricted: true }
+    }
+
+    pub fn is_unrestricted(&self) -> bool {
+        self.unrestricted
+    }
+
+    /// 无工作区时相对路径的基准目录。
+    ///
+    /// 不用进程当前目录：从源码目录启动时那正是 IDE 自己的仓库，
+    /// 用户没选过它，却会成为相对路径的默认落点。
+    pub fn home_dir() -> PathBuf {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// 把模型给的路径解析成可访问的真实路径。
+    ///
+    /// 受限模式拒绝：绝对路径越界、`..` 逃逸、解析后不在 root 内。
+    /// 无限制模式不设边界，只做词法归一化与已存在路径的 canonicalize。
     pub fn resolve(&self, rel: &str) -> Result<PathBuf, String> {
         let raw = rel.trim();
         let raw = if raw.is_empty() { "." } else { raw };
         let p = Path::new(raw);
+
+        if self.unrestricted {
+            let joined = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                self.root.join(p)
+            };
+            let normalized = normalize(&joined);
+            if normalized.exists() {
+                if let Ok(canon) = fs::canonicalize(&normalized) {
+                    return Ok(canon);
+                }
+            }
+            return Ok(normalized);
+        }
 
         // 拒绝 Windows 盘符绝对路径（跨盘）
         if p.is_absolute() && !p.starts_with(&self.root) {
@@ -1130,6 +1172,33 @@ mod tests {
         let (ctx, dir) = ctx();
         let p = ctx.resolve("src/main.rs").unwrap();
         assert!(p.starts_with(fs::canonicalize(&dir).unwrap()) || p.starts_with(&dir));
+    }
+
+    #[test]
+    fn unrestricted_allows_absolute_paths() {
+        let dir = std::env::temp_dir().join(format!("nw-unrestricted-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        fs::write(&file, "hi").unwrap();
+        let ctx = ToolContext::unrestricted();
+        let got = ctx.resolve(file.to_str().unwrap()).unwrap();
+        assert_eq!(got, fs::canonicalize(&file).unwrap());
+    }
+
+    #[test]
+    fn unrestricted_relative_resolves_under_home() {
+        let ctx = ToolContext::unrestricted();
+        let got = ctx.resolve("nw-probe-file").unwrap();
+        assert!(got.starts_with(ToolContext::home_dir()), "{}", got.display());
+        assert_eq!(ctx.display_rel(&got).replace('\\', "/"), "nw-probe-file");
+    }
+
+    #[test]
+    fn unrestricted_still_normalizes_parent_dir() {
+        let ctx = ToolContext::unrestricted();
+        let got = ctx.resolve("a/../b.txt").unwrap();
+        assert!(got.ends_with("b.txt"));
+        assert!(!got.to_string_lossy().contains(".."));
     }
 
     #[test]
