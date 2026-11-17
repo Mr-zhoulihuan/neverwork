@@ -2076,6 +2076,10 @@ impl AppState {
         self.restore_input_target();
         self.notice = Some(format!("已切换到 {root_str}"));
         self.reset_git_state();
+        // 「改动」面板正开着：换工作区后立刻重算改动列表（收起时等展开再刷）
+        if self.right_tab == RightTab::Git && !self.right_collapsed {
+            self.refresh_git(cx);
+        }
         cx.notify();
     }
 
@@ -4945,6 +4949,10 @@ impl AppState {
     /// 收起 / 展开右侧栏。
     pub(crate) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
         self.right_collapsed = !self.right_collapsed;
+        // 展开时如果停在「改动」面板，先拉一次最新改动（收起期间 watcher 不刷）
+        if !self.right_collapsed && self.right_tab == RightTab::Git {
+            self.refresh_git(cx);
+        }
         cx.notify();
     }
 
@@ -5375,6 +5383,10 @@ fn start_watcher_opt(
             let _ = weak.update(async_cx, |this, cx| {
                 if let Some(root) = this.root.clone() {
                     this.files = filesystem::build_tree(&root, &this.expanded).unwrap_or_default();
+                    // 「改动」面板展开着：保存/外部修改都会触发 watcher，顺手刷改动列表
+                    if this.right_tab == RightTab::Git && !this.right_collapsed {
+                        this.refresh_git(cx);
+                    }
                     cx.notify();
                 }
             });

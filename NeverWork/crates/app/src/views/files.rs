@@ -138,6 +138,7 @@ impl AppState {
                 .border_b_1()
                 .border_color(theme::border())
                 .child(self.tab_button("文件", RightTab::Files, cx))
+                .child(self.tab_button("改动", RightTab::Git, cx))
                 .child(self.tab_button("预览", RightTab::Preview, cx))
                 .child(div().flex_1())
                 .child(
@@ -439,7 +440,7 @@ impl AppState {
                 .p_3()
                 .text_xs()
                 .text_color(theme::dim())
-                .child("远程工作区暂不支持 Git 面板")
+                .child("远程工作区暂不支持改动面板")
                 .child(
                     div()
                         .text_color(theme::muted())

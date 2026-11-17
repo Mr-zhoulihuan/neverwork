@@ -46,6 +46,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 
 - 窗口按钮图标必须用 `div` 画（横线/方框/错位双框），**不要用 `□`/`❐` 字符**：字体回退后两者几乎一样，最大化前后看不出区别。最大化状态在 `render` 里用 `window.is_maximized()` 传给 `titlebar`，窗口尺寸变化会触发重绘。
 - **文件树右键菜单与标签关闭**（`views/file_menu.rs`，复用 session_menu 的 `menu_row`/`menu_glyph`/`menu_divider`）：文件行右键（本地+远程两分支）→ `open_file_menu`（状态 `file_menu: Option<FileMenuTarget>`），菜单含「添加到会话」（走 `attach_paths`，目录与远程置灰）与「复制路径」（远程拼 `url()/rel`）；编辑器/媒体标签右键 → `tab_menu_at`（`open_tab_menu`），菜单含「关闭」「关闭全部」；标签尾部的 ✕（id `close-file`/`media-close`）与菜单项都走 `close_current_file`——**未保存先 `save_file`，同步保存失败就不关**（防丢内容），关完回对话页。菜单坐标与 session_menu 同款：state 存鼠标坐标，render 侧按 `visible_w/h` clamp 反向弹出。
 - **单实例**：`main.rs::single_instance` 用 Windows 命名互斥量 `Local\NeverWork-SingleInstance-v1`（`CreateMutexW` + `ERROR_ALREADY_EXISTS`）；已在跑时 `EnumWindows` 按 exe 名找窗口并 `ShowWindow(SW_RESTORE)`+`SetForegroundWindow` 激活后退出。检查必须在 askpass 分支**之后**（ssh 密码回调会反复启动本进程）；`NW_ALLOW_MULTI=1` 仅供自动化并行多开，不要删。全部手写 FFI，不引新依赖。
+- **右栏「改动」面板** = 原 Git 面板（`RightTab::Git`），tab 头为「文件 / 改动 / 预览」。含改动文件列表（增/改/删/重命名/冲突标记、暂存/取消暂存/丢弃、diff、提交框、分支切换、最近提交）。刷新时机：切 tab（`set_right_tab` 已内置）、展开右栏（`toggle_right_panel`）、切工作区（`enter_workspace` 尾部按 tab 判断）、文件 watcher 回调（仅面板展开时，300ms 去抖后跑 `git status`）。远程工作区显示占位；`NW_RIGHT_TAB=git` 验证直达。**别把 `reset_git_state` 改回无条件 `refresh_git`**：切工作区会同步起 6+ 条 git 子进程，大仓库下界面卡几秒。
 
 ## 左侧栏
 
