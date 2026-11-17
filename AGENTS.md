@@ -13,7 +13,7 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 → dist\NeverWork-0.1.0-setup.exe（dist/ 与生成图标已 gitignore，需 NSIS + Python/Pillow）
 ```
 
-运行期变量：`NW_ROOT`、`NW_REMOTE`（`user@host:/path`）、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_RIGHT_COLLAPSED`/`NW_SESSION_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_PROVIDER_VIEW`（`add`|下标）/`NW_COMPOSER`（`thinking`|`menu`）/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_SKILLS_TAB`/`NW_SKILL_QUERY`/`NW_INSTALL_SKILL`/`NW_SESSION_QUERY`/`NW_SESSION_MENU`/`NW_ARCHIVE_OPEN`/`NW_WORKSPACE_POPUP`/`NW_DEMO_STATUS`/`NW_SWITCH_WS`；`NW_ASKPASS_MODE`/`NW_ASKPASS_SECRET` 由 ssh 回调应用自身时使用，不要手动设置；密码往返测试用 `NW_ASKPASS_EXE` 指向 `target/debug/neverwork.exe`。
+运行期变量：`NW_ROOT`、`NW_REMOTE`（`user@host:/path`）、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_RIGHT_COLLAPSED`/`NW_SESSION_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_PROVIDER_VIEW`（`add`|下标）/`NW_COMPOSER`（`thinking`|`menu`|`permission`）/`NW_PERMISSION`（`read_only`|`plan`|`standard`|`full`）/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_SKILLS_TAB`/`NW_SKILL_QUERY`/`NW_INSTALL_SKILL`/`NW_SESSION_QUERY`/`NW_SESSION_MENU`/`NW_ARCHIVE_OPEN`/`NW_WORKSPACE_POPUP`/`NW_DEMO_STATUS`/`NW_SWITCH_WS`；`NW_ASKPASS_MODE`/`NW_ASKPASS_SECRET` 由 ssh 回调应用自身时使用，不要手动设置；密码往返测试用 `NW_ASKPASS_EXE` 指向 `target/debug/neverwork.exe`。
 
 工作区回落：`NW_ROOT` → `settings.last_workspace` → `~/.neverwork/workspace`。**不要**回落到当前目录/向上找 `Cargo.toml`——会把 IDE 自己的仓库当工作区。`last_workspace` 是 `ssh://` 时走远程工作区（本地 `root` 为 `None`）。
 
@@ -59,7 +59,8 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 
 
 - 工具在 `agent/src/tools.rs`。**所有路径走 `ToolContext::resolve`**（挡 `..`、跨盘绝对路径、符号链接逃逸）。
 - **联网工具在 `agent/src/web.rs`**：`web_search`（必应 RSS，不引 Key）/`web_fetch`（只收公网 http/https，拒 localhost 与内网，12s + 300KB 上限，HTML 转纯文本）。两者只读、`requires_approval = false`、**默认常开不设开关**；返回正文与文件内容一样走 `wrap_untrusted`，别让网页内容绕过这层。
-- **写操作必须 `requires_approval = true`**，经 `NeedApproval` → 用户允许后才执行；不要在工具内部直接落盘。不新增 shell。
+- **写操作与 `run_command` 必须 `requires_approval = true`**，经 `NeedApproval` → 用户允许后才执行；不要在工具内部直接落盘/起进程。`run_command` 是唯一 shell 入口：`cwd` 走 `resolve`，Windows 用 `cmd /S /C` + `CREATE_NO_WINDOW`（别弹控制台）与 `chcp 65001`，Unix 走 `/bin/sh -lc`；超时默认 120s（上限 600s），输出按头 3KB + 尾 12KB 截断；远程工作区返回 `UNSUPPORTED`。严禁绕过审批静默执行。
+- **会话权限档位 `PermissionMode`**（`Session.permission`，随会话保存，默认 `standard`）：`read_only`/`plan` 由 `tools::specs_for` 剔除所有 `requires_approval` 工具（含 MCP），agent 循环执行前再拦一次（`PERMISSION_DENIED`，不弹审批）；`plan` 另外靠系统提示要求先出实施计划。`full` 免审批直接执行，但**只免审批**——不得绕过 `ToolContext::resolve`、`.git` 禁写、命令超时/截断。UI 入口是对话框底栏 `permission-chip`，切 `full` 必须二次确认。
 - 团队角色的 `model` 是**展示标签**（`Claude Opus`），不能当模型 id 或据此切厂商——只有全小写真实 id 才算。
 - **运行上限三项（tokens/rounds/seconds）默认 0=不限**，从 settings 读；不要加回常量上限（读中型项目必被掐断）。防失控靠 `MAX_REPEAT=3`（同工具同参数）与手动停止。
 

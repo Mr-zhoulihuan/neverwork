@@ -3377,6 +3377,7 @@ dependencies = [
 name = "neverwork-agent"
 version = "0.1.0"
 dependencies = [
+ "encoding_rs",
  "flume",
  "neverwork-core",
  "serde",

@@ -179,6 +179,7 @@ fn run_turn(
         user_text,
         neverwork_agent::tools::ToolContext::new(std::env::temp_dir()),
         true,
+        neverwork_core::PermissionMode::Standard,
         limits(),
         &team(),
         role_idx,

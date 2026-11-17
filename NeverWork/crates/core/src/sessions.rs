@@ -256,6 +256,7 @@ mod tests {
             provider_id: String::new(),
             model: String::new(),
             thinking: crate::model::ThinkingLevel::Auto,
+            permission: crate::model::PermissionMode::Standard,
             stage,
             resume_prompt: String::new(),
         }

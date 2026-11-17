@@ -354,6 +354,10 @@ pub struct AppState {
     pub model_highlight: usize,
     /// 输入框下方的思考等级面板是否展开。
     pub thinking_panel: bool,
+    /// 输入框下方的权限面板是否展开（底栏权限 chip 点击后打开）。
+    pub permission_panel: bool,
+    /// 是否正在显示「切换到完整权限」的确认条。
+    pub permission_confirm: bool,
     /// 思考档位滑杆的轨道范围（渲染期由 canvas 写入）。
     /// 拖动时用鼠标横坐标减去这个左边，换算成档位。
     pub think_track: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
@@ -652,6 +656,7 @@ fn blank_session(seq: usize, config: &Config, mode: SessionMode) -> Session {
         provider_id: String::new(),
         model: String::new(),
         thinking: neverwork_core::ThinkingLevel::Auto,
+        permission: neverwork_core::PermissionMode::Standard,
         stage: neverwork_core::TaskStage::Idle,
         resume_prompt: String::new(),
     }
@@ -787,11 +792,21 @@ fn safe_file_name(title: &str, id: &str) -> String {
 /// 工具卡片优先用「工具名 + 路径」，比正文更说明「刚才在干什么」。
 fn last_preview(session: &Session) -> String {
     for m in session.messages.iter().rev() {
-        if let MessageKind::ToolCall { name, path, .. } = &m.kind {
-            return if path.is_empty() {
-                name.clone()
-            } else {
+        if let MessageKind::ToolCall {
+            name,
+            path,
+            summary,
+            ..
+        } = &m.kind
+        {
+            return if !path.is_empty() {
                 format!("{name} {path}")
+            } else if !summary.trim().is_empty() {
+                // 命令执行没有 path：用参数摘要（命令本身）说明「刚才在干什么」
+                let s: String = summary.trim().chars().take(40).collect();
+                format!("{name} {s}")
+            } else {
+                name.clone()
             };
         }
         if let Some(line) = m.body.lines().find(|l| !l.trim().is_empty()) {
@@ -946,6 +961,8 @@ impl AppState {
             model_query: String::new(),
             model_highlight: 0,
             thinking_panel: false,
+            permission_panel: false,
+            permission_confirm: false,
             think_track: Default::default(),
             thinking_dragging: false,
             composer_menu: false,
@@ -1035,14 +1052,17 @@ impl AppState {
                 me.open_chat_model_picker(cx);
             }
         }
-        // 验证用：启动即打开输入框面板（thinking=思考档位 / menu=＋菜单）。
+        // 验证用：启动即打开输入框面板（thinking=思考档位 / menu=＋菜单 / permission=权限）。
         if let Ok(v) = std::env::var("NW_COMPOSER") {
             match v.as_str() {
                 "thinking" => me.thinking_panel = true,
                 "menu" => me.composer_menu = true,
+                "permission" => me.permission_panel = true,
                 _ => {}
             }
         }
+        // 验证用：预置当前会话的权限档位（read_only / plan / standard / full）。
+        me.apply_env_permission();
         // 验证用：启动即弹出「新建会话」的模式选择浮层。
         if std::env::var("NW_PICK_MODE").map(|v| v == "1").unwrap_or(false) {
             me.new_session_picker = true;
@@ -1303,6 +1323,8 @@ impl AppState {
         cx.notify();
         if let Some(t) = auto_send {
             me.new_session(default_session_mode(), cx);
+            // 自动发送会新建会话（默认标准档），验证变量要在新会话上重新套一次。
+            me.apply_env_permission();
             me.chat.reset(t);
             me.send_message(cx);
         } else if let Ok(v) = std::env::var("NW_NEW_SESSION") {
@@ -1416,6 +1438,28 @@ impl AppState {
         self.active_role = None;
         self.save_sessions();
         cx.notify();
+    }
+
+    /// 验证用：把 `NW_PERMISSION` 应用到当前会话的权限档位。
+    ///
+    /// 新会话默认标准；`NW_SEND` 会自动新建会话，所以验证时要在建完后重套一次。
+    pub(crate) fn apply_env_permission(&mut self) {
+        use neverwork_core::PermissionMode;
+        let Ok(v) = std::env::var("NW_PERMISSION") else {
+            return;
+        };
+        let mode = match v.as_str() {
+            "read_only" | "readonly" => Some(PermissionMode::ReadOnly),
+            "plan" => Some(PermissionMode::Plan),
+            "standard" => Some(PermissionMode::Standard),
+            "full" => Some(PermissionMode::Full),
+            _ => None,
+        };
+        let Some(mode) = mode else { return };
+        let idx = self.active_session.min(self.sessions.len().saturating_sub(1));
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.permission = mode;
+        }
     }
 
     /// 打开「新建会话」的模式选择浮层。
@@ -2835,6 +2879,11 @@ impl AppState {
                 self.thinking_dragging = false;
                 closed = true;
             }
+            if self.permission_panel {
+                self.permission_panel = false;
+                self.permission_confirm = false;
+                closed = true;
+            }
             if self.composer_menu {
                 self.composer_menu = false;
                 closed = true;
@@ -3515,6 +3564,8 @@ impl AppState {
     ) {
         // 关工具时把 false 传下去，模型连工具清单都看不到。
         let with_tools = self.tools_enabled;
+        // 本会话的权限档位：只读/计划档不向模型提供写工具，完整档免审批。
+        let permission = self.sessions[session_idx].permission;
         // 单次运行的硬上限（三项都为 0 = 不限），随设置走。
         let limits = neverwork_agent::RunLimits {
             tokens: self.settings.max_tokens_per_run,
@@ -3584,6 +3635,7 @@ impl AppState {
                             &input,
                             ctx.clone(),
                             with_tools,
+                            permission,
                             limits,
                             team,
                             ri,
@@ -3599,6 +3651,7 @@ impl AppState {
                             &input,
                             ctx.clone(),
                             with_tools,
+                            permission,
                             limits,
                             &mut emit,
                             cancel.clone(),

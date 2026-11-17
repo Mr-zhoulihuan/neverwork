@@ -354,6 +354,8 @@ pub enum AgentEvent {
 ///
 /// 写操作的批准通过 `AgentEvent::NeedApproval` 里携带的 `respond` 通道完成：
 /// 界面收到事件后展示 diff 与「允许 / 拒绝」，把用户选择发回该通道即可。
+/// `permission` 决定写操作怎么把关：只读/计划档不提供写工具（并在执行前兜底拦截），
+/// 标准档逐次审批，完整档直接执行。
 /// 跑一次 Agent 循环（模型 → 工具 → 回填，直到模型不再要工具）。
 ///
 /// `enable_tools = false` 时**不把工具清单发给模型**：模型看不到工具就不会
@@ -367,6 +369,7 @@ pub fn run_agent(
     user_text: &str,
     ctx: ToolContext,
     enable_tools: bool,
+    permission: neverwork_core::PermissionMode,
     // 单次运行的硬上限；字段为 `0` 表示该项不限。
     limits: RunLimits,
     emit: &mut dyn FnMut(AgentEvent),
@@ -380,6 +383,7 @@ pub fn run_agent(
         user_text,
         ctx,
         enable_tools,
+        permission,
         limits,
         None,
         emit,
@@ -401,6 +405,7 @@ pub fn run_agent_in_team(
     user_text: &str,
     ctx: ToolContext,
     enable_tools: bool,
+    permission: neverwork_core::PermissionMode,
     limits: RunLimits,
     team: &neverwork_core::Team,
     role_idx: usize,
@@ -420,6 +425,7 @@ pub fn run_agent_in_team(
         user_text,
         ctx,
         enable_tools,
+        permission,
         limits,
         Some((team, role_idx)),
         emit,
@@ -436,6 +442,7 @@ fn run_agent_impl(
     user_text: &str,
     ctx: ToolContext,
     enable_tools: bool,
+    permission: neverwork_core::PermissionMode,
     // 单次运行的硬上限；字段为 `0` 表示该项不限。
     limits: RunLimits,
     team: Option<(&neverwork_core::Team, usize)>,
@@ -443,13 +450,14 @@ fn run_agent_impl(
     cancel: Arc<AtomicBool>,
 ) {
     let mut specs = if enable_tools {
-        tools::tool_specs()
+        tools::specs_for(permission)
     } else {
         Vec::new()
     };
 
     let mut messages: Vec<ChatMessage> = Vec::new();
     let mut sys = build_system_prompt(system_prompt, &ctx);
+    sys.push_str(permission_guidance(permission));
     if let Some((t, i)) = team {
         if let Some(role) = t.roles.get(i) {
             sys.push_str(&team_roster_prompt(t, role));
@@ -699,7 +707,11 @@ fn run_agent_impl(
                 return;
             }
 
-            let need_approval = tools::requires_approval(&call.name);
+            // 权限档位决定要不要弹审批：标准档按工具类型；完整档直接执行；
+            // 只读/计划档的写工具已从清单里剔除，这里再兜底拦住模型幻觉出的写调用。
+            let write_call = tools::requires_approval(&call.name);
+            let need_approval =
+                permission == neverwork_core::PermissionMode::Standard && write_call;
             let preview = if need_approval {
                 tools::preview(&call, &ctx).unwrap_or_default()
             } else {
@@ -711,6 +723,29 @@ fn run_agent_impl(
                 requires_approval: need_approval,
                 preview: preview.clone(),
             });
+
+            // 只读/计划档不提供写工具；模型若仍发来（幻觉/旧历史影响），
+            // 执行前直接拒绝，绝不弹审批。
+            if permission.hides_write_tools() && write_call {
+                let result = ToolResult::err_code(
+                    &call,
+                    "PERMISSION_DENIED",
+                    format!(
+                        "当前会话是「{}」权限：写操作与命令不可用，这个调用没有执行。\
+                         请说明你打算改什么，并让用户把权限切到「标准」或「完整」后再试。",
+                        permission.label()
+                    ),
+                    false,
+                );
+                trace.step(
+                    round,
+                    "permission_blocked",
+                    serde_json::json!({ "tool": call.name, "mode": permission.label() }),
+                );
+                messages.push(ChatMessage::tool_result(&call.id, result.content.clone()));
+                emit(AgentEvent::ToolFinished { result });
+                continue;
+            }
 
             // 重复动作检测：同一工具 + 同一参数做太多次，结果不会变，只是烧 token。
             // 放在审批之前——重复的写操作不该再弹一次确认框。
@@ -768,10 +803,12 @@ fn run_agent_impl(
 
                 if !allowed {
                     emit(AgentEvent::Denied { call: call.clone() });
-                    messages.push(ChatMessage::tool_result(
-                        &call.id,
-                        "用户拒绝了这个修改，文件未改动。请说明你原本想改什么，或换个方案。",
-                    ));
+                    let msg = if call.name == "run_command" {
+                        "用户拒绝了这个命令，未执行。请说明你原本想做什么，或换个方案。"
+                    } else {
+                        "用户拒绝了这个修改，文件未改动。请说明你原本想改什么，或换个方案。"
+                    };
+                    messages.push(ChatMessage::tool_result(&call.id, msg));
                     continue;
                 }
             }
@@ -872,6 +909,32 @@ fn handoff_misuse(calls: &[ToolCall]) -> Option<&'static str> {
     None
 }
 
+/// 按会话权限档位追加的系统提示。
+///
+/// 标准档不追加：原有提示词已经写明「写操作与命令会先弹审批」。
+fn permission_guidance(mode: neverwork_core::PermissionMode) -> &'static str {
+    use neverwork_core::PermissionMode;
+    match mode {
+        PermissionMode::ReadOnly => {
+            "\n\n【权限：只读】本次会话只能读取、检索与联网查资料：不能修改文件、不能执行命令。\
+             如果用户要求改动，先说明你打算怎么做（改哪些文件、分几步），\
+             并请用户把权限切到「标准」或「完整」后再动手；不要声称已经修改。"
+        }
+        PermissionMode::Plan => {
+            "\n\n【权限：计划】本次会话只做调研与规划：可以读文件、检索、联网，\
+             但不要修改任何文件、不要执行命令。调研后先给出可执行的实施计划：\
+             分步骤、涉及哪些文件/函数、关键改动点、风险与验证方式；\
+             最后请用户切到「标准」或「完整」权限后开始执行。不要声称已经修改。"
+        }
+        PermissionMode::Standard => "",
+        PermissionMode::Full => {
+            "\n\n【权限：完整】用户已授予完整权限：文件修改与命令执行会直接生效，\
+             不再逐条询问。仍要保持谨慎：改动前先读现状，优先小步可回退的修改，\
+             不执行与任务无关的破坏性命令；会删除数据或影响版本库历史的操作先说明原因。"
+        }
+    }
+}
+
 /// 系统提示词：先分清「回答问题」和「改代码」，再决定要不要用工具。
 ///
 /// 之前的提示词通篇在讲怎么读写文件、还要求「改文件之前先用 read_file」，
@@ -920,7 +983,7 @@ pub(crate) fn build_system_prompt(persona: &str, ctx: &ToolContext) -> String {
 用 web_search 查证，不要凭记忆猜。
 
 **B. 在本工作区里动手** —— 才使用工具。
-包括：读某个真实文件、查找某段代码在哪、修改/新建/删除文件、重构。
+包括：读某个真实文件、查找某段代码在哪、修改/新建/删除文件、重构、构建/测试/跑命令。
 这类任务先看清真实内容再动手，不要凭猜测改代码。
 
 判断依据是**用户想要结果，还是想要信息**：
@@ -944,6 +1007,11 @@ pub(crate) fn build_system_prompt(persona: &str, ctx: &ToolContext) -> String {
   需要最新信息、外部资料、官方文档、报错出处时用；不要拿旧记忆当事实。
 - web_fetch(url, max_chars?)：抓网页正文（http/https，默认 8000 字）。
   拿到搜索结果后挑最相关的一两页读全文，不要把所有链接都抓一遍
+- run_command(command, cwd?, timeout_secs?)：在工作区里执行一条非交互式命令
+  （构建、测试、git、装依赖等），返回退出码与输出。**执行前会弹给用户批准**；
+  读文件/列目录/搜索有专用工具，不要用命令去干这些。需要换目录时传 cwd
+  （相对工作区根），不要写 `cd xxx && ...`。默认超时 120 秒（最多 600），
+  超时会终止；输出过长只保留开头与结尾
 
 ## 工作方式
 
@@ -954,7 +1022,8 @@ pub(crate) fn build_system_prompt(persona: &str, ctx: &ToolContext) -> String {
    不要从目录一层层扫。
 2. 小改动用 apply_patch；动 2 个以上文件用 multi_patch 一次提交，
    old_string 都要带足够上下文保证唯一。
-3. 写操作会弹给用户批准，批准后才落盘；被拒绝就换方案，不要重复同样的写入。
+3. 写操作和命令执行都会弹给用户批准，批准后才落盘/运行；被拒绝就换方案，
+   不要重复同样的调用。
 4. 回答简洁：说清结论、改了什么、为什么。不要复述整个文件，不要为了显得勤奋而
    堆叠工具调用。
 5. A 类问题用自然语言答完即可，不需要「下一步建议」式的清单。

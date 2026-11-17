@@ -368,7 +368,11 @@ impl AppState {
                         div()
                             .text_xs()
                             .text_color(theme::dim())
-                            .child("在上方卡片里点「允许并写入」或「拒绝」"),
+                            .child(if p.tool == "run_command" {
+                                "在上方卡片里点「允许并执行」或「拒绝」"
+                            } else {
+                                "在上方卡片里点「允许并写入」或「拒绝」"
+                            }),
                     ),
             );
         }
@@ -566,7 +570,12 @@ impl AppState {
             col = col.child(self.thinking_level_panel(cx));
         }
 
-        // ===== 输入框：大圆角容器 + 左下「＋」+ 右下思考等级 =====
+        // ===== 权限面板：同样内联在输入框上方，与思考面板互斥 =====
+        if self.permission_panel {
+            col = col.child(self.permission_level_panel(cx));
+        }
+
+        // ===== 输入框：大圆角容器 + 左下「＋」+ 右下权限 chip =====
         let mut input_box = div()
             .rounded_lg()
             .border_1()
@@ -600,6 +609,8 @@ impl AppState {
                         // 左：＋ 菜单（引用文件 / 工具 / 清空）
                         .child(self.composer_plus_button(cx))
                         .child(div().flex_1())
+                        // 右：权限 chip（常驻，显示当前会话档位）
+                        .child(self.permission_chip(cx))
                         // 发送走 Enter，不再占一个按钮。
                         // 只有生成中才出现「停止」，否则没有任何中断入口。
                         .when(self.streaming, |d| {
@@ -675,14 +686,275 @@ impl AppState {
             .hover(|d| d.border_color(theme::accent_line()).text_color(theme::fg()))
             .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                 this.composer_menu = !this.composer_menu;
-                // 两个面板互斥，否则叠在一起把输入框顶得很高
+                // 三个面板互斥，否则叠在一起把输入框顶得很高
                 if this.composer_menu {
+                    this.thinking_panel = false;
+                    this.thinking_dragging = false;
+                    this.permission_panel = false;
+                    this.permission_confirm = false;
+                }
+                cx.notify();
+            }))
+            .child(if open { "−" } else { "+" })
+    }
+
+    /// 底栏权限 chip：显示当前会话的权限档位，点击展开/收起权限面板。
+    fn permission_chip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use neverwork_core::PermissionMode;
+        let mode = self.permission();
+        let open = self.permission_panel;
+        let enabled = self.tools_enabled;
+        let color = match mode {
+            PermissionMode::ReadOnly => theme::muted(),
+            PermissionMode::Plan => theme::accent(),
+            PermissionMode::Standard => theme::green(),
+            PermissionMode::Full => theme::yellow(),
+        };
+        div()
+            .id("permission-chip")
+            .flex()
+            .items_center()
+            .h(px(28.0))
+            .px_2()
+            .rounded_md()
+            .border_1()
+            .border_color(if open {
+                theme::accent_line()
+            } else {
+                theme::border()
+            })
+            .bg(if open {
+                theme::accent_soft()
+            } else {
+                theme::raised()
+            })
+            .text_xs()
+            .text_color(if enabled { color } else { theme::dim() })
+            .cursor_pointer()
+            .hover(|d| d.border_color(theme::accent_line()))
+            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                if !this.tools_enabled {
+                    this.notice = Some("工具已关闭：先在「＋」菜单开启工具再调权限".into());
+                    cx.notify();
+                    return;
+                }
+                this.permission_panel = !this.permission_panel;
+                this.permission_confirm = false;
+                if this.permission_panel {
+                    this.composer_menu = false;
                     this.thinking_panel = false;
                     this.thinking_dragging = false;
                 }
                 cx.notify();
             }))
-            .child(if open { "−" } else { "+" })
+            .child(SharedString::from(format!(
+                "{} {}权限",
+                mode.glyph(),
+                mode.label()
+            )))
+    }
+
+    /// 权限面板：四档卡片 + 「完整权限」确认条。
+    fn permission_level_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use neverwork_core::PermissionMode;
+        let current = self.permission();
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme::accent_line())
+            .bg(theme::panel())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::fg())
+                            .child(SharedString::from(format!(
+                                "{} 权限 · {}",
+                                current.glyph(),
+                                current.label()
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(theme::dim())
+                            .child("随会话保存；切换后下一条消息生效"),
+                    )
+                    .child(
+                        div()
+                            .id("permission-close")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme::raised())
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(theme::fg()))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                this.permission_panel = false;
+                                this.permission_confirm = false;
+                                cx.notify();
+                            }))
+                            .child("收起"),
+                    ),
+            );
+        for (i, mode) in PermissionMode::ALL.iter().enumerate() {
+            let mode = *mode;
+            let active = mode == current;
+            let color = match mode {
+                PermissionMode::ReadOnly => theme::muted(),
+                PermissionMode::Plan => theme::accent(),
+                PermissionMode::Standard => theme::green(),
+                PermissionMode::Full => theme::yellow(),
+            };
+            col = col.child(
+                div()
+                    .id(SharedString::from(format!("permission-mode-{i}")))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if active {
+                        theme::accent_line()
+                    } else {
+                        theme::border()
+                    })
+                    .bg(if active {
+                        theme::accent_soft()
+                    } else {
+                        theme::raised()
+                    })
+                    .cursor_pointer()
+                    .hover(|d| d.border_color(theme::accent_line()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        // 完整权限风险最高：先确认，确认后才真正切过去。
+                        if mode == PermissionMode::Full
+                            && this.permission() != PermissionMode::Full
+                        {
+                            this.permission_confirm = true;
+                            cx.notify();
+                        } else {
+                            this.set_permission(mode, cx);
+                        }
+                    }))
+                    .child(
+                        div()
+                            .w(px(20.0))
+                            .text_sm()
+                            .text_color(color)
+                            .child(mode.glyph()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .when(active, |d| d.text_color(theme::accent()))
+                                    .when(!active, |d| d.text_color(theme::fg()))
+                                    .child(mode.label()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::dim())
+                                    .child(mode.desc()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(18.0))
+                            .text_sm()
+                            .text_color(if active {
+                                theme::accent()
+                            } else {
+                                theme::dim()
+                            })
+                            .child(if active { "✓" } else { "" }),
+                    ),
+            );
+        }
+        if self.permission_confirm {
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme::yellow())
+                    .bg(theme::raised())
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(theme::yellow())
+                            .child("完整权限会跳过写操作与命令的审批，本会话内生效。确认开启？"),
+                    )
+                    .child(
+                        div()
+                            .id("permission-cancel")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme::panel())
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(theme::fg()))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                this.permission_confirm = false;
+                                cx.notify();
+                            }))
+                            .child("取消"),
+                    )
+                    .child(
+                        div()
+                            .id("permission-confirm")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme::yellow())
+                            .bg(theme::raised())
+                            .text_xs()
+                            .text_color(theme::yellow())
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme::accent_soft()))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                this.set_permission(neverwork_core::PermissionMode::Full, cx);
+                            }))
+                            .child("确认开启"),
+                    ),
+            );
+        }
+        col.child(
+            div()
+                .text_xs()
+                .text_color(theme::dim())
+                .child("只读/计划会隐藏写文件与命令工具；完整权限只免审批，路径沙箱与超时限制不变。"),
+        )
     }
 
     /// 「＋」展开的那一行：引用文件 / 工具开关 / 思考档位 / 清空。
@@ -764,6 +1036,8 @@ impl AppState {
                         this.thinking_panel = !this.thinking_panel;
                         this.composer_menu = false;
                         this.thinking_dragging = false;
+                        this.permission_panel = false;
+                        this.permission_confirm = false;
                         cx.notify();
                     }))
                     .child(SharedString::from(format!("⚙ 思考 · {}", level.label()))),
@@ -792,7 +1066,10 @@ impl AppState {
     pub(crate) fn toggle_composer_tools(&mut self, cx: &mut Context<Self>) {
         self.tools_enabled = !self.tools_enabled;
         self.notice = Some(if self.tools_enabled {
-            "已开启工具：Agent 可以读文件、并在你批准后改文件".into()
+            format!(
+                "已开启工具：当前「{}」权限，点底栏权限 chip 可切换",
+                self.permission().label()
+            )
         } else {
             "已关闭工具：只做纯对话".into()
         });
@@ -1106,6 +1383,43 @@ impl AppState {
         }
         cx.notify();
     }
+    /// 当前会话的权限档位（没设置过就是标准）。
+    pub(crate) fn permission(&self) -> neverwork_core::PermissionMode {
+        self.sessions
+            .get(self.active_session)
+            .map(|s| s.permission)
+            .unwrap_or_default()
+    }
+
+    /// 改当前会话的权限档位并落盘；面板随即收起。
+    pub(crate) fn set_permission(
+        &mut self,
+        mode: neverwork_core::PermissionMode,
+        cx: &mut Context<Self>,
+    ) {
+        let idx = self.active_session.min(self.sessions.len().saturating_sub(1));
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.permission = mode;
+        }
+        self.permission_panel = false;
+        self.permission_confirm = false;
+        self.save_sessions();
+        self.notice = Some(match mode {
+            neverwork_core::PermissionMode::ReadOnly => {
+                "已切到只读权限：写文件与执行命令的工具不会提供".into()
+            }
+            neverwork_core::PermissionMode::Plan => {
+                "已切到计划权限：先出实施计划，确认后切到标准或完整执行".into()
+            }
+            neverwork_core::PermissionMode::Standard => {
+                "已切到标准权限：写操作与命令会逐次弹审批".into()
+            }
+            neverwork_core::PermissionMode::Full => {
+                "已切到完整权限：写操作与命令直接执行，不再逐次审批".into()
+            }
+        });
+        cx.notify();
+    }
 }
 
 fn chat_caret() -> impl IntoElement {
@@ -1279,6 +1593,7 @@ impl AppState {
             idx: usize,
             name: String,
             path: String,
+            summary: String,
             status: ToolRunStatus,
             thread: Option<usize>,
             round: Option<usize>,
@@ -1290,6 +1605,7 @@ impl AppState {
             if let MessageKind::ToolCall {
                 name,
                 path,
+                summary,
                 status,
                 thread,
                 round,
@@ -1301,6 +1617,7 @@ impl AppState {
                     idx: i,
                     name: name.clone(),
                     path: path.clone(),
+                    summary: summary.clone(),
                     status: *status,
                     thread: *thread,
                     round: *round,
@@ -1418,7 +1735,12 @@ impl AppState {
             .find(|s| Some(s.idx) == pending_idx && s.status == ToolRunStatus::Awaiting)
         {
             let step_idx = step.idx;
-            let arg = if step.path.is_empty() {
+            // 命令执行不是改文件：文案、参数与按钮都要跟着换，否则用户会以为
+            // 「允许并写入」是往磁盘写东西，而不是跑一条命令。
+            let is_command = step.name == "run_command";
+            let arg = if is_command {
+                step.summary.clone()
+            } else if step.path.is_empty() {
                 String::new()
             } else if let Some(t) = &self.remote {
                 let mut p = t.root.trim_end_matches('/').to_string();
@@ -1449,7 +1771,11 @@ impl AppState {
                             div()
                                 .text_xs()
                                 .text_color(theme::yellow())
-                                .child("会改文件，确认后写入："),
+                                .child(if is_command {
+                                    "会执行命令，确认后运行："
+                                } else {
+                                    "会改文件，确认后写入："
+                                }),
                         )
                         .child(
                             div()
@@ -1492,7 +1818,7 @@ impl AppState {
                                 .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
                                     this.answer_approval(true, cx);
                                 }))
-                                .child("允许并写入"),
+                                .child(if is_command { "允许并执行" } else { "允许并写入" }),
                         ),
                 );
             if !step.diff.is_empty() {
@@ -1579,6 +1905,7 @@ fn tool_action(name: &str) -> &'static str {
         "handoff" => "交接",
         "web_search" => "联网搜索",
         "web_fetch" => "抓取网页",
+        "run_command" => "执行命令",
         _ => "其他",
     }
 }

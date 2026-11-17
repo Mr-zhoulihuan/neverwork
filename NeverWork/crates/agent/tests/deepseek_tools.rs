@@ -121,6 +121,7 @@ fn run(
         prompt,
         neverwork_agent::tools::ToolContext::new(dir.clone()),
         true,
+        neverwork_core::PermissionMode::Standard,
         // 测试里不设运行上限；上限判定由 RunLimits 的调用方负责。
         neverwork_agent::RunLimits::default(),
         &mut emit,

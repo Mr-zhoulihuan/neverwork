@@ -5,11 +5,15 @@
 //!   一律拒绝，返回明确错误而不是默默失败。
 //! - 读操作自动执行；**写操作必须经用户批准**（`requires_approval = true`），
 //!   批准前不会写盘，界面上会先展示 diff。
-//! - 不提供 shell 执行工具。执行任意命令的风险和收益不成正比，
-//!   要跑命令请另开终端，由用户自己决定。
+//! - 命令执行（`run_command`）等价于写权限：**必须经用户批准**后才 spawn，
+//!   批准前不产生任何副作用；`cwd` 仍走工作区路径校验，并带超时与输出上限。
 
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use neverwork_core::ssh::{RemoteAuth, RemoteFs, SshTarget};
 use neverwork_core::AppResult;
@@ -26,6 +30,13 @@ const MAX_WRITE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 400;
 /// 搜索返回上限。
 const MAX_SEARCH_HITS: usize = 60;
+
+/// 命令输出单流保留上限：头 3KB + 尾 12KB，stdout/stderr 合计约 30KB。
+const MAX_COMMAND_HEAD: usize = 3 * 1024;
+const MAX_COMMAND_TAIL: usize = 12 * 1024;
+/// 命令默认超时与可配置上限（秒）。
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 120;
+const MAX_COMMAND_TIMEOUT_SECS: u64 = 600;
 
 /// 工具描述（发给模型的 JSON Schema）。
 #[derive(Debug, Clone, Serialize)]
@@ -131,6 +142,15 @@ impl ToolCall {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            "run_command" => {
+                let cmd = a.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let cwd = a.get("cwd").and_then(|v| v.as_str()).unwrap_or("").trim();
+                if cwd.is_empty() {
+                    cmd.to_string()
+                } else {
+                    format!("{cmd}（{cwd}）")
+                }
+            }
             _ => String::new(),
         }
     }
@@ -556,6 +576,18 @@ pub fn tool_specs() -> Vec<ToolSpec> {
     v
 }
 
+/// 按会话权限过滤后的工具清单。
+///
+/// 只读 / 计划档直接剔除所有需要审批的工具（内置写工具 + 全部 MCP 工具），
+/// 模型看不到就不会试着调用；agent 循环里还有一道执行前兜底。
+pub fn specs_for(permission: neverwork_core::PermissionMode) -> Vec<ToolSpec> {
+    let mut v = tool_specs();
+    if permission.hides_write_tools() {
+        v.retain(|t| !t.requires_approval);
+    }
+    v
+}
+
 /// 内置工具（不依赖任何外部进程）。
 fn builtin_specs() -> Vec<ToolSpec> {
     vec![
@@ -659,6 +691,20 @@ fn builtin_specs() -> Vec<ToolSpec> {
                     "new_string": { "type": "string", "description": "替换后的文本" }
                 },
                 "required": ["path", "old_string", "new_string"]
+            }),
+            requires_approval: true,
+        },
+        ToolSpec {
+            name: "run_command".into(),
+            description: "在工作区里执行一条非交互式命令（构建、测试、git、装依赖等），返回退出码与合并后的输出。命令会真的运行，需要用户批准。不要用它读文件、列目录或搜索（有专用工具）。默认超时 120 秒，超时会终止进程。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "完整命令行，如 cargo test --workspace" },
+                    "cwd": { "type": "string", "description": "工作目录（相对工作区根），可选，默认工作区根" },
+                    "timeout_secs": { "type": "integer", "description": "超时秒数，默认 120，最多 600" }
+                },
+                "required": ["command"]
             }),
             requires_approval: true,
         },
@@ -898,6 +944,7 @@ pub fn execute(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
         "write_file" => write_file(call, &a, ctx),
         "apply_patch" => apply_patch(call, &a, ctx),
         "multi_patch" => crate::multi_patch::execute(call, ctx),
+        "run_command" => run_command(call, &a, ctx),
         "web_search" => crate::web::search(call),
         "web_fetch" => crate::web::fetch(call),
         other => ToolResult::err_code(
@@ -906,6 +953,264 @@ pub fn execute(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
             format!("未知工具 `{other}`，可用工具见系统提示里的清单"),
             false,
         ),
+    }
+}
+
+/// `run_command`：在工作区里执行一条非交互式命令。
+///
+/// 这是唯一能跑任意命令的入口，闸门在审批：`requires_approval = true`，
+/// 用户点「允许并执行」之前不会 spawn 任何进程。执行侧仍守住三件事：
+/// - `cwd` 走 `ToolContext::resolve`，不能借工作目录跳出工作区；
+/// - 输出有上限（头尾各留一截），一次全量日志灌不爆上下文；
+/// - 有超时，到点 kill，不把整条 agent 循环卡死。
+fn run_command(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
+    let command = a
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if command.is_empty() {
+        return ToolResult::err_code(call, "BAD_ARGS", "缺少 command 参数", false);
+    }
+    if ctx.is_remote() {
+        // RemoteFs 只有文件读写，没有 exec 通道；远程命令另行设计前不假执行。
+        return ToolResult::err_code(
+            call,
+            "UNSUPPORTED",
+            "远程工作区暂不支持执行命令，请在本地工作区使用 run_command",
+            false,
+        );
+    }
+    let cwd_rel = a.get("cwd").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let cwd = match ctx.resolve(cwd_rel) {
+        Ok(p) => p,
+        Err(e) => return ToolResult::err_code(call, "PATH_DENIED", e, false),
+    };
+    if !cwd.is_dir() {
+        return ToolResult::err_code(
+            call,
+            "NOT_FOUND",
+            format!("工作目录不存在：{}", cwd.display()),
+            false,
+        );
+    }
+    let timeout_secs = a
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
+        .clamp(1, MAX_COMMAND_TIMEOUT_SECS);
+
+    let mut cmd = shell_command(&command);
+    cmd.current_dir(&cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 无窗口应用里子进程默认会弹控制台；CREATE_NO_WINDOW 压住它。
+        cmd.creation_flags(0x0800_0000);
+    }
+
+    let started = Instant::now();
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return ToolResult::err_code(
+                call,
+                io_code(&e),
+                format!("无法启动命令：{e}"),
+                io_retryable(&e),
+            )
+        }
+    };
+
+    // 两个管道各开一个读线程，主线程只管超时与退出码：
+    // 边跑边读，输出再多也不会把管道写满卡住子进程。
+    let (tx, rx) = mpsc::channel::<(&'static str, Vec<u8>, usize)>();
+    if let Some(pipe) = child.stdout.take() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let (bytes, total) =
+                read_capped(pipe, MAX_COMMAND_HEAD, MAX_COMMAND_TAIL).unwrap_or_default();
+            let _ = tx.send(("stdout", bytes, total));
+        });
+    }
+    if let Some(pipe) = child.stderr.take() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let (bytes, total) =
+                read_capped(pipe, MAX_COMMAND_HEAD, MAX_COMMAND_TAIL).unwrap_or_default();
+            let _ = tx.send(("stderr", bytes, total));
+        });
+    }
+    drop(tx);
+
+    let mut timed_out = false;
+    let mut exit_code: Option<i32> = None;
+    let deadline = started + Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_code = status.code();
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => break,
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            let _ = child.wait();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // 正常退出后管道立即 EOF；个别孙进程还占着句柄时，最多再等 3 秒。
+    let mut stdout: Option<String> = None;
+    let mut stderr: Option<String> = None;
+    let mut truncated = false;
+    let collect_deadline = Instant::now() + Duration::from_secs(3);
+    while stdout.is_none() || stderr.is_none() {
+        let left = collect_deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let Ok((name, bytes, total)) = rx.recv_timeout(left) else {
+            break;
+        };
+        if total > bytes.len() {
+            truncated = true;
+        }
+        let text = decode_command_output(&bytes);
+        if name == "stdout" {
+            stdout = Some(text);
+        } else {
+            stderr = Some(text);
+        }
+    }
+
+    let mut body = String::new();
+    if let Some(out) = stdout.as_deref().map(str::trim_end) {
+        if !out.is_empty() {
+            body.push_str(out);
+        }
+    }
+    if let Some(err) = stderr.as_deref().map(str::trim_end) {
+        if !err.trim().is_empty() {
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str("[stderr]\n");
+            body.push_str(err);
+        }
+    }
+    if body.is_empty() {
+        body.push_str("（无输出）");
+    }
+    if truncated {
+        body.push_str("\n…（输出过长，仅保留开头与结尾）");
+    }
+    let elapsed = started.elapsed().as_millis() as u64;
+    let where_disp = ctx.display(cwd_rel);
+
+    if timed_out {
+        return ToolResult::err_code(
+            call,
+            "TIMEOUT",
+            format!(
+                "命令 `{command}` 超过 {timeout_secs} 秒未结束，已终止（cwd: {where_disp}）。\n{body}"
+            ),
+            false,
+        );
+    }
+    match exit_code {
+        Some(0) => ToolResult::ok(
+            call,
+            format!("命令 `{command}` 执行完成（{elapsed} ms，cwd: {where_disp}）\n{body}"),
+        ),
+        Some(code) => ToolResult::err_code(
+            call,
+            "COMMAND_FAILED",
+            format!("命令 `{command}` 退出码 {code}（{elapsed} ms，cwd: {where_disp}）。\n{body}"),
+            false,
+        ),
+        None => ToolResult::err_code(
+            call,
+            "COMMAND_FAILED",
+            format!("命令 `{command}` 被系统终止（{elapsed} ms）。\n{body}"),
+            false,
+        ),
+    }
+}
+
+/// 构造 shell 命令。
+///
+/// Windows 用 `cmd /S /C "…"`：`/S` 只剥最外层引号，命令自带引号原样交给 cmd，
+/// 不会因为 Rust 的参数转义把 `git commit -m "msg"` 改坏；
+/// `chcp 65001` 让 cmd 内建命令按 UTF-8 输出（`>nul` 吞掉它的回显）。
+/// Unix 走 `/bin/sh -lc`。
+fn shell_command(command: &str) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = Command::new("cmd");
+        c.arg("/S").arg("/C");
+        c.raw_arg(format!("\"chcp 65001 >nul & {command}\""));
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = Command::new("/bin/sh");
+        c.args(["-lc", command]);
+        c
+    }
+}
+
+/// 读取一个输出管道，最多保留头 `head` + 尾 `tail` 字节。
+///
+/// 返回（保留的字节，总字节数）。多出的部分丢弃但继续读：
+/// 停止读取会让写端阻塞，命令反而卡死。
+fn read_capped(mut r: impl Read, head: usize, tail: usize) -> std::io::Result<(Vec<u8>, usize)> {
+    let mut head_buf = Vec::with_capacity(head);
+    let mut tail_buf: std::collections::VecDeque<u8> =
+        std::collections::VecDeque::with_capacity(tail);
+    let mut total = 0usize;
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+        let mut chunk = &buf[..n];
+        if head_buf.len() < head {
+            let take = (head - head_buf.len()).min(chunk.len());
+            head_buf.extend_from_slice(&chunk[..take]);
+            chunk = &chunk[take..];
+        }
+        if !chunk.is_empty() {
+            tail_buf.extend(chunk.iter().copied());
+            while tail_buf.len() > tail {
+                tail_buf.pop_front();
+            }
+        }
+    }
+    let mut out = head_buf;
+    out.extend(tail_buf);
+    Ok((out, total))
+}
+
+/// 控制台输出解码：优先 UTF-8；失败时按 GBK 兜底（Windows 中文 OEM 代码页）。
+fn decode_command_output(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            let (text, _, _) = encoding_rs::GBK.decode(bytes);
+            text.into_owned()
+        }
     }
 }
 
@@ -1330,6 +1635,7 @@ mod tests {
             "write_file",
             "apply_patch",
             "multi_patch",
+            "run_command",
             "web_search",
             "web_fetch",
         ] {
@@ -1348,8 +1654,33 @@ mod tests {
         assert!(requires_approval("write_file"));
         assert!(requires_approval("apply_patch"));
         assert!(requires_approval("multi_patch"));
+        assert!(requires_approval("run_command"), "命令执行会起进程，必须审批");
         // 未知工具按最严格处理
         assert!(requires_approval("rm_rf"));
+    }
+
+    #[test]
+    fn read_only_and_plan_specs_hide_all_approval_tools() {
+        use neverwork_core::PermissionMode;
+        let all = specs_for(PermissionMode::Standard);
+        for mode in [PermissionMode::ReadOnly, PermissionMode::Plan] {
+            let specs = specs_for(mode);
+            assert!(
+                specs.iter().all(|t| !t.requires_approval),
+                "{mode:?} 档不应包含任何需要审批的工具"
+            );
+            for name in ["write_file", "apply_patch", "multi_patch", "run_command"] {
+                assert!(!specs.iter().any(|t| t.name == name), "{mode:?} 档不应包含 {name}");
+            }
+            assert!(specs.iter().any(|t| t.name == "read_file"), "读工具要在");
+            assert!(specs.iter().any(|t| t.name == "web_search"), "联网工具要在");
+            assert!(specs.len() < all.len(), "过滤后应该更少");
+        }
+        assert_eq!(
+            specs_for(PermissionMode::Full).len(),
+            all.len(),
+            "完整档的工具清单与标准档一致"
+        );
     }
 
     #[test]
@@ -1604,6 +1935,103 @@ mod tests {
         let r = ToolResult::blocked(&call("read_file", json!({"path": "a"})), "重复太多次");
         assert!(!r.ok);
         assert_eq!(r.error_code, Some("REPEAT_BLOCKED"));
+    }
+
+    // ---- 命令执行 ----
+
+    #[test]
+    fn run_command_echoes_output() {
+        let (ctx, _dir) = ctx();
+        let r = execute(
+            &call("run_command", json!({"command": "echo nw-run-ok"})),
+            &ctx,
+        );
+        assert!(r.ok, "{}", r.content);
+        assert!(r.content.contains("nw-run-ok"), "{}", r.content);
+    }
+
+    #[test]
+    fn run_command_reports_non_zero_exit() {
+        let (ctx, _dir) = ctx();
+        let cmd = if cfg!(windows) { "exit /b 3" } else { "exit 3" };
+        let r = execute(&call("run_command", json!({"command": cmd})), &ctx);
+        assert!(!r.ok, "{}", r.content);
+        assert_eq!(r.error_code, Some("COMMAND_FAILED"), "{}", r.content);
+        assert!(r.content.contains('3'), "{}", r.content);
+    }
+
+    #[test]
+    fn run_command_respects_cwd() {
+        let (ctx, dir) = ctx();
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        let cmd = if cfg!(windows) { "cd" } else { "pwd" };
+        let r = execute(&call("run_command", json!({"command": cmd, "cwd": "sub"})), &ctx);
+        assert!(r.ok, "{}", r.content);
+        assert!(r.content.contains("sub"), "{}", r.content);
+    }
+
+    #[test]
+    fn run_command_rejects_cwd_outside_root() {
+        let (ctx, _dir) = ctx();
+        let r = execute(
+            &call("run_command", json!({"command": "echo x", "cwd": "../.."})),
+            &ctx,
+        );
+        assert_eq!(r.error_code, Some("PATH_DENIED"), "{}", r.content);
+    }
+
+    #[test]
+    fn run_command_requires_command() {
+        let (ctx, _dir) = ctx();
+        let r = execute(&call("run_command", json!({"command": "  "})), &ctx);
+        assert_eq!(r.error_code, Some("BAD_ARGS"), "{}", r.content);
+    }
+
+    #[test]
+    fn run_command_times_out() {
+        let (ctx, _dir) = ctx();
+        let cmd = if cfg!(windows) {
+            "ping -n 5 127.0.0.1"
+        } else {
+            "sleep 5"
+        };
+        let r = execute(
+            &call("run_command", json!({"command": cmd, "timeout_secs": 1})),
+            &ctx,
+        );
+        assert!(!r.ok, "{}", r.content);
+        assert_eq!(r.error_code, Some("TIMEOUT"), "{}", r.content);
+    }
+
+    #[test]
+    fn run_command_preserves_quotes() {
+        let (ctx, _dir) = ctx();
+        // Windows 走 cmd /S /C + raw_arg：命令自带引号必须原样交给 cmd，
+        // 不能被 Rust 的参数转义改成 `\"`。
+        let r = execute(
+            &call("run_command", json!({"command": "echo \"quoted value\""})),
+            &ctx,
+        );
+        assert!(r.ok, "{}", r.content);
+        assert!(r.content.contains("quoted value"), "{}", r.content);
+    }
+
+    #[test]
+    fn run_command_summary_includes_command_and_cwd() {
+        let c = call("run_command", json!({"command": "cargo test", "cwd": "crates/agent"}));
+        let s = c.summary();
+        assert!(s.contains("cargo test"), "{s}");
+        assert!(s.contains("crates/agent"), "{s}");
+    }
+
+    #[test]
+    fn read_capped_keeps_head_and_tail() {
+        let data: Vec<u8> = (0..100u8).collect();
+        let (out, total) = read_capped(std::io::Cursor::new(data), 10, 20).unwrap();
+        assert_eq!(total, 100);
+        assert_eq!(out.len(), 30, "只保留头 10 + 尾 20");
+        assert_eq!(&out[..10], &(0..10u8).collect::<Vec<_>>()[..]);
+        assert_eq!(&out[10..], &(80..100u8).collect::<Vec<_>>()[..]);
     }
 
     // ---- 团队交接 ----

@@ -691,6 +691,73 @@ impl ThinkingLevel {
     }
 }
 
+/// 会话权限档位（会话级）。
+///
+/// 决定「写操作与命令」在 agent 循环里怎么处理：
+/// - `ReadOnly` / `Plan`：需要审批的工具（写文件、打补丁、批量修改、`run_command`、
+///   全部 MCP 工具）**不发给模型**；万一模型仍发来这类调用，执行前直接拒绝、不弹审批。
+/// - `Standard`：写操作与命令逐次弹审批（历史行为，默认）。
+/// - `Full`：写操作与命令直接执行、不弹审批；路径沙箱与 `.git` 禁写等约束不变。
+///
+/// `Plan` 与 `ReadOnly` 的工具集相同，差别只在系统提示：计划档要求先产出
+/// 实施计划，等用户切档后再执行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    ReadOnly,
+    Plan,
+    #[default]
+    Standard,
+    Full,
+}
+
+impl PermissionMode {
+    /// 面板里的四档，顺序即从最严到最松。
+    pub const ALL: [PermissionMode; 4] = [
+        PermissionMode::ReadOnly,
+        PermissionMode::Plan,
+        PermissionMode::Standard,
+        PermissionMode::Full,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PermissionMode::ReadOnly => "只读",
+            PermissionMode::Plan => "计划",
+            PermissionMode::Standard => "标准",
+            PermissionMode::Full => "完整",
+        }
+    }
+
+    pub fn glyph(self) -> &'static str {
+        match self {
+            PermissionMode::ReadOnly => "◉",
+            PermissionMode::Plan => "◇",
+            PermissionMode::Standard => "◈",
+            PermissionMode::Full => "⚡",
+        }
+    }
+
+    /// 面板里的一句说明。
+    pub fn desc(self) -> &'static str {
+        match self {
+            PermissionMode::ReadOnly => "只能读取、检索与联网；写文件和执行命令的工具不提供",
+            PermissionMode::Plan => "只读调研，先产出实施计划；确认后切到标准或完整执行",
+            PermissionMode::Standard => "写操作与命令逐次弹审批，读操作自动执行",
+            PermissionMode::Full => "写操作与命令直接执行、不弹审批（沙箱仍然生效）",
+        }
+    }
+
+    /// 是否不向模型提供写工具（只读 / 计划）。
+    pub fn hides_write_tools(self) -> bool {
+        matches!(self, PermissionMode::ReadOnly | PermissionMode::Plan)
+    }
+
+    pub fn is_full(self) -> bool {
+        matches!(self, PermissionMode::Full)
+    }
+}
+
 /// 一个会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -748,6 +815,9 @@ pub struct Session {
     /// 本会话的思考等级；旧会话没有这个字段时按 `Auto`（不发送参数）处理。
     #[serde(default)]
     pub thinking: ThinkingLevel,
+    /// 本会话的权限档位；旧会话没有这个字段时按「标准」（逐次审批）处理。
+    #[serde(default)]
+    pub permission: PermissionMode,
 
     // ===== 断点续跑（旧配置反序列化时为空/默认） =====
     /// 机器可读的任务阶段。崩溃恢复的依据。
@@ -1141,9 +1211,30 @@ mod session_list_tests {
             provider_id: String::new(),
             model: String::new(),
             thinking: ThinkingLevel::Auto,
+            permission: PermissionMode::Standard,
             stage: TaskStage::Idle,
             resume_prompt: String::new(),
         }
+    }
+
+    #[test]
+    fn permission_mode_defaults_to_standard_and_roundtrips() {
+        assert_eq!(PermissionMode::default(), PermissionMode::Standard);
+        assert!(PermissionMode::ReadOnly.hides_write_tools());
+        assert!(PermissionMode::Plan.hides_write_tools());
+        assert!(!PermissionMode::Standard.hides_write_tools());
+        assert!(!PermissionMode::Full.hides_write_tools());
+        let text = serde_json::to_string(&PermissionMode::ReadOnly).unwrap();
+        assert_eq!(text, "\"read_only\"");
+        assert_eq!(
+            serde_json::from_str::<PermissionMode>("\"full\"").unwrap(),
+            PermissionMode::Full
+        );
+        // 旧会话没有 permission 字段 → 标准档
+        let old = r#"{"id":"a","title":"旧","subtitle":"","team_name":"",
+                      "messages":[],"updated_label":""}"#;
+        let s: Session = serde_json::from_str(old).unwrap();
+        assert_eq!(s.permission, PermissionMode::Standard);
     }
 
     #[test]
