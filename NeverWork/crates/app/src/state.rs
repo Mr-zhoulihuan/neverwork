@@ -327,27 +327,17 @@ pub struct AppState {
     remote_open_gen: u64,
     /// 文件监听器的停止信号：切工作区时先停旧的，再监听新根。
     watcher_stop: Option<flume::Sender<()>>,
-    /// Git 仓库状态（进入 Git 面板或手动刷新时更新）。
+    /// Git 仓库状态（进入改动面板或手动刷新时更新）。
     pub git: crate::git::RepoStatus,
-    /// Git 面板里当前选中的文件（用于显示 diff）。
-    pub git_selected: Option<String>,
     /// 当前目录是否是一个 git 仓库（false 时显示提示而不是空列表）。
     pub git_is_repo: bool,
     /// 工作区里发现的所有 git 仓库：(显示名, 绝对路径)。
     ///
     /// 工作区常常是「容器目录」（如 `E:\go`），其下每个项目各自是仓库。
-    /// Git 面板可以独立切换要操作的仓库，文件树仍显示整个工作区。
+    /// 改动面板可以独立切换要查看的仓库，文件树仍显示整个工作区。
     pub git_repos: Vec<(String, PathBuf)>,
-    /// 当前 Git 面板操作的仓库路径；`None` 表示工作区根本身。
+    /// 当前改动面板查看的仓库路径；`None` 表示工作区根本身。
     pub git_active: Option<PathBuf>,
-    /// 提交信息输入框。
-    pub git_commit_msg: TextBuffer,
-    /// 分支操作输入框（新建 / 切换）。
-    pub git_branch_input: TextBuffer,
-    /// 等待二次确认的破坏性操作（丢弃改动）。
-    pub git_confirm: Option<crate::git_ops::GitOp>,
-    /// Git 面板是否展开分支列表。
-    pub git_show_branches: bool,
     /// 会话列表搜索框（标题/摘要/副标题，不扫正文）。
     pub session_search: TextBuffer,
     /// 正在展示右键菜单的会话下标。
@@ -1014,14 +1004,9 @@ impl AppState {
             remote_open_gen: 0,
             watcher_stop: None,
             git: crate::git::RepoStatus::default(),
-            git_selected: None,
             git_is_repo: false,
             git_repos: Vec::new(),
             git_active: None,
-            git_commit_msg: TextBuffer::single_line(),
-            git_branch_input: TextBuffer::single_line(),
-            git_confirm: None,
-            git_show_branches: false,
             session_search: TextBuffer::single_line(),
             session_menu: None,
             session_menu_at: None,
@@ -1343,35 +1328,6 @@ impl AppState {
         // 自动化验证用：`NW_AUTO_APPROVE=1` 时自动批准写操作（仅供本机验证，正常使用别开）。
         if std::env::var("NW_AUTO_APPROVE").map(|v| v == "1").unwrap_or(false) {
             me.auto_approve = true;
-        }
-        // 验证用：启动时执行一次 Git 写操作，走与界面完全相同的代码路径。
-        if let Ok(spec) = std::env::var("NW_GIT_OP") {
-            me.refresh_git(cx);
-            // NW_GIT_REPO=<子目录名> 先切到该仓库
-            if let (Ok(name), Some(root)) = (std::env::var("NW_GIT_REPO"), me.root.clone()) {
-                me.git_active = Some(root.join(name));
-                me.git_selected = None;
-                me.refresh_git(cx);
-            }
-            let (kind, arg) = match spec.split_once(':') {
-                Some((k, a)) => (k.to_string(), a.to_string()),
-                None => (spec.clone(), String::new()),
-            };
-            match kind.as_str() {
-                "stage-all" => me.run_git_op(crate::git_ops::GitOp::StageAll, cx),
-                "commit" => me.run_git_op(crate::git_ops::GitOp::Commit(arg), cx),
-                "discard" => me.run_git_op(crate::git_ops::GitOp::Discard(arg), cx),
-                "branch" => me.run_git_op(crate::git_ops::GitOp::CreateBranch(arg), cx),
-                "switch" => me.run_git_op(crate::git_ops::GitOp::SwitchBranch(arg), cx),
-                _ => {}
-            }
-            // NW_GIT_CONFIRM=1 时把挂起的破坏性操作也执行掉（仅验证用）
-            if std::env::var("NW_GIT_CONFIRM").map(|v| v == "1").unwrap_or(false)
-                && me.git_confirm.is_some()
-            {
-                me.confirm_git_op(cx);
-            }
-            tracing::info!("NW_GIT_OP={spec} -> {:?}", me.notice);
         }
         // 验证用：直接打开右侧某个 Tab（files|git|preview）。
         if let Ok(t) = std::env::var("NW_RIGHT_TAB") {
@@ -2683,14 +2639,12 @@ impl AppState {
     /// 切换 Git 面板操作的仓库。
     pub(crate) fn select_git_repo(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.git_active = Some(path);
-        self.git_selected = None;
-        self.git_commit_msg.reset("");
         self.refresh_git(cx);
     }
 
-    /// 清空 Git 面板状态（不跑任何 git 子进程）。
+    /// 清空改动面板状态（不跑任何 git 子进程）。
     ///
-    /// 右栏 Git 面板已从界面移除。切换工作区时如果照旧调用 `refresh_git`，
+    /// 切换工作区时如果照旧调用 `refresh_git`，
     /// 会同步起 6+ 条 git 子进程（rev-parse / rev-list / status / log），
     /// 大仓库下界面卡住几秒；无控制台的构建里子进程还会闪黑框。
     /// 这里只做内存复位，切换路径上不再碰 git。
@@ -2699,11 +2653,6 @@ impl AppState {
         self.git_is_repo = false;
         self.git_repos.clear();
         self.git_active = None;
-        self.git_selected = None;
-        self.git_confirm = None;
-        self.git_show_branches = false;
-        self.git_commit_msg.reset("");
-        self.git_branch_input.reset("");
     }
 
     /// 刷新 Git 状态。
@@ -2713,7 +2662,6 @@ impl AppState {
             // 无工作区：清空上一次的状态，面板显示占位而不是旧仓库的改动
             self.git_is_repo = false;
             self.git = crate::git::RepoStatus::default();
-            self.git_selected = None;
             cx.notify();
             return;
         };
@@ -2721,114 +2669,15 @@ impl AppState {
             crate::git::RepoQuery::Ok(st) => {
                 self.git_is_repo = true;
                 self.git = st;
-                // 选中的文件若已不在改动列表里，清掉选择
-                if let Some(sel) = &self.git_selected {
-                    if !self.git.changes.iter().any(|c| &c.path == sel) {
-                        self.git_selected = None;
-                    }
-                }
-                if self.git_selected.is_none() {
-                    self.git_selected = self.git.changes.first().map(|c| c.path.clone());
-                }
             }
             crate::git::RepoQuery::NotARepo => {
                 self.git_is_repo = false;
                 self.git = crate::git::RepoStatus::default();
-                self.git_selected = None;
                 // 不往对话区发通知：Git 面板自己会显示「不是仓库」的占位。
                 // 打开一个非 Git 文件夹是正常用法，不该报错。
             }
         }
         cx.notify();
-    }
-
-    /// 选中 Git 面板里的某个文件。
-    pub(crate) fn select_git_file(&mut self, path: String, cx: &mut Context<Self>) {
-        self.git_selected = Some(path);
-        cx.notify();
-    }
-
-    /// 是否已明确选好要操作的仓库。
-    ///
-    /// 多仓库且未选中时为 `false`，此时禁止写操作——避免误改别的项目。
-    pub(crate) fn git_repo_chosen(&self) -> bool {
-        self.git_active.is_some() || self.git_repos.len() <= 1
-    }
-
-    /// 执行一次 Git 写操作。破坏性操作先挂起等确认。
-    pub(crate) fn run_git_op(&mut self, op: crate::git_ops::GitOp, cx: &mut Context<Self>) {
-        if !self.git_repo_chosen() {
-            self.notice = Some("工作区内有多个仓库，先在 Git 面板选一个再操作".into());
-            cx.notify();
-            return;
-        }
-        // 破坏性操作必须二次确认，不能直接执行
-        if op.is_destructive() {
-            self.git_confirm = Some(op);
-            cx.notify();
-            return;
-        }
-        self.exec_git_op(op, cx);
-    }
-
-    /// 真正执行（已确认或非破坏性）。
-    fn exec_git_op(&mut self, op: crate::git_ops::GitOp, cx: &mut Context<Self>) {
-        let Some(dir) = self.git_dir() else {
-            self.notice = Some("还没有选择工作区".into());
-            cx.notify();
-            return;
-        };
-        let is_commit = matches!(op, crate::git_ops::GitOp::Commit(_));
-
-        let r = crate::git_ops::apply(&dir, &op);
-        self.notice = Some(r.message.clone());
-
-        if r.ok {
-            if is_commit {
-                self.git_commit_msg.reset("");
-            }
-            // 改动文件可能被删/改名，清掉失效的选中项
-            self.git_selected = None;
-            self.refresh_git(cx);
-        } else {
-            cx.notify();
-        }
-    }
-
-    /// 用户确认了破坏性操作。
-    pub(crate) fn confirm_git_op(&mut self, cx: &mut Context<Self>) {
-        if let Some(op) = self.git_confirm.take() {
-            self.exec_git_op(op, cx);
-        }
-        cx.notify();
-    }
-
-    pub(crate) fn cancel_git_op(&mut self, cx: &mut Context<Self>) {
-        self.git_confirm = None;
-        cx.notify();
-    }
-
-    /// 用输入框里的内容提交。
-    pub(crate) fn commit_from_input(&mut self, cx: &mut Context<Self>) {
-        let msg = self.git_commit_msg.text().to_string();
-        if msg.trim().is_empty() {
-            self.notice = Some("提交信息不能为空".into());
-            cx.notify();
-            return;
-        }
-        self.exec_git_op(crate::git_ops::GitOp::Commit(msg), cx);
-    }
-
-    /// 用输入框里的内容新建分支。
-    pub(crate) fn create_branch_from_input(&mut self, cx: &mut Context<Self>) {
-        let name = self.git_branch_input.text().to_string();
-        if name.trim().is_empty() {
-            self.notice = Some("分支名不能为空".into());
-            cx.notify();
-            return;
-        }
-        self.git_branch_input.reset("");
-        self.exec_git_op(crate::git_ops::GitOp::CreateBranch(name), cx);
     }
 
 

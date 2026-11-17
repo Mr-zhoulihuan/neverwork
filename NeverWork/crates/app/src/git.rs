@@ -285,81 +285,6 @@ fn kind_of(c: char) -> ChangeKind {
     }
 }
 
-/// 取某个文件相对 HEAD 的 diff（工作区 + 暂存区一起看）。
-pub fn file_diff(dir: &Path, path: &str) -> Vec<DiffLine> {
-    let mut lines = Vec::new();
-    // 已跟踪文件的改动
-    if let Some(d) = run(dir, &["diff", "HEAD", "--", path]) {
-        lines.extend(parse_diff(&d));
-    }
-    // 未跟踪文件：git diff 看不到，直接读文件全量当新增
-    if lines.is_empty() {
-        if let Some(untracked) = run(dir, &["ls-files", "--others", "--exclude-standard", "--", path])
-        {
-            if !untracked.trim().is_empty() {
-                let full = dir.join(path);
-                if let Ok(text) = std::fs::read_to_string(&full) {
-                    for (i, l) in text.lines().take(400).enumerate() {
-                        lines.push(DiffLine {
-                            marker: "+".into(),
-                            text: format!("{:>4} {l}", i + 1),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    lines
-}
-
-/// diff 展示行。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiffLine {
-    /// `+` / `-` / ` `
-    pub marker: String,
-    pub text: String,
-}
-
-/// 解析 unified diff 的正文行（跳过文件头与 hunk 头）。
-pub fn parse_diff(raw: &str) -> Vec<DiffLine> {
-    let mut out = Vec::new();
-    let mut in_hunk = false;
-    for line in raw.lines() {
-        if line.starts_with("@@") {
-            in_hunk = true;
-            // hunk 头本身作为分隔线显示出来，方便定位
-            out.push(DiffLine {
-                marker: "@".into(),
-                text: line.to_string(),
-            });
-            continue;
-        }
-        if !in_hunk {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('+') {
-            out.push(DiffLine {
-                marker: "+".into(),
-                text: rest.to_string(),
-            });
-        } else if let Some(rest) = line.strip_prefix('-') {
-            out.push(DiffLine {
-                marker: "-".into(),
-                text: rest.to_string(),
-            });
-        } else if let Some(rest) = line.strip_prefix(' ') {
-            out.push(DiffLine {
-                marker: " ".into(),
-                text: rest.to_string(),
-            });
-        }
-        if out.len() >= 800 {
-            break;
-        }
-    }
-    out
-}
-
 /// 让界面能显示「有多少改动」的紧凑摘要。
 pub fn summary_line(st: &RepoStatus) -> String {
     if st.changes.is_empty() {
@@ -376,37 +301,6 @@ pub fn summary_line(st: &RepoStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_parsed_diff_markers() {
-        let raw = "@@ -1,3 +1,3 @@\n-old\n+new\n same\n";
-        let d = parse_diff(raw);
-        assert_eq!(d.len(), 4);
-        assert_eq!(d[0].marker, "@");
-        assert_eq!(d[1].marker, "-");
-        assert_eq!(d[1].text, "old");
-        assert_eq!(d[2].marker, "+");
-        assert_eq!(d[3].marker, " ");
-    }
-
-    #[test]
-    fn ignores_header_lines() {
-        let raw = "diff --git a/x b/x\nindex 123..456\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n";
-        let d = parse_diff(raw);
-        // 只保留 hunk 之后的内容（+1 条 hunk 头）
-        assert_eq!(d.len(), 3);
-        assert!(d.iter().all(|l| !l.text.contains("index 123")));
-    }
-
-    #[test]
-    fn caps_long_diffs() {
-        let mut raw = String::from("@@ -1 +1 @@\n");
-        for i in 0..2000 {
-            raw.push_str(&format!("+line{i}\n"));
-        }
-        let d = parse_diff(&raw);
-        assert!(d.len() <= 801, "应截断，实际 {}", d.len());
-    }
 
     #[test]
     fn kind_of_maps_git_codes() {

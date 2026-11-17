@@ -11,7 +11,6 @@ mod brackets;
 mod find;
 mod folding;
 mod git;
-mod git_ops;
 mod highlight;
 mod input_handler;
 mod keymap;
@@ -205,6 +204,43 @@ impl Render for Root {
     }
 }
 
+/// 崩溃兜底：把 panic 消息与调用栈追加到配置目录下的 `crash.log`。
+///
+/// release 版没有控制台（`windows_subsystem = "windows"`），panic 默认只写 stderr，
+/// 进程一死信息就跟着没了，用户只能反馈「闪退」。落盘一份之后，
+/// 窗口拖动/缩放这类偶发崩溃下次可以直接看到 panic 位置。
+/// 注意：栈溢出 / abort（0xc0000409）不经过 panic 钩子，那类崩溃得靠系统 dump。
+fn install_crash_log() {
+    let dir = std::env::var("NW_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .unwrap_or_else(|_| ".".into());
+            std::path::Path::new(&home).join(".neverwork")
+        });
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let bt = std::backtrace::Backtrace::force_capture();
+        let text = format!("=== panic @ unix {ts} ===\n{info}\n--- backtrace ---\n{bt}\n\n");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("crash.log"))
+            {
+                let _ = f.write_all(text.as_bytes());
+            }
+        }
+        default_hook(info);
+    }));
+}
+
 fn main() {
     // 远程密码认证的 askpass 端点：ssh 用 `SSH_ASKPASS` 调回本程序要密码。
     // 必须最先判断，不能先建窗口 / 初始化日志；密码只从环境变量读一次，
@@ -230,6 +266,8 @@ fn main() {
                 .unwrap_or_else(|_| "neverwork=info,info".into()),
         )
         .init();
+    // 崩溃信息落盘：release 没有控制台，闪退时靠 `~/.neverwork/crash.log` 定位。
+    install_crash_log();
 
     let page = std::env::var("NW_PAGE").unwrap_or_default();
     tracing::info!("NeverWork 启动");

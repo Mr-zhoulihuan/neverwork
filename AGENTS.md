@@ -46,7 +46,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 
 - 窗口按钮图标必须用 `div` 画（横线/方框/错位双框），**不要用 `□`/`❐` 字符**：字体回退后两者几乎一样，最大化前后看不出区别。最大化状态在 `render` 里用 `window.is_maximized()` 传给 `titlebar`，窗口尺寸变化会触发重绘。
 - **文件树右键菜单与标签关闭**（`views/file_menu.rs`，复用 session_menu 的 `menu_row`/`menu_glyph`/`menu_divider`）：文件行右键（本地+远程两分支）→ `open_file_menu`（状态 `file_menu: Option<FileMenuTarget>`），菜单含「添加到会话」（走 `attach_paths`，目录与远程置灰）与「复制路径」（远程拼 `url()/rel`）；编辑器/媒体标签右键 → `tab_menu_at`（`open_tab_menu`），菜单含「关闭」「关闭全部」；标签尾部的 ✕（id `close-file`/`media-close`）与菜单项都走 `close_current_file`——**未保存先 `save_file`，同步保存失败就不关**（防丢内容），关完回对话页。菜单坐标与 session_menu 同款：state 存鼠标坐标，render 侧按 `visible_w/h` clamp 反向弹出。
 - **单实例**：`main.rs::single_instance` 用 Windows 命名互斥量 `Local\NeverWork-SingleInstance-v1`（`CreateMutexW` + `ERROR_ALREADY_EXISTS`）；已在跑时 `EnumWindows` 按 exe 名找窗口并 `ShowWindow(SW_RESTORE)`+`SetForegroundWindow` 激活后退出。检查必须在 askpass 分支**之后**（ssh 密码回调会反复启动本进程）；`NW_ALLOW_MULTI=1` 仅供自动化并行多开，不要删。全部手写 FFI，不引新依赖。
-- **右栏「改动」面板** = 原 Git 面板（`RightTab::Git`），tab 头为「文件 / 改动 / 预览」。含改动文件列表（增/改/删/重命名/冲突标记、暂存/取消暂存/丢弃、diff、提交框、分支切换、最近提交）。刷新时机：切 tab（`set_right_tab` 已内置）、展开右栏（`toggle_right_panel`）、切工作区（`enter_workspace` 尾部按 tab 判断）、文件 watcher 回调（仅面板展开时，300ms 去抖后跑 `git status`）。远程工作区显示占位；`NW_RIGHT_TAB=git` 验证直达。**别把 `reset_git_state` 改回无条件 `refresh_git`**：切工作区会同步起 6+ 条 git 子进程，大仓库下界面卡几秒。
+- **右栏「改动」面板是只读的**（`RightTab::Git`，tab 头「文件 / 改动 / 预览」）：只调用 `git status` 列出改动文件（增/改/删/重命名/冲突标记 + 已暂存绿点），点击行用编辑器打开文件（Deleted 行提示无法打开）。**不要往面板加任何 git 写操作**（暂存/提交/丢弃/分支切换均已被移除，`git_ops.rs` 已删，别加回）。刷新时机：切 tab（`set_right_tab` 已内置）、展开右栏（`toggle_right_panel`）、切工作区（`enter_workspace` 尾部按 tab 判断）、文件 watcher 回调（仅面板展开时，300ms 去抖后跑 `git status`）。远程工作区显示占位；`NW_RIGHT_TAB=git` 验证直达。**别把 `reset_git_state` 改回无条件 `refresh_git`**：切工作区会同步起 6+ 条 git 子进程，大仓库下界面卡几秒。
 
 ## 左侧栏
 
@@ -58,6 +58,8 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 
 
 **验收截图须 DPI-aware**：PowerShell 默认 unaware 只抓到左上 1/4，会伪造「内容放大、右侧出界」；先 `SetProcessDpiAwarenessContext(-4)`（见 `design/shot.ps1`）。
 
+**崩溃兜底**：`main.rs::install_crash_log` 把 panic + backtrace 追加到 `<配置目录>/crash.log`（release 无控制台，闪退靠它）；栈溢出/abort（异常码 `0xc0000409`，窗口过程里 panic 穿过 `extern "system"` 也会 abort）不经过 panic 钩子，已在 `HKCU\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\neverwork.exe` 注册全量 dump（落 `%LOCALAPPDATA%\CrashDumps`）。排障先看这两处。
+
 ## Agent 工具（改前必读）
 
 - 工具在 `agent/src/tools.rs`。**所有路径走 `ToolContext::resolve`**（挡 `..`、跨盘绝对路径、符号链接逃逸）。
@@ -66,11 +68,6 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 
 - **会话权限档位 `PermissionMode`**（`Session.permission`，随会话保存，默认 `standard`）：`read_only`/`plan` 由 `tools::specs_for` 剔除所有 `requires_approval` 工具（含 MCP），agent 循环执行前再拦一次（`PERMISSION_DENIED`，不弹审批）；`plan` 另外靠系统提示要求先出实施计划。`full` 免审批直接执行，但**只免审批**——不得绕过 `ToolContext::resolve`、`.git` 禁写、命令超时/截断。UI 入口是对话框底栏 `permission-chip`，切 `full` 必须二次确认。
 - 团队角色的 `model` 是**展示标签**（`Claude Opus`），不能当模型 id 或据此切厂商——只有全小写真实 id 才算。
 - **运行上限三项（tokens/rounds/seconds）默认 0=不限**，从 settings 读；不要加回常量上限（读中型项目必被掐断）。防失控靠 `MAX_REPEAT=3`（同工具同参数）与手动停止。
-
-## Git 写操作（改前必读）
-
-- 写操作在 `app/src/git_ops.rs`。**只有「丢弃」是破坏性的**（`is_destructive()`），必须二次确认。
-- **多仓库且未选中时禁止写操作**（`git_repo_chosen()`）：自动选第一个会让 `git add -A` 落到用户没点选的仓库，真实踩过。提交前查暂存区与信息非空，失败带回 git stderr 原文。
 
 ## 对话区与查找（改前先读）
 
@@ -90,7 +87,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 
 - Provider：OpenAI 兼容 / Anthropic / Gemini 原生；Gemini 工具调用未接。模型列表按协议拉（GET /models），失败回退手输。
 - **Agent 联网**：`web_search`（必应 RSS）+ `web_fetch`（HTML→纯文本，去 script/style/head，中文按 Content-Type charset 解码）；两者默认常开、只读不审批。
 - 技能市场**只接真实源**：MCP 官方 Registry / 腾讯云 MCP 广场（国内直达）/ skills.sh（Skill 页唯一来源：首页热榜 + 搜索 API ≥2 字符，400ms 防抖；安装时解析上游真实 SKILL.md，GitHub 源先直试 `skills/<id>/SKILL.md` 再回退 jsDelivr，站点源走 `.well-known/agent-skills`；搜索 API 无 description，详情抽屉打开时才懒加载上游正文回填（`detail_loaded` 标记，安装时复用不二次请求）；正文/回答的 Markdown 链接渲染为可点击 span 走 `App::open_url`），热榜缓存在 `~/.neverwork/marketplace.json`（搜索结果只进内存，启动时缓存 10 分钟内不自动重拉）；`skills_catalog.rs` 仅保留可离线验证管道的真实 npm 内建项，**不要再加虚构条目**。MCP 子进程默认注入 npmmirror / 清华 PyPI 镜像（settings.mcp_mirror 可关）。
-- 无 LSP / tree-sitter / 终端 / 全局搜索。Git 有暂存/提交/丢弃/切分支，**无 push/pull、无冲突合并**。单文件 512KB、文件树 8000 节点上限。
+- 无 LSP / tree-sitter / 终端 / 全局搜索。Git 面板只读（`git status` 文件列表），**无暂存/提交/丢弃/切分支、无 push/pull、无冲突合并**。单文件 512KB、文件树 8000 节点上限。
 - **远程 SSH 工作区**（`core/src/ssh.rs` + `ToolContext` 后端化）：连接串 `ssh://[user@]host[:port]/abs/path`（输入框也收 `user@host:/path`），认证优先系统 `ssh` 的密钥/agent。工作区管理器里的「连接远程 SSH」按钮与远程输入行（含密码框）已移除（用户要求），远程入口只剩「最近工作区」里的远程条目（需密钥/agent 或复用内存密码）与手输连接串（无密码）。**密码只在内存**（`AppState.remote_pw`），经 `SSH_ASKPASS` 回调应用本体（`main.rs` 最先处理 `NW_ASKPASS_MODE`），不得写 settings/日志/命令行；`RemoteAuth` 手写 `Debug` 打码，别给它 derive。会话键是连接串。远程工具路径一律相对工作区根，写操作仍逐次审批；远程 `search_code` 返回 UNSUPPORTED，提示词引导用 `search_files`。**远程树/读文件/保存都是后台线程 + `remote_gen` 代次丢弃迟到结果**；`refresh_tree`/`collapse_all`/`open_remote_file`/`save_file`/`open_file_name` 都有 `self.remote` 分支。连接串手输与重命名共用 `ws_focus`/`InputTarget::Workspace`，加新输入框要同步 `buffer()`/`buffer_mut()`/`active_buffer()`/`active_buffer_mut()`。改这些不要**把 `~` 展开结果写回 `SshTarget`**（会话键会变，旧会话像丢了）；Git 面板、watcher、终端不做。
 
 <!-- proma:memory:start -->
