@@ -9,6 +9,10 @@ default-run = "neverwork"
 name = "neverwork"
 path = "src/main.rs"
 
+[target.'cfg(windows)'.build-dependencies]
+# 把 assets/neverwork.rc（应用图标 + 版本信息）编进 exe。
+embed-resource = "3"
+
 [dependencies]
 gpui.workspace = true
 neverwork-core = { path = "../core" }

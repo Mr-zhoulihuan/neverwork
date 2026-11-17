@@ -4,7 +4,8 @@
 #   powershell -ExecutionPolicy Bypass -File installer\build.ps1            # 全流程
 #   powershell -ExecutionPolicy Bypass -File installer\build.ps1 -SkipBuild # 复用已有 release
 #
-# 依赖：Rust 工具链、Python + Pillow（生成图标）、NSIS（winget install NSIS.NSIS）
+# 依赖：Rust 工具链、NSIS（winget install NSIS.NSIS）。
+# 图标已入库（crates\app\assets\neverwork.ico），编 exe 时由 build.rs 内嵌，安装包也直接引用。
 param([switch]$SkipBuild)
 
 $ErrorActionPreference = "Stop"
@@ -24,9 +25,6 @@ if (-not $SkipBuild) {
         Pop-Location
     }
 }
-
-python "$PSScriptRoot\make_icon.py"
-if ($LASTEXITCODE -ne 0) { throw "图标生成失败（需要 Python + Pillow）" }
 
 $makensis = @(
     (Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"),

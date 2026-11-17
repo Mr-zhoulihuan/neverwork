@@ -1,6 +1,5 @@
 target/
 dist/
-installer/neverwork.ico
 *.pdb
 *.exe
 *.msi

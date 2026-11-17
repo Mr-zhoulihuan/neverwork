@@ -3360,6 +3360,7 @@ dependencies = [
 name = "neverwork"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "flume",
  "gpui",
  "neverwork-agent",

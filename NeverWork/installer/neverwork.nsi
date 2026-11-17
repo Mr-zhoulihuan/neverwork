@@ -39,8 +39,8 @@ VIAddVersionKey "FileVersion" "${APP_VERSION}"
 VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey "LegalCopyright" "Apache-2.0"
 
-!define MUI_ICON "${__FILEDIR__}\neverwork.ico"
-!define MUI_UNICON "${__FILEDIR__}\neverwork.ico"
+!define MUI_ICON "${__FILEDIR__}\..\crates\app\assets\neverwork.ico"
+!define MUI_UNICON "${__FILEDIR__}\..\crates\app\assets\neverwork.ico"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "立即启动 ${APP_NAME}（首次使用在「设置」里填 API Key）"
@@ -113,7 +113,7 @@ Section "主程序" SEC_MAIN
   SectionIn RO
   SetOutPath "$INSTDIR"
   File "..\target\release\${APP_EXE}"
-  File "neverwork.ico"
+  File "..\crates\app\assets\neverwork.ico"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   WriteRegStr HKCU "${APP_REG}" "InstallDir" "$INSTDIR"

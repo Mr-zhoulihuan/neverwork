@@ -53,7 +53,7 @@ impl AppState {
 
         let mut body = div().id("team-scroll").flex().flex_col().gap_4().px_6().py_5().flex_1().overflow_scroll();
 
-        // 团队名 + 编排模式
+        // 团队名 + 协作说明
         body = body.child(
             div()
                 .flex()
@@ -78,18 +78,8 @@ impl AppState {
                         .gap_1()
                         .flex_1()
                         .child(div().text_sm().font_weight(FontWeight::BOLD).child(SharedString::from(team.name.clone())))
-                        .child(div().text_xs().text_color(theme::muted()).child(SharedString::from(format!("编排：{}", team.flow.label())))),
+                        .child(div().text_xs().text_color(theme::muted()).child("协作：@ 点名或首角色先行")),
                 ),
-        );
-
-        // 编排模式切换
-        body = body.child(
-            div()
-                .flex()
-                .gap_2()
-                .child(flow_chip(cx, neverwork_core::FlowMode::Pipeline, team.flow))
-                .child(flow_chip(cx, neverwork_core::FlowMode::Parallel, team.flow))
-                .child(flow_chip(cx, neverwork_core::FlowMode::Supervisor, team.flow)),
         );
 
         // 角色卡
@@ -331,14 +321,6 @@ impl AppState {
                 let pos = MODELS.iter().position(|m| *m == cur).unwrap_or(0);
                 role.model = MODELS[(pos + 1) % MODELS.len()].to_string();
             }
-        }
-        cx.notify();
-    }
-
-    pub(crate) fn set_flow(&mut self, flow: neverwork_core::FlowMode, cx: &mut Context<Self>) {
-        let ti = self.active_team_index();
-        if let Some(team) = self.config.teams.get_mut(ti) {
-            team.flow = flow;
         }
         cx.notify();
     }
@@ -884,29 +866,4 @@ pub(crate) fn plugin_chip(
                 }))
                 .child("✕"),
         )
-}
-
-pub(crate) fn flow_chip(cx: &mut Context<AppState>, mode: neverwork_core::FlowMode, current: neverwork_core::FlowMode) -> impl IntoElement {
-    let on = mode == current;
-    let base = div()
-        .id(SharedString::from(format!("flow-{:?}", mode)))
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap_1()
-        .flex_1()
-        .py_2()
-        .rounded_md()
-        .border_1()
-        .text_sm()
-        .cursor_pointer();
-    let el = if on {
-        base.border_color(theme::accent_line()).bg(theme::accent_soft()).text_color(theme::accent())
-    } else {
-        base.border_color(theme::border()).bg(theme::panel()).text_color(theme::muted())
-    };
-    el.on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-        this.set_flow(mode, cx);
-    }))
-    .child(SharedString::from(mode.label()))
 }

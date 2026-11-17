@@ -10,7 +10,7 @@
 cargo run -p neverwork          # 主界面
 cargo test --workspace          # 全部测试（3 条打真实 DeepSeek，需 NW_DEEPSEEK_KEY）
 cargo build -p neverwork        # 只编应用（增量约 6s）
-powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 → dist\NeverWork-0.1.0-setup.exe（dist/ 与生成图标已 gitignore，需 NSIS + Python/Pillow）
+powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 → dist\NeverWork-0.1.0-setup.exe（dist/ 已 gitignore，需 NSIS；exe 图标由 build.rs 内嵌，图标源 crates\app\assets\neverwork.ico）
 ```
 
 运行期变量：`NW_ROOT`、`NW_REMOTE`（`user@host:/path`）、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_RIGHT_COLLAPSED`/`NW_SESSION_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_PROVIDER_VIEW`（`add`|下标）/`NW_COMPOSER`（`thinking`|`menu`|`permission`）/`NW_PERMISSION`（`read_only`|`plan`|`standard`|`full`）/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_SKILLS_TAB`/`NW_SKILL_QUERY`/`NW_INSTALL_SKILL`/`NW_SESSION_QUERY`/`NW_SESSION_MENU`/`NW_ARCHIVE_OPEN`/`NW_WORKSPACE_POPUP`/`NW_DEMO_STATUS`/`NW_SWITCH_WS`；`NW_ASKPASS_MODE`/`NW_ASKPASS_SECRET` 由 ssh 回调应用自身时使用，不要手动设置；密码往返测试用 `NW_ASKPASS_EXE` 指向 `target/debug/neverwork.exe`。
@@ -83,7 +83,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 
 ## 代码现状
 
 - 编辑器：光标/多光标/选区/撤销重做/剪贴板/按字符点击/行号/高亮/虚拟滚动/保存/查找替换/折叠/括号匹配。
-- `Supervisor` 是真分派（Lead 逐轮决定下一角色）。Team 开工具走 `spawn_agents_chain`（串行、每角色带工具、与单 Agent 同一套历史）；关工具走 `run_team_with_history`（纯文本、不传 tools，工具历史由 `flatten_tool_history` 压平，否则 Anthropic 空正文整轮 400）。
+- 团队协作：开工具/关工具都从**入口角色**起步——`@角色名` 点名优先，没点名由 `roles[0]` 接手（不再把一句话派发给全员）。开工具走 `spawn_agents_chain` 的 handoff 链（入口角色带 handoff 工具、按需接力）；关工具只跑入口角色（纯文本、不传 tools，工具历史由 `flatten_tool_history` 压平，否则 Anthropic 空正文整轮 400）。编排模式（流水线/并行/主管指派）已从团队页移除，`FlowMode` 字段保留兼容、agent 侧 `run_team_with_history` 能力保留但 app 不再调用。
 - Provider：OpenAI 兼容 / Anthropic / Gemini 原生；Gemini 工具调用未接。模型列表按协议拉（GET /models），失败回退手输。
 - **Agent 联网**：`web_search`（必应 RSS）+ `web_fetch`（HTML→纯文本，去 script/style/head，中文按 Content-Type charset 解码）；两者默认常开、只读不审批。
 - 技能市场**只接真实源**：MCP 官方 Registry / 腾讯云 MCP 广场（国内直达）/ skills.sh（Skill 页唯一来源：首页热榜 + 搜索 API ≥2 字符，400ms 防抖；安装时解析上游真实 SKILL.md，GitHub 源先直试 `skills/<id>/SKILL.md` 再回退 jsDelivr，站点源走 `.well-known/agent-skills`；搜索 API 无 description，详情抽屉打开时才懒加载上游正文回填（`detail_loaded` 标记，安装时复用不二次请求）；正文/回答的 Markdown 链接渲染为可点击 span 走 `App::open_url`），热榜缓存在 `~/.neverwork/marketplace.json`（搜索结果只进内存，启动时缓存 10 分钟内不自动重拉）；`skills_catalog.rs` 仅保留可离线验证管道的真实 npm 内建项，**不要再加虚构条目**。MCP 子进程默认注入 npmmirror / 清华 PyPI 镜像（settings.mcp_mirror 可关）。

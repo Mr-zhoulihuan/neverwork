@@ -171,7 +171,7 @@ impl AppState {
                             .bg(theme::accent_soft())
                             .text_xs()
                             .text_color(theme::accent())
-                            .child(if self.streaming { "生成中…" } else { "团队流水线" }),
+                            .child(if self.streaming { "生成中…" } else { "协作团队" }),
                     ),
             );
         } else if self.streaming {

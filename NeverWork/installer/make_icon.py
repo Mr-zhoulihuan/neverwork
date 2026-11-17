@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""生成 NeverWork 安装包 / 快捷方式图标（多尺寸 ICO）。
+"""生成 NeverWork 应用图标（多尺寸 ICO）。
 
 品牌绿 #22C55E 与左侧栏头像一致；白字 N 居中。
-由 build.ps1 调用，产物写回本目录 neverwork.ico。
+产物写入 crates/app/assets/neverwork.ico（已入库）：app 的 build.rs 用
+embed-resource 把它内嵌进 exe（任务栏 / 资源管理器图标），NSIS 安装包也直接引用。
+修改品牌后手动重新生成：python installer\make_icon.py
 """
 import os
 
@@ -11,7 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 GREEN = (34, 197, 94, 255)  # #22C55E
 WHITE = (255, 255, 255, 255)
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "neverwork.ico")
+OUT = os.path.normpath(os.path.join(HERE, "..", "crates", "app", "assets", "neverwork.ico"))
 FONTS = ("seguisb.ttf", "segoeuib.ttf", "arialbd.ttf")
 
 
@@ -36,6 +38,7 @@ def make(size: int) -> Image.Image:
 
 
 def main() -> None:
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
     base = make(256)
     sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
     base.save(OUT, format="ICO", sizes=sizes)

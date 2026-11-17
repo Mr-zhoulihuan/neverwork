@@ -3292,55 +3292,39 @@ impl AppState {
         //
         // 1. 单助手会话（`SessionMode::Solo`）：**一个**助手带工具。
         //    它能问答、能读文件、能改代码，由模型自己判断这次要不要动工具。
-        // 2. 团队会话 + 开工具：多角色串行带工具，前一个角色的产出作为
-        //    后一个的上下文，写操作逐个弹审批。
-        // 3. 团队会话 + 关工具：多角色纯文本轮流发言。
+        // 2. 团队会话 + 开工具：**入口角色**带工具（@ 点名优先，否则首角色），
+        //    需要队友时由它 handoff 交接——不把一句话派发给全员。
+        // 3. 团队会话 + 关工具：只跑入口角色（纯文本），不派发、不交接。
         if team_mode && self.tools_enabled {
             let mut roles = team.roles.clone();
             if roles.is_empty() {
                 roles.push(neverwork_core::Role::new("agent", "Assistant", "A"));
             }
+            let mut team = team.clone();
+            if team.roles.is_empty() {
+                team.roles = roles.clone();
+            }
             // 模型与厂商以本会话的选择为准（会话没选过才回落全局默认）；
             // role.model 只是展示标签，不参与路由。
-            match neverwork_core::parse_role_mention(&text, &roles) {
-                // 点名角色：以它为入口，后续由 handoff 自动接力。
-                Some(entry) => {
-                    let mut team = team.clone();
-                    if team.roles.is_empty() {
-                        team.roles = roles.clone();
-                    }
-                    self.spawn_agents_chain(
-                        session_idx,
-                        text,
-                        roles,
-                        Some((team, entry)),
-                        provider_id,
-                        config,
-                        cx,
-                    );
-                }
-                // 没点名：保持原有「全员按顺序跑」的行为。
-                None => self.spawn_agents_chain(
-                    session_idx, text, roles, None, provider_id, config, cx,
-                ),
-            }
+            let entry = team_entry_index(&text, &roles);
+            self.spawn_agents_chain(
+                session_idx,
+                text,
+                roles,
+                Some((team, entry)),
+                provider_id,
+                config,
+                cx,
+            );
         } else if team_mode {
-            // 关工具：@ 入口仍生效，但只跑被点名角色，不自动交接。
-            match neverwork_core::parse_role_mention(&text, &team.roles) {
-                Some(entry) => {
-                    let role = team.roles[entry].clone();
-                    self.spawn_agents_chain(
-                        session_idx,
-                        text,
-                        vec![role],
-                        None,
-                        provider_id,
-                        config,
-                        cx,
-                    );
-                }
-                None => self.spawn_team(session_idx, text, team, provider_id, config, cx),
-            }
+            // 关工具：没有 handoff 工具，只让入口角色开口一次。
+            let entry = team_entry_index(&text, &team.roles);
+            let role = team
+                .roles
+                .get(entry)
+                .cloned()
+                .unwrap_or_else(|| neverwork_core::Role::new("agent", "Assistant", "A"));
+            self.spawn_agents_chain(session_idx, text, vec![role], None, provider_id, config, cx);
         } else {
             // 单个助手：不套任何角色 prompt，避免「规划者 / 编码」这类
             // 与具体诉求无关的角色约束把问答带偏。但已安装的文本技能仍要
@@ -3593,8 +3577,8 @@ impl AppState {
         std::thread::spawn(move || {
             // 跨角色累积的对话上下文，起手带上会话历史
             let mut history: Vec<neverwork_agent::ChatMessage> = seeded;
-            // 老路径：按 roles 顺序全部跑一遍；
-            // @ 入口模式：从被点名角色开始，由 handoff 决定下一跳。
+            // handoff 模式：从入口角色开始，由 handoff 决定下一跳；
+            // 非 handoff：按 roles 顺序跑完即止（调用方只传单角色）。
             let handoff_mode = handoff.is_some();
             let mut next: Option<usize> = handoff.as_ref().map(|(_, i)| *i);
             let mut seq = 0usize;
@@ -3680,7 +3664,7 @@ impl AppState {
                         hops += 1;
                     }
                     _ => {
-                        // 入口模式跑完即结束；老路径继续下一个角色。
+                        // 入口模式跑完即结束；非 handoff 顺序跑完（单角色一次即停）。
                         if handoff_mode {
                             break;
                         }
@@ -4072,116 +4056,6 @@ impl AppState {
                 }
                 cx.notify();
             });
-        })
-        .detach();
-    }
-
-    /// 多角色团队：沿用原来的轮流发言实现。
-    fn spawn_team(
-        &mut self,
-        session_idx: usize,
-        text: String,
-        team: neverwork_core::Team,
-        _provider_id: String,
-        config: neverwork_agent::ProviderConfig,
-        cx: &mut Context<Self>,
-    ) {
-        let cancel = self.cancel.clone();
-        // 纯文本多角色也一样会「失忆」：同一会话的前文要带上
-        let seeded = history_for_model(&self.sessions[session_idx].messages, &text);
-        let (tx, rx) = flume::unbounded::<neverwork_agent::TeamEvent>();
-
-        std::thread::spawn(move || {
-            let mut emit = |ev: neverwork_agent::TeamEvent| {
-                let _ = tx.send(ev);
-            };
-            neverwork_agent::run_team_with_history(&team, seeded, &text, config, &mut emit, cancel);
-        });
-
-        cx.spawn(async move |weak, async_cx| {
-            let mut role_msg: std::collections::HashMap<usize, usize> =
-                std::collections::HashMap::new();
-            loop {
-                match rx.recv_async().await {
-                    Ok(neverwork_agent::TeamEvent::RoleStart { role_index }) => {
-                        let _ = weak.update(async_cx, |this, cx| {
-                            this.active_role = Some(role_index);
-                            if let Some(team) = this.config.active_team().cloned() {
-                                if let Some(role) = team.roles.get(role_index) {
-                                    let idx = this.sessions[session_idx].messages.len();
-                                    this.sessions[session_idx].messages.push(Message {
-                                        kind: MessageKind::Agent {
-                                            participant: neverwork_core::Participant {
-                                                role_id: role.id.clone(),
-                                                role_name: role.name.clone(),
-                                                color_index: role.color_index,
-                                                initial: role.initial.clone(),
-                                            },
-                                        },
-                                        body: String::new(),
-                                        code: None,
-                                        elapsed_ms: 0,
-                                        tokens_in: 0,
-                                        tokens_out: 0,
-                                    });
-                                    role_msg.insert(role_index, idx);
-                                }
-                            }
-                            this.chat_scroll_dirty.set(true);
-                            cx.notify();
-                        });
-                    }
-                    Ok(neverwork_agent::TeamEvent::Delta { role_index, text }) => {
-                        let msg_idx = role_msg.get(&role_index).copied();
-                        let _ = weak.update(async_cx, |this, cx| {
-                            if let Some(idx) = msg_idx {
-                                if let Some(m) = this.sessions[session_idx].messages.get_mut(idx) {
-                                    m.body.push_str(&text);
-                                }
-                            }
-                            this.chat_scroll_dirty.set(true);
-                            this.autosave_sessions();
-                            cx.notify();
-                        });
-                    }
-                    Ok(neverwork_agent::TeamEvent::RoleError { error, .. }) => {
-                        let _ = weak.update(async_cx, |this, cx| {
-                            this.notice = Some(format!("Agent 错误：{error}"));
-                            if let Some(s) = this.sessions.get_mut(session_idx) {
-                                s.stage = neverwork_core::TaskStage::Failed;
-                                s.sync_action();
-                            }
-                            this.save_sessions();
-                            cx.notify();
-                        });
-                    }
-                    Ok(neverwork_agent::TeamEvent::RoleDone { .. }) => {}
-                    Ok(neverwork_agent::TeamEvent::AllDone) | Err(_) => {
-                        let _ = weak.update(async_cx, |this, cx| {
-                            this.streaming = false;
-                            this.active_role = None;
-                            let cancelled = this.cancel.load(Ordering::Relaxed);
-                            if let Some(session) = this.sessions.get_mut(session_idx) {
-                                session.status = neverwork_core::SessionStatus::Done;
-                                if session.stage != neverwork_core::TaskStage::Failed {
-                                    session.stage = if cancelled {
-                                        neverwork_core::TaskStage::Cancelled
-                                    } else {
-                                        neverwork_core::TaskStage::Done
-                                    };
-                                }
-                                session.sync_action();
-                                let preview = last_preview(session);
-                                session.preview = preview;
-                                session.touch();
-                            }
-                            this.save_sessions();
-                            cx.notify();
-                        });
-                        break;
-                    }
-                }
-            }
         })
         .detach();
     }
@@ -5070,6 +4944,14 @@ fn keep_head(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// 团队会话的入口角色：@ 点名优先，否则首角色（0）。
+///
+/// 没有点名时不再把一句话派发给全员，只由首角色接手；需要协作时
+/// 由它在工具通道里 handoff 给队友。
+fn team_entry_index(text: &str, roles: &[neverwork_core::Role]) -> usize {
+    neverwork_core::parse_role_mention(text, roles).unwrap_or(0)
+}
+
 /// 还能不能再交接一跳（上限 6 跳，不含入口角色的首次运行）。
 fn can_handoff(hops: usize) -> bool {
     hops < neverwork_agent::MAX_HANDOFF_STEPS
@@ -5391,7 +5273,7 @@ mod role_skills_tests {
 
 #[cfg(test)]
 mod handoff_tests {
-    use super::{can_handoff, history_for_model, render_handoff};
+    use super::{can_handoff, history_for_model, render_handoff, team_entry_index};
     use neverwork_core::{Message, MessageKind, Participant, Role, Team};
 
     fn payload() -> neverwork_agent::HandoffPayload {
@@ -5504,6 +5386,17 @@ mod handoff_tests {
             neverwork_core::parse_role_mention("没有点名角色", &team.roles),
             None
         );
+    }
+
+    #[test]
+    fn no_mention_falls_back_to_the_first_role() {
+        let roles = vec![
+            Role::new("a", "Planner", "P"),
+            Role::new("b", "Coder", "C"),
+        ];
+        assert_eq!(team_entry_index("你好", &roles), 0, "没点名时首角色接手");
+        assert_eq!(team_entry_index("@Coder 你好", &roles), 1, "@ 点名优先");
+        assert_eq!(team_entry_index("你好", &[]), 0, "空团队回退 0，由调用方兜底");
     }
 }
 
