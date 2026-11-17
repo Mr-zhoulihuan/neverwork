@@ -9,6 +9,7 @@ pub(crate) mod market_detail;
 pub(crate) mod model_picker;
 pub(crate) mod new_session;
 pub(crate) mod palette;
+pub(crate) mod providers;
 pub(crate) mod session_menu;
 pub(crate) mod settings;
 pub(crate) mod sidebar;

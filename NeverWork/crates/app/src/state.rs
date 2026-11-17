@@ -108,10 +108,14 @@ pub enum FormField {
     ProviderKey(u8),
     /// 厂商 API 基址。
     ProviderUrl(u8),
-    /// 厂商模型名。
-    ProviderModel(u8),
     /// 厂商显示名。
     ProviderName(u8),
+    /// 厂商详情页的模型过滤框。
+    ProviderModelFilter,
+    /// 厂商详情页「手动添加模型」输入框。
+    ProviderNewModel(u8),
+    /// 「添加厂商」面板的搜索框。
+    ProviderSearch,
     /// 导入配置的路径。
     ImportPath,
     /// 模型选择器里的搜索框。
@@ -127,11 +131,22 @@ impl FormField {
         match self {
             FormField::ProviderKey(i)
             | FormField::ProviderUrl(i)
-            | FormField::ProviderModel(i)
-            | FormField::ProviderName(i) => Some(i),
+            | FormField::ProviderName(i)
+            | FormField::ProviderNewModel(i) => Some(i),
             _ => None,
         }
     }
+}
+
+/// 「模型与厂商」页的三种视图。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProviderView {
+    /// 厂商列表。
+    List,
+    /// 某个厂商的详情（`settings.providers` 下标）。
+    Detail(usize),
+    /// 添加厂商面板。
+    Add,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -292,8 +307,21 @@ pub struct AppState {
     pub skill_search: String,
     /// 导入配置的路径。
     pub import_path: String,
-    /// 打开中的模型选择器（厂商下标）；None 表示未打开。
-    pub model_picker: Option<usize>,
+    /// 「模型与厂商」页当前视图：列表 / 详情 / 添加。
+    pub provider_view: ProviderView,
+    /// 「添加厂商」面板的搜索词。
+    pub provider_query: String,
+    /// 详情页模型列表的过滤词。
+    pub provider_model_filter: String,
+    /// 正在拉取模型（按钮显示「拉取中…」并防重入）。
+    pub provider_models_busy: bool,
+    /// 正在测试厂商连通性（按钮显示「测试中…」并防重复发请求）。
+    pub provider_test_busy: bool,
+    /// 移除厂商的二次确认：`Some(idx)` 时该厂商的「移除」变成「确认移除」。
+    /// 误删会连已填的 Key 一起丢掉，必须再点一次。
+    pub provider_remove_confirm: Option<usize>,
+    /// 对话区模型选择器是否打开（按厂商分组，选中写回当前会话）。
+    pub model_picker: bool,
     /// 模型选择器的搜索词。
     pub model_query: String,
     /// 模型选择器里键盘高亮的下标。
@@ -393,6 +421,8 @@ pub struct AppState {
     pub ws_focus: FocusHandle,
     /// 输入区在窗口中的位置（IME 候选框定位用）。
     pub input_area_bounds: std::rc::Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// 正在编辑的表单输入框在窗口中的位置（「点外面自动提交」判定用）。
+    pub field_area_bounds: std::rc::Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
 /// 启动直达视图：`NW_VIEW=chat|team|file|skills|settings`。
@@ -418,6 +448,17 @@ fn initial_settings_tab() -> SettingsTab {
         "sync" => SettingsTab::Sync,
         "about" => SettingsTab::About,
         _ => SettingsTab::General,
+    }
+}
+
+/// `NW_PROVIDER_VIEW=add|<下标>`：验证时直接落到「添加厂商」或某个厂商详情。
+fn initial_provider_view() -> ProviderView {
+    match std::env::var("NW_PROVIDER_VIEW").unwrap_or_default().as_str() {
+        "add" => ProviderView::Add,
+        other => match other.parse::<usize>() {
+            Ok(i) => ProviderView::Detail(i),
+            Err(_) => ProviderView::List,
+        },
     }
 }
 
@@ -530,8 +571,27 @@ fn blank_session(seq: usize, config: &Config, mode: SessionMode) -> Session {
         tag: neverwork_core::SessionTag::None,
         updated_at: now,
         pinned: false,
+        provider_id: String::new(),
+        model: String::new(),
         stage: neverwork_core::TaskStage::Idle,
         resume_prompt: String::new(),
+    }
+}
+
+/// 新会话该继承的（厂商 id, 模型 id）：源会话得真选过，且厂商仍在、启用。
+fn inherit_session_model(
+    src: Option<&Session>,
+    providers: &[neverwork_core::ProviderEntry],
+) -> (String, String) {
+    let Some(src) = src else {
+        return (String::new(), String::new());
+    };
+    let usable = !src.provider_id.is_empty()
+        && providers.iter().any(|p| p.id == src.provider_id && p.enabled);
+    if usable {
+        (src.provider_id.clone(), src.model.clone())
+    } else {
+        (String::new(), String::new())
     }
 }
 
@@ -760,7 +820,13 @@ impl AppState {
             skills_tab: 0,
             skill_search: String::new(),
             import_path: String::new(),
-            model_picker: None,
+            provider_view: initial_provider_view(),
+            provider_query: String::new(),
+            provider_model_filter: String::new(),
+            provider_models_busy: false,
+            provider_test_busy: false,
+            provider_remove_confirm: None,
+            model_picker: false,
             model_query: String::new(),
             model_highlight: 0,
             export_with_secrets: false,
@@ -816,6 +882,7 @@ impl AppState {
             editor_focus: cx.focus_handle(),
             ws_focus: cx.focus_handle(),
             input_area_bounds: std::rc::Rc::new(Cell::new(None)),
+            field_area_bounds: std::rc::Rc::new(Cell::new(None)),
         };
 
         // 启动时按需打开文件（便于验证）。
@@ -832,13 +899,10 @@ impl AppState {
         start_watcher(me.root.clone(), cx);
         // 自动化验证用：`NW_SEND=<文本>` 启动后自动发送一条消息。
         let auto_send = std::env::var("NW_SEND").ok().filter(|t| !t.trim().is_empty());
-        // 调试/截图用：启动即打开某个厂商的模型选择器。
+        // 验证用：启动即展开对话区模型选择器（按厂商分组）。
         if let Ok(v) = std::env::var("NW_PICK_MODEL") {
-            if let Ok(i) = v.parse::<usize>() {
-                if i < me.settings.providers.len() {
-                    me.model_picker = Some(i);
-                    me.active_field = Some(FormField::ModelSearch);
-                }
+            if !v.is_empty() {
+                me.open_chat_model_picker(cx);
             }
         }
         // 验证用：启动即弹出「新建会话」的模式选择浮层。
@@ -1122,7 +1186,7 @@ impl AppState {
     }
 
     /// 把会话写回磁盘。失败不中断对话，只提示一次。
-    fn save_sessions(&mut self) {
+    pub(crate) fn save_sessions(&mut self) {
         // `action` 只是 `stage` 的显示投影：每次落盘顺手对齐，
         // 避免两套状态各写各的（圆圈说「已完成」、实际还停在审批上）。
         for s in &mut self.sessions {
@@ -1152,8 +1216,18 @@ impl AppState {
     }
 
     /// 新建会话并切过去。`mode` 在这里定死，之后不可切换。
+    ///
+    /// 新会话继承当前会话选的厂商 / 模型：刚在 A 会话切到某模型，
+    /// 接着开 B 会话干活是最常见的节奏，回到默认会让人觉得「白切了」。
+    /// 厂商已被删或停用时回落到「跟随默认」。
     pub(crate) fn new_session(&mut self, mode: SessionMode, cx: &mut Context<Self>) {
-        let s = blank_session(self.sessions.len(), &self.config, mode);
+        let mut s = blank_session(self.sessions.len(), &self.config, mode);
+        let (provider_id, model) = inherit_session_model(
+            self.sessions.get(self.active_session),
+            &self.settings.providers,
+        );
+        s.provider_id = provider_id;
+        s.model = model;
         self.sessions.push(s);
         self.active_session = self.sessions.len() - 1;
         self.center = CenterView::Chat;
@@ -1182,6 +1256,10 @@ impl AppState {
             self.center = CenterView::Chat;
             // 上一个会话的流水线高亮不能带到新会话
             self.active_role = None;
+            // 模型选择器里的勾选 / 高亮都是上一个会话的，换会话就收起。
+            if self.model_picker {
+                self.close_chat_model_picker(cx);
+            }
             // 注意：这里**不** touch。
             // 单纯「点开看一眼」不该把会话顶到最前，否则列表会随着浏览乱跳；
             // 只有真正发消息（send_message）才算活跃。
@@ -2292,8 +2370,8 @@ impl AppState {
                     self.close_workspace_prompt(cx);
                 } else if self.new_session_picker {
                     self.close_new_session_picker(cx);
-                } else if self.model_picker.is_some() {
-                    self.close_model_picker(cx);
+                } else if self.model_picker {
+                    self.close_chat_model_picker(cx);
                 } else if self.ws_prompt_open {
                     self.ws_prompt_open = false;
                     self.palette_open = false;
@@ -2336,7 +2414,9 @@ impl AppState {
         if text.is_empty() || self.streaming {
             return;
         }
-        let Some((provider_id, config)) = self.active_provider_config() else {
+        let session_idx = self.active_session.min(self.sessions.len().saturating_sub(1));
+        // 厂商/模型按会话取：会话里没选过就回落设置里的全局当前厂商。
+        let Some((provider_id, config)) = self.provider_config_for(session_idx) else {
             self.notice = Some(
                 "还没有可用的模型：打开「设置 → 模型与厂商」填入 API Key 即可开始对话".into(),
             );
@@ -2359,7 +2439,6 @@ impl AppState {
         self.pending = None;
         self.center = CenterView::Chat;
 
-        let session_idx = self.active_session.min(self.sessions.len().saturating_sub(1));
         {
             let session = &mut self.sessions[session_idx];
             session.messages.push(Message {
@@ -2414,7 +2493,8 @@ impl AppState {
             if roles.is_empty() {
                 roles.push(neverwork_core::Role::new("agent", "Assistant", "A"));
             }
-            // 模型与厂商一律以设置里的当前选择为准：role.model 只是展示标签。
+            // 模型与厂商以本会话的选择为准（会话没选过才回落全局默认）；
+            // role.model 只是展示标签，不参与路由。
             match neverwork_core::parse_role_mention(&text, &roles) {
                 // 点名角色：以它为入口，后续由 handoff 自动接力。
                 Some(entry) => {
@@ -3682,10 +3762,9 @@ impl Render for AppState {
         // 现在每帧检查一次，掉焦就补回来；用户无需先点一下输入框。
         {
             let want = match self.input_target {
-                InputTarget::Editor => Some(self.editor_focus.clone()),
+                InputTarget::Editor | InputTarget::Field(_) => Some(self.editor_focus.clone()),
                 InputTarget::Workspace => Some(self.ws_focus.clone()),
                 InputTarget::Chat
-                | InputTarget::Field(_)
                 | InputTarget::SessionSearch
                 | InputTarget::RenameSession => Some(self.focus_handle.clone()),
             };
@@ -3701,6 +3780,14 @@ impl Render for AppState {
 
         let mut root = div()
             .relative()
+            // 表单字段「点外面自动提交」：气泡阶段根节点最后收到鼠标按下，
+            // 此时子元素的点击（切换卡片、开字段…）都已处理完。
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, ev: &gpui::MouseDownEvent, _w, cx| {
+                    this.commit_field_clicked_away(ev.position, cx);
+                }),
+            )
             // 用 size_full() 铺满窗口，而不是写死 `px(visible_w)`。
             // 写死会有两个后果：拖动窗口时内容先停在旧尺寸（观感就是
             // 「界面不跟随」），以及尺寸读到中间值时比窗口小一圈留出黑边。
@@ -3790,11 +3877,13 @@ fn input_bridge(
     // 就不会被注册 —— 键盘和输入法事件直接丢弃，表现就是「打字没反应」。
     // 现在输入目标由点击逻辑决定（`input_target`），焦点始终跟着它走。
     let handle = match target {
-        InputTarget::Editor => editor_focus.clone(),
+        // 表单字段（设置页 / 查找框 / 技能搜索…）全部 track `editor_focus`，
+        // 且中栏是单选渲染——设置页打开时对话输入框不在渲染树里，
+        // 把字段归到 chat handle 会让焦点落在一个无节点的句柄上，
+        // 按键派发回退到 root，打字与粘贴全部无效。
+        InputTarget::Editor | InputTarget::Field(_) => editor_focus.clone(),
         InputTarget::Workspace => ws_focus.clone(),
-        // 表单字段与对话共用同一个输入宿主
         InputTarget::Chat
-        | InputTarget::Field(_)
         | InputTarget::SessionSearch
         | InputTarget::RenameSession => chat_focus.clone(),
     };
@@ -4819,5 +4908,47 @@ mod export_tests {
         assert!(md.starts_with("# 修一个 bug"));
         assert!(md.contains("## 用户"));
         assert!(md.contains("## 助手"));
+    }
+}
+
+#[cfg(test)]
+mod session_inherit_tests {
+    use super::{blank_session, inherit_session_model};
+    use neverwork_core::{Config, ProviderEntry, ProviderPreset, SessionMode};
+
+    fn session_with(pid: &str, model: &str) -> neverwork_core::Session {
+        let mut s = blank_session(0, &Config::default(), SessionMode::Solo);
+        s.provider_id = pid.into();
+        s.model = model.into();
+        s
+    }
+
+    #[test]
+    fn inherits_when_provider_still_enabled() {
+        let providers = vec![ProviderEntry::from_preset(ProviderPreset::DeepSeek)];
+        let src = session_with("deepseek", "deepseek-flash");
+        let (pid, model) = inherit_session_model(Some(&src), &providers);
+        assert_eq!(pid, "deepseek");
+        assert_eq!(model, "deepseek-flash");
+    }
+
+    #[test]
+    fn follows_default_when_source_never_chose() {
+        let providers = vec![ProviderEntry::from_preset(ProviderPreset::DeepSeek)];
+        let src = session_with("", "");
+        assert_eq!(
+            inherit_session_model(Some(&src), &providers),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn falls_back_when_provider_disabled_or_removed() {
+        let mut p = ProviderEntry::from_preset(ProviderPreset::DeepSeek);
+        p.enabled = false;
+        let src = session_with("deepseek", "deepseek-flash");
+        assert!(inherit_session_model(Some(&src), &[p]).0.is_empty());
+        assert!(inherit_session_model(Some(&src), &[]).0.is_empty());
+        assert_eq!(inherit_session_model(None, &[]), (String::new(), String::new()));
     }
 }

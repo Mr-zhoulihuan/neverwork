@@ -35,6 +35,40 @@ impl ThemeMode {
 
 // ============ 模型厂商 ============
 
+/// 厂商分类：添加面板按它分组，列表行用它的标签。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    /// 官方厂商（自带模型与计费）。
+    Vendor,
+    /// 聚合中转（一个 Key 转发多家模型）。
+    Relay,
+    /// 本机服务（不需要 API Key）。
+    Local,
+    /// 用户自己填的地址。
+    Custom,
+}
+
+impl ProviderKind {
+    pub fn all() -> &'static [ProviderKind] {
+        &[
+            ProviderKind::Vendor,
+            ProviderKind::Relay,
+            ProviderKind::Local,
+            ProviderKind::Custom,
+        ]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            ProviderKind::Vendor => "供应商",
+            ProviderKind::Relay => "中转聚合",
+            ProviderKind::Local => "本机服务",
+            ProviderKind::Custom => "自定义",
+        }
+    }
+}
+
 /// 内置厂商预设。新增厂商只需在这里加一项 + 默认 base_url / 模型列表。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,6 +83,12 @@ pub enum ProviderPreset {
     Baichuan,
     Doubao,
     Ollama,
+    XAi,
+    Mistral,
+    Groq,
+    OpenRouter,
+    SiliconFlow,
+    LmStudio,
     Custom,
 }
 
@@ -65,6 +105,12 @@ impl ProviderPreset {
             ProviderPreset::Doubao,
             ProviderPreset::Baichuan,
             ProviderPreset::Ollama,
+            ProviderPreset::XAi,
+            ProviderPreset::Mistral,
+            ProviderPreset::Groq,
+            ProviderPreset::OpenRouter,
+            ProviderPreset::SiliconFlow,
+            ProviderPreset::LmStudio,
             ProviderPreset::Custom,
         ]
     }
@@ -81,6 +127,12 @@ impl ProviderPreset {
             ProviderPreset::Doubao => "doubao",
             ProviderPreset::Baichuan => "baichuan",
             ProviderPreset::Ollama => "ollama",
+            ProviderPreset::XAi => "xai",
+            ProviderPreset::Mistral => "mistral",
+            ProviderPreset::Groq => "groq",
+            ProviderPreset::OpenRouter => "openrouter",
+            ProviderPreset::SiliconFlow => "siliconflow",
+            ProviderPreset::LmStudio => "lmstudio",
             ProviderPreset::Custom => "custom",
         }
     }
@@ -97,6 +149,12 @@ impl ProviderPreset {
             ProviderPreset::Doubao => "豆包 Doubao",
             ProviderPreset::Baichuan => "百川 Baichuan",
             ProviderPreset::Ollama => "Ollama（本地）",
+            ProviderPreset::XAi => "xAI Grok",
+            ProviderPreset::Mistral => "Mistral AI",
+            ProviderPreset::Groq => "Groq（低延迟）",
+            ProviderPreset::OpenRouter => "OpenRouter（中转）",
+            ProviderPreset::SiliconFlow => "硅基流动 SiliconFlow",
+            ProviderPreset::LmStudio => "LM Studio（本地）",
             ProviderPreset::Custom => "自定义",
         }
     }
@@ -114,6 +172,12 @@ impl ProviderPreset {
             ProviderPreset::Doubao => "https://ark.cn-beijing.volces.com/api/v3",
             ProviderPreset::Baichuan => "https://api.baichuan-ai.com/v1",
             ProviderPreset::Ollama => "http://localhost:11434/v1",
+            ProviderPreset::XAi => "https://api.x.ai/v1",
+            ProviderPreset::Mistral => "https://api.mistral.ai/v1",
+            ProviderPreset::Groq => "https://api.groq.com/openai/v1",
+            ProviderPreset::OpenRouter => "https://openrouter.ai/api/v1",
+            ProviderPreset::SiliconFlow => "https://api.siliconflow.cn/v1",
+            ProviderPreset::LmStudio => "http://localhost:1234/v1",
             ProviderPreset::Custom => "",
         }
     }
@@ -129,13 +193,19 @@ impl ProviderPreset {
                 "claude-3-5-sonnet",
             ],
             ProviderPreset::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
-            ProviderPreset::DeepSeek => &["deepseek-chat", "deepseek-reasoner", "deepseek-coder"],
+            ProviderPreset::DeepSeek => &["deepseek-flash", "deepseek-v4-pro"],
             ProviderPreset::Qwen => &["qwen-max", "qwen-plus", "qwen-turbo", "qwen2.5-coder-32b-instruct"],
             ProviderPreset::Glm => &["glm-4-plus", "glm-4", "glm-4-flash", "glm-4v"],
             ProviderPreset::Moonshot => &["moonshot-v1-128k", "moonshot-v1-32k", "kimi-k2-0711-preview"],
             ProviderPreset::Doubao => &["doubao-pro-32k", "doubao-lite-32k", "doubao-seed-1-6"],
             ProviderPreset::Baichuan => &["Baichuan4", "Baichuan3-Turbo"],
             ProviderPreset::Ollama => &["llama3.2", "qwen2.5-coder", "deepseek-r1", "mistral"],
+            ProviderPreset::XAi => &["grok-4", "grok-3", "grok-3-mini"],
+            ProviderPreset::Mistral => &["mistral-large-latest", "mistral-small-latest", "codestral-latest"],
+            ProviderPreset::Groq => &["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-2.5-32b"],
+            ProviderPreset::OpenRouter => &["openai/gpt-4o", "anthropic/claude-sonnet-4.5", "google/gemini-2.5-pro"],
+            ProviderPreset::SiliconFlow => &["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"],
+            ProviderPreset::LmStudio => &["local-model"],
             ProviderPreset::Custom => &[],
         }
     }
@@ -149,9 +219,19 @@ impl ProviderPreset {
         }
     }
 
+    /// 厂商分类（添加面板分组用）。
+    pub fn kind(&self) -> ProviderKind {
+        match self {
+            ProviderPreset::OpenRouter | ProviderPreset::SiliconFlow => ProviderKind::Relay,
+            ProviderPreset::Ollama | ProviderPreset::LmStudio => ProviderKind::Local,
+            ProviderPreset::Custom => ProviderKind::Custom,
+            _ => ProviderKind::Vendor,
+        }
+    }
+
     /// 是否本地服务（不需要 API Key）。
     pub fn is_local(&self) -> bool {
-        matches!(self, ProviderPreset::Ollama)
+        self.kind() == ProviderKind::Local
     }
 
     /// 申请 Key 的地址（空表示本地服务）。
@@ -167,6 +247,12 @@ impl ProviderPreset {
             ProviderPreset::Doubao => "https://console.volcengine.com/ark",
             ProviderPreset::Baichuan => "https://platform.baichuan-ai.com/console/apikey",
             ProviderPreset::Ollama => "",
+            ProviderPreset::XAi => "https://console.x.ai/",
+            ProviderPreset::Mistral => "https://console.mistral.ai/api-keys",
+            ProviderPreset::Groq => "https://console.groq.com/keys",
+            ProviderPreset::OpenRouter => "https://openrouter.ai/keys",
+            ProviderPreset::SiliconFlow => "https://cloud.siliconflow.cn/account/ak",
+            ProviderPreset::LmStudio => "",
             ProviderPreset::Custom => "",
         }
     }
@@ -258,6 +344,95 @@ impl McpServerConfig {
     }
 }
 
+/// 一个模型条目。
+///
+/// 旧版本 `models` 是纯字符串数组（`["gpt-4o"]`），本类型手写反序列化：
+/// 字符串与 `{id,name,enabled}` 对象都能读，升级不丢用户已有配置。
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelEntry {
+    /// 模型 id（发给厂商的字符串）。
+    pub id: String,
+    /// 展示名；为空时用 id。
+    #[serde(default)]
+    pub name: String,
+    /// 是否出现在模型选择器里（详情页逐条启停）。
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+impl ModelEntry {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: String::new(),
+            enabled: true,
+        }
+    }
+
+    /// 展示名：自定义名优先，空则 id。
+    pub fn label(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.id
+        } else {
+            &self.name
+        }
+    }
+}
+
+/// 反序列化兼容：`["a","b"]`（旧格式）与 `[{"id":"a",…}]`（新格式）都能读。
+impl<'de> serde::Deserialize<'de> for ModelEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ModelVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ModelVisitor {
+            type Value = ModelEntry;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("模型字符串或 {id, name, enabled} 对象")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<ModelEntry, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ModelEntry::new(v))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<ModelEntry, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ModelEntry::new(v))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<ModelEntry, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                #[derive(Deserialize)]
+                struct Raw {
+                    id: String,
+                    #[serde(default)]
+                    name: String,
+                    #[serde(default = "yes")]
+                    enabled: bool,
+                }
+                let raw = Raw::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(ModelEntry {
+                    id: raw.id,
+                    name: raw.name,
+                    enabled: raw.enabled,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(ModelVisitor)
+    }
+}
+
 /// 一条厂商配置。
 ///
 /// 注意：`api_key` 是唯一会明文落盘的敏感字段，因此**不 derive Debug**，
@@ -274,10 +449,10 @@ pub struct ProviderEntry {
     /// API Key。仅保存在本地 `~/.neverwork/settings.json`。
     #[serde(default)]
     pub api_key: String,
-    /// 该厂商可用模型。
+    /// 该厂商可用模型（逐条可启停）。旧配置里是字符串数组，见 `ModelEntry`。
     #[serde(default)]
-    pub models: Vec<String>,
-    /// 当前选中模型。
+    pub models: Vec<ModelEntry>,
+    /// 当前选中模型（厂商默认）。空则取第一个启用的。
     #[serde(default)]
     pub model: String,
     /// 是否启用（启用后才会出现在模型选择里）。
@@ -298,8 +473,8 @@ fn default_temperature() -> f32 {
 
 impl ProviderEntry {
     pub fn from_preset(preset: ProviderPreset) -> Self {
-        let models: Vec<String> = preset.models().iter().map(|s| s.to_string()).collect();
-        let model = models.first().cloned().unwrap_or_default();
+        let models: Vec<ModelEntry> = preset.models().iter().map(|s| ModelEntry::new(*s)).collect();
+        let model = models.first().map(|m| m.id.clone()).unwrap_or_default();
         Self {
             id: preset.id().to_string(),
             preset,
@@ -317,12 +492,123 @@ impl ProviderEntry {
         self.preset.protocol()
     }
 
+    /// 实际生效的模型：选中模型非空就用它，否则取第一个启用的。
+    pub fn effective_model(&self) -> String {
+        if !self.model.trim().is_empty() {
+            return self.model.clone();
+        }
+        self.models
+            .iter()
+            .find(|m| m.enabled && !m.id.trim().is_empty())
+            .map(|m| m.id.clone())
+            .unwrap_or_default()
+    }
+
     /// 是否可用：本地服务只要有地址，其余需要 Key + 模型。
     pub fn ready(&self) -> bool {
-        if self.preset.is_local() {
-            return !self.base_url.trim().is_empty() && !self.model.trim().is_empty();
+        if self.effective_model().trim().is_empty() {
+            return false;
         }
-        !self.api_key.trim().is_empty() && !self.model.trim().is_empty()
+        if self.preset.is_local() {
+            return !self.base_url.trim().is_empty();
+        }
+        !self.api_key.trim().is_empty()
+    }
+
+    /// 全部模型 id。
+    pub fn model_ids(&self) -> Vec<String> {
+        self.models.iter().map(|m| m.id.clone()).collect()
+    }
+
+    /// 启用中的模型 id（模型选择器只列这些）。
+    pub fn enabled_model_ids(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|m| m.enabled && !m.id.trim().is_empty())
+            .map(|m| m.id.clone())
+            .collect()
+    }
+
+    /// 当前是否有某个模型。
+    pub fn has_model(&self, id: &str) -> bool {
+        self.models.iter().any(|m| m.id == id)
+    }
+
+    /// 添加一个模型（去重、空忽略）。返回是否真的加了新条目。
+    pub fn add_model(&mut self, id: &str) -> bool {
+        let id = id.trim();
+        if id.is_empty() || self.has_model(id) {
+            return false;
+        }
+        self.models.push(ModelEntry::new(id));
+        true
+    }
+
+    /// 逐条启停。
+    pub fn toggle_model(&mut self, id: &str) {
+        if let Some(m) = self.models.iter_mut().find(|m| m.id == id) {
+            m.enabled = !m.enabled;
+        }
+    }
+
+    /// 移除模型；被删的正好是当前选中时，回落到第一个启用的。
+    pub fn remove_model(&mut self, id: &str) {
+        self.models.retain(|m| m.id != id);
+        if self.model == id {
+            self.model = self
+                .models
+                .iter()
+                .find(|m| m.enabled)
+                .map(|m| m.id.clone())
+                .unwrap_or_default();
+        }
+    }
+
+    /// 把当前模型切到 id；列表里没有时自动添加并启用。
+    pub fn select_model(&mut self, id: &str) {
+        let id = id.trim();
+        if id.is_empty() {
+            return;
+        }
+        if let Some(m) = self.models.iter_mut().find(|m| m.id == id) {
+            m.enabled = true;
+        } else {
+            self.models.push(ModelEntry::new(id));
+        }
+        self.model = id.to_string();
+    }
+
+    /// 合并拉取到的模型列表：已有条目保留启停与自定义名，新的默认启用。
+    /// 返回新增数量（0 表示列表没有变化）。
+    pub fn merge_models(&mut self, ids: impl IntoIterator<Item = String>) -> usize {
+        let mut added = 0usize;
+        for id in ids {
+            if id.trim().is_empty() {
+                continue;
+            }
+            if self.add_model(&id) {
+                added += 1;
+            }
+        }
+        if self.model.trim().is_empty() {
+            self.model = self
+                .models
+                .iter()
+                .find(|m| m.enabled)
+                .map(|m| m.id.clone())
+                .unwrap_or_default();
+        }
+        added
+    }
+
+    /// 展示用的主机名：`https://api.openai.com/v1` → `api.openai.com`。
+    pub fn host(&self) -> String {
+        let s = self.base_url.trim();
+        let s = s
+            .strip_prefix("https://")
+            .or_else(|| s.strip_prefix("http://"))
+            .unwrap_or(s);
+        s.split('/').next().unwrap_or("").to_string()
     }
 
     /// Key 打码显示：**只留末尾 4 位**，其余一律遮掉。
@@ -364,6 +650,7 @@ impl std::fmt::Debug for ProviderEntry {
             .field("base_url", &self.base_url)
             .field("api_key", &self.masked_key())
             .field("model", &self.model)
+            .field("models_len", &self.models.len())
             .field("enabled", &self.enabled)
             .finish()
     }
@@ -681,11 +968,27 @@ fn default_tab_width() -> u8 {
     4
 }
 
+/// 首次安装预置的厂商。
+///
+/// 其余预设（xAI / Mistral / Groq / OpenRouter / SiliconFlow / LM Studio）
+/// 只在「添加厂商」面板里出现：一上手就扑满 16 行未配置卡片没有意义。
+const DEFAULT_PRESETS: &[ProviderPreset] = &[
+    ProviderPreset::OpenAi,
+    ProviderPreset::Anthropic,
+    ProviderPreset::Gemini,
+    ProviderPreset::DeepSeek,
+    ProviderPreset::Qwen,
+    ProviderPreset::Glm,
+    ProviderPreset::Moonshot,
+    ProviderPreset::Doubao,
+    ProviderPreset::Baichuan,
+    ProviderPreset::Ollama,
+];
+
 fn default_providers() -> Vec<ProviderEntry> {
     // 预置主流厂商，都是未填 Key 的状态；用户填一个即可用。
-    ProviderPreset::all()
+    DEFAULT_PRESETS
         .iter()
-        .filter(|p| **p != ProviderPreset::Custom)
         .map(|p| ProviderEntry::from_preset(*p))
         .collect()
 }
@@ -889,10 +1192,73 @@ mod tests {
         assert!(p.preset.is_local());
         assert!(p.ready(), "本地服务有地址和默认模型即可用，不需要 Key");
         p.model = String::new();
+        p.models.clear();
         assert!(!p.ready(), "没有模型时不算就绪");
         p.model = "llama3.2".into();
         p.base_url = String::new();
         assert!(!p.ready(), "没有地址时不算就绪");
+    }
+
+    #[test]
+    fn old_provider_models_as_strings_still_load() {
+        // 旧版本 settings.json：models 是纯字符串数组，必须兼容。
+        let json = r#"{"id":"openai","preset":"open_ai","name":"OpenAI","base_url":"https://api.openai.com/v1","api_key":"sk-x","models":["gpt-4o","o3"],"model":"gpt-4o"}"#;
+        let p: ProviderEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(p.models.len(), 2);
+        assert_eq!(p.models[1].id, "o3");
+        assert!(p.models.iter().all(|m| m.enabled), "旧配置的模型应默认启用");
+        assert!(p.ready());
+    }
+
+    #[test]
+    fn provider_models_roundtrip_keeps_enabled_flag() {
+        let mut p = ProviderEntry::from_preset(ProviderPreset::OpenAi);
+        p.toggle_model("o3");
+        let text = serde_json::to_string(&p).unwrap();
+        let back: ProviderEntry = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.models.len(), p.models.len());
+        assert!(!back.models.iter().find(|m| m.id == "o3").unwrap().enabled);
+    }
+
+    #[test]
+    fn merge_models_keeps_existing_state_and_appends_new() {
+        let mut p = ProviderEntry::from_preset(ProviderPreset::DeepSeek);
+        p.toggle_model("deepseek-v4-pro");
+        let added = p.merge_models(vec![
+            "deepseek-flash".into(),
+            "deepseek-reasoner".into(),
+        ]);
+        assert_eq!(added, 1, "已存在的模型不能重复添加");
+        assert!(p.has_model("deepseek-reasoner"));
+        assert!(!p.models.iter().find(|m| m.id == "deepseek-v4-pro").unwrap().enabled);
+    }
+
+    #[test]
+    fn add_model_dedupes_and_remove_falls_back() {
+        let mut p = ProviderEntry::from_preset(ProviderPreset::OpenAi);
+        assert!(p.add_model("my-model"));
+        assert!(!p.add_model("my-model"), "重复添加应被忽略");
+        p.model = "my-model".into();
+        p.remove_model("my-model");
+        assert!(!p.has_model("my-model"));
+        assert_eq!(p.model, "gpt-4o", "删掉当前模型后应回落到第一个启用的");
+    }
+
+    #[test]
+    fn host_strips_scheme_and_path() {
+        let mut p = ProviderEntry::from_preset(ProviderPreset::OpenAi);
+        assert_eq!(p.host(), "api.openai.com");
+        p.base_url = "http://localhost:11434/v1".into();
+        assert_eq!(p.host(), "localhost:11434");
+    }
+
+    #[test]
+    fn provider_kind_groups() {
+        assert_eq!(ProviderPreset::OpenAi.kind(), ProviderKind::Vendor);
+        assert_eq!(ProviderPreset::OpenRouter.kind(), ProviderKind::Relay);
+        assert_eq!(ProviderPreset::LmStudio.kind(), ProviderKind::Local);
+        assert_eq!(ProviderPreset::Custom.kind(), ProviderKind::Custom);
+        assert!(ProviderPreset::LmStudio.is_local());
     }
 
     #[test]

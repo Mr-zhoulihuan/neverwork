@@ -5,6 +5,7 @@
 
 mod agent_loop;
 pub mod mcp;
+pub mod models;
 pub mod multi_patch;
 pub mod rag;
 mod anthropic;
@@ -20,6 +21,7 @@ pub mod trace;
 mod tests;
 
 pub use agent_loop::{run_agent, run_agent_in_team, AgentEvent, RunLimits, MAX_HANDOFF_STEPS};
+pub use models::list_models;
 pub use openai::OpenAiProvider;
 pub use anthropic::AnthropicProvider;
 pub use gemini::GeminiProvider;

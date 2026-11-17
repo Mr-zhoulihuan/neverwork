@@ -25,6 +25,8 @@ fn sp(id: &str, updated_at: u64, tag: SessionTag, pinned: bool) -> Session {
         tag,
         updated_at,
         pinned,
+        provider_id: String::new(),
+        model: String::new(),
         stage: neverwork_core::TaskStage::Idle,
         resume_prompt: String::new(),
     }

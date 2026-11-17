@@ -653,6 +653,14 @@ pub struct Session {
     #[serde(default)]
     pub pinned: bool,
 
+    // ===== 会话级模型（旧会话为空 → 跟随设置里的当前厂商） =====
+    /// 本会话使用的厂商 id；空表示跟随全局「当前厂商」。
+    #[serde(default)]
+    pub provider_id: String,
+    /// 本会话使用的模型 id；空表示用该厂商的默认模型。
+    #[serde(default)]
+    pub model: String,
+
     // ===== 断点续跑（旧配置反序列化时为空/默认） =====
     /// 机器可读的任务阶段。崩溃恢复的依据。
     #[serde(default)]
@@ -1026,6 +1034,8 @@ mod session_list_tests {
             tag: SessionTag::None,
             updated_at: 0,
             pinned: false,
+            provider_id: String::new(),
+            model: String::new(),
             stage: TaskStage::Idle,
             resume_prompt: String::new(),
         }

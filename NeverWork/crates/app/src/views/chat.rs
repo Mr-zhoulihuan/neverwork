@@ -2,6 +2,7 @@ use super::*;
 use gpui::{ClickEvent, CursorStyle, KeyDownEvent};
 use neverwork_core::MessageKind;
 use crate::state::InputTarget;
+use crate::views::text_fit::fit_text;
 
 /// 对话正文基准字号。折行估宽与渲染必须用同一个值：
 /// 估窄了行会顶出气泡右侧被父容器裁掉半截。
@@ -52,6 +53,8 @@ impl AppState {
 
     pub(crate) fn chat_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let session = self.session();
+        // 本会话实际用的厂商/模型（会话没选过就回落全局当前厂商）。
+        let (model_provider, model_id) = self.session_model_labels(self.active_session);
         let mut col = div().flex().flex_col().flex_1().h_full().overflow_hidden().bg(theme::surface());
 
         col = col.child(
@@ -75,6 +78,7 @@ impl AppState {
                         .when(self.is_team_mode(), |d| d.child(role_dots_row(&self.config))),
                 )
                 .child(div().flex_1())
+                .child(self.model_chip(&model_provider, &model_id, cx))
                 .child(
                     // 模式在新建会话时选定，这里只展示、不提供切换。
                     // 要另一种模式就点侧栏「＋」新建一个会话。
@@ -103,6 +107,11 @@ impl AppState {
                         }),
                 ),
         );
+
+        // 选择器就地嵌在标题行下面（不做浮层：窄窗口 / 高 DPI 下不易算歪）。
+        if self.model_picker {
+            col = col.child(self.chat_model_picker(cx));
+        }
 
         // 顶部状态条：团队会话显示流水线（按当前团队的角色动态生成），
         // 单助手会话默认整条不出现。
@@ -248,13 +257,70 @@ impl AppState {
         col
     }
 
+    /// 头部模型 chip：显示本会话的「厂商 · 模型」，点开按厂商分组的模型选择器。
+    fn model_chip(
+        &self,
+        provider: &str,
+        model: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let label = match (provider.is_empty(), model.is_empty()) {
+            (true, _) => "未配置模型".to_string(),
+            (false, true) => provider.to_string(),
+            (false, false) => format!("{provider} · {model}"),
+        };
+        let open = self.model_picker;
+        div()
+            .id("chat-model-chip")
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1p5()
+            .rounded_md()
+            .border_1()
+            .border_color(if open {
+                theme::accent_line()
+            } else {
+                theme::border()
+            })
+            .bg(if open { theme::accent_soft() } else { theme::panel() })
+            .text_xs()
+            .text_color(if open { theme::fg() } else { theme::muted() })
+            .cursor_pointer()
+            .hover(|d| d.bg(theme::raised()))
+            .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                if this.model_picker {
+                    this.close_chat_model_picker(cx);
+                } else {
+                    this.open_chat_model_picker(cx);
+                    window.focus(&this.editor_focus);
+                    cx.notify();
+                }
+            }))
+            .child(
+                div()
+                    .size(px(6.0))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(if provider.is_empty() {
+                        theme::red()
+                    } else {
+                        theme::green()
+                    }),
+            )
+            .child(SharedString::from(fit_text(&label, 240.0, 12.0)))
+            .child(div().text_color(theme::dim()).child("▾"))
+    }
+
     /// 当前模型是否支持工具调用（团队自动交接的前提）。
     fn tools_supported(&self) -> bool {
         if let Ok(p) = std::env::var("NW_PROVIDER") {
             return p.is_empty() || p.eq_ignore_ascii_case("openai");
         }
         matches!(
-            self.settings.active_provider().map(|p| p.protocol()),
+            self.provider_for_session(self.active_session)
+                .map(|p| p.protocol()),
             Some(neverwork_core::Protocol::OpenAiCompatible)
         )
     }
@@ -1567,30 +1633,9 @@ fn code_fence_block(lang: &str, lines: &[String]) -> impl IntoElement {
 }
 
 impl AppState {
-    /// 当前模型 / 厂商的展示名（回答页脚用）。
+    /// 当前会话的厂商 / 模型展示名（头部 chip 与回答页脚共用）。
     pub(crate) fn model_labels(&self) -> (String, String) {
-        let provider = self
-            .active_provider_config()
-            .map(|(id, _)| {
-                self.settings
-                    .providers
-                    .iter()
-                    .find(|p| p.id == id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or(id)
-            })
-            .unwrap_or_default();
-        let model = self
-            .active_provider_config()
-            .map(|(id, _)| {
-                self.settings
-                    .providers
-                    .iter()
-                    .find(|p| p.id == id)
-                    .map(|p| p.model.clone())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+        let (provider, model) = self.session_model_labels(self.active_session);
         (model, provider)
     }
 }

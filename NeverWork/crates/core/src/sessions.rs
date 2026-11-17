@@ -217,6 +217,8 @@ mod tests {
             tag: crate::model::SessionTag::None,
             updated_at: 0,
             pinned: false,
+            provider_id: String::new(),
+            model: String::new(),
             stage,
             resume_prompt: String::new(),
         }

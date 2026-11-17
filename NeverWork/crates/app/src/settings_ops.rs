@@ -11,7 +11,7 @@ use neverwork_core::{
 };
 
 use crate::marketplace::{MarketEntry, MarketSource};
-use crate::state::{AppState, CenterView, FormField, InputTarget, SettingsTab};
+use crate::state::{AppState, CenterView, FormField, InputTarget, ProviderView, SettingsTab};
 
 impl AppState {
     // ===== 打开 / 关闭 =====
@@ -127,6 +127,90 @@ impl AppState {
         cx.notify();
     }
 
+    /// 点击落到正在编辑的输入框外面时自动提交。
+    ///
+    /// 之前字段只在回车时提交：粘贴 Key 后直接点别处，编辑内容被静默丢弃，
+    /// 输入框却还显示着已粘贴的文本——「看起来配好了，其实没保存」。
+    /// 点击在输入框内部（挪光标、选文本）时不提交。
+    pub(crate) fn commit_field_clicked_away(
+        &mut self,
+        pos: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_field.is_none() {
+            return;
+        }
+        if let Some(b) = self.field_area_bounds.get() {
+            if b.contains(&pos) {
+                return;
+            }
+        }
+        self.commit_field(cx);
+    }
+
+    /// 测试当前厂商连通性：用已保存的配置发一条最小对话请求。
+    ///
+    /// 网络请求在后台线程跑（`stream_chat` 是阻塞的），结果经 flume 送回 UI。
+    pub(crate) fn test_provider(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.provider_test_busy {
+            return;
+        }
+        let Some(p) = self.settings.providers.get(idx) else {
+            return;
+        };
+        if !p.ready() {
+            self.action_msg = Some("先填好 API Key 再测试".into());
+            cx.notify();
+            return;
+        }
+        let protocol = protocol_name(p.protocol());
+        let model = p.effective_model();
+        let config = neverwork_agent::ProviderConfig {
+            api_key: p.api_key.clone(),
+            base_url: p.base_url.clone(),
+            model: model.clone(),
+            temperature: p.temperature,
+        };
+        self.action_msg = Some(format!("测试中：{} …", model));
+        self.provider_test_busy = true;
+        cx.notify();
+
+        let (tx, rx) = flume::unbounded::<Result<String, String>>();
+        std::thread::spawn(move || {
+            let provider = neverwork_agent::build_provider(&protocol, config);
+            let mut first_err: Option<String> = None;
+            let res = provider.stream_chat(
+                &[neverwork_agent::ChatMessage::user("ping")],
+                &mut |ev| {
+                    if let neverwork_agent::StreamEvent::Error(e) = ev {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                },
+            );
+            let outcome = match (first_err, res) {
+                (Some(e), _) => Err(e),
+                (None, Ok(())) => Ok(model),
+                (None, Err(e)) => Err(e.to_string()),
+            };
+            let _ = tx.send(outcome);
+        });
+        cx.spawn(async move |weak, async_cx| {
+            if let Ok(r) = rx.recv_async().await {
+                let _ = weak.update(async_cx, |this, cx| {
+                    this.provider_test_busy = false;
+                    this.action_msg = Some(match r {
+                        Ok(m) => format!("✓ 测试成功：模型 {} 已连通", m),
+                        Err(e) => format!("✗ 测试失败：{}", e),
+                    });
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     /// 读字段当前值（用于装填缓冲区）。
     pub(crate) fn field_value(&self, field: FormField) -> String {
         match field {
@@ -134,8 +218,10 @@ impl AppState {
             FormField::RoleSkillSearch => self.role_skill_search.clone(),
             FormField::ProviderKey(i) => self.provider_at(i).map(|p| p.api_key.clone()).unwrap_or_default(),
             FormField::ProviderUrl(i) => self.provider_at(i).map(|p| p.base_url.clone()).unwrap_or_default(),
-            FormField::ProviderModel(i) => self.provider_at(i).map(|p| p.model.clone()).unwrap_or_default(),
             FormField::ProviderName(i) => self.provider_at(i).map(|p| p.name.clone()).unwrap_or_default(),
+            FormField::ProviderNewModel(_) => String::new(),
+            FormField::ProviderModelFilter => self.provider_model_filter.clone(),
+            FormField::ProviderSearch => self.provider_query.clone(),
             FormField::ImportPath => self.import_path.clone(),
             FormField::ModelSearch => self.model_query.clone(),
             FormField::FindQuery => self.find.query.clone(),
@@ -170,6 +256,16 @@ impl AppState {
                 cx.notify();
                 return;
             }
+            FormField::ProviderSearch => {
+                self.provider_query = value;
+                cx.notify();
+                return;
+            }
+            FormField::ProviderModelFilter => {
+                self.provider_model_filter = value;
+                cx.notify();
+                return;
+            }
             FormField::FindQuery => {
                 self.set_find_query(value, cx);
                 return;
@@ -181,6 +277,11 @@ impl AppState {
             }
             _ => {}
         }
+        // 「手动添加模型」不是写回已有值，而是追加一条。
+        if let FormField::ProviderNewModel(i) = field {
+            self.add_provider_model(i as usize, &value, cx);
+            return;
+        }
         let Some(idx) = field.index().map(|i| i as usize) else {
             return;
         };
@@ -190,14 +291,6 @@ impl AppState {
         match field {
             FormField::ProviderKey(_) => p.api_key = value.trim().to_string(),
             FormField::ProviderUrl(_) => p.base_url = value.trim().to_string(),
-            FormField::ProviderModel(_) => {
-                let v = value.trim().to_string();
-                p.model = v.clone();
-                // 用户手输的模型也进候选列表，方便下次直接选。
-                if !v.is_empty() && !p.models.iter().any(|m| m == &v) {
-                    p.models.insert(0, v);
-                }
-            }
             FormField::ProviderName(_) => p.name = value.trim().to_string(),
             _ => {}
         }
@@ -222,37 +315,116 @@ impl AppState {
         self.update_settings(|_| {}, cx);
     }
 
-
-    /// 加一个自定义厂商。
-    pub(crate) fn add_custom_provider(&mut self, cx: &mut Context<Self>) {
-        let id = self.settings.next_custom_id();
-        let mut p = ProviderEntry::from_preset(ProviderPreset::Custom);
-        p.id = id.clone();
-        p.name = format!("自定义厂商 {}", id.trim_start_matches("custom-"));
-        p.enabled = true;
-        p.models = vec!["gpt-4o".into()];
-        p.model = "gpt-4o".into();
-        self.settings.providers.push(p);
-        self.update_settings(|_| {}, cx);
-        self.action_msg = Some("已添加自定义厂商，填入地址与 Key 即可用".into());
-        cx.notify();
-    }
-
-    pub(crate) fn remove_provider(&mut self, idx: usize, cx: &mut Context<Self>) {
+    /// 打开厂商详情。
+    pub(crate) fn open_provider_detail(&mut self, idx: usize, cx: &mut Context<Self>) {
         if idx >= self.settings.providers.len() {
             return;
         }
-        // 内置厂商不允许删除，只允许关掉；自定义可以删。
-        if self.settings.providers[idx].preset != ProviderPreset::Custom {
-            self.action_msg = Some("内置厂商不能删除，可以用「启用」开关关掉".into());
+        self.provider_view = ProviderView::Detail(idx);
+        self.provider_model_filter.clear();
+        self.provider_remove_confirm = None;
+        self.active_field = None;
+        cx.notify();
+    }
+
+    /// 从详情 / 添加面板回到厂商列表。
+    pub(crate) fn close_provider_detail(&mut self, cx: &mut Context<Self>) {
+        self.provider_view = ProviderView::List;
+        self.provider_model_filter.clear();
+        self.provider_remove_confirm = None;
+        self.active_field = None;
+        cx.notify();
+    }
+
+    /// 打开「添加厂商」面板。
+    pub(crate) fn open_provider_add(&mut self, cx: &mut Context<Self>) {
+        self.provider_view = ProviderView::Add;
+        self.provider_query.clear();
+        self.provider_remove_confirm = None;
+        self.active_field = None;
+        cx.notify();
+    }
+
+    /// 从预设添加一个厂商；已在列表里则直接跳到它的详情。
+    pub(crate) fn add_provider_from_preset(
+        &mut self,
+        preset: ProviderPreset,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(idx) = self
+            .settings
+            .providers
+            .iter()
+            .position(|p| p.preset == preset)
+        {
+            self.open_provider_detail(idx, cx);
+            self.action_msg = Some("这个厂商已经在列表里了".into());
             cx.notify();
             return;
         }
-        self.settings.providers.remove(idx);
-        if self.settings.active_provider_id.is_empty() && !self.settings.providers.is_empty() {
-            self.settings.active_provider_id = self.settings.providers[0].id.clone();
+        let mut p = ProviderEntry::from_preset(preset);
+        if preset == ProviderPreset::Custom {
+            let id = self.settings.next_custom_id();
+            p.id = id.clone();
+            p.name = format!("自定义厂商 {}", id.trim_start_matches("custom-"));
+            p.enabled = true;
+            p.models = vec![neverwork_core::ModelEntry::new("gpt-4o")];
+            p.model = "gpt-4o".into();
         }
+        let name = p.name.clone();
+        self.settings.providers.push(p);
         self.update_settings(|_| {}, cx);
+        let idx = self.settings.providers.len() - 1;
+        self.provider_view = ProviderView::Detail(idx);
+        self.action_msg = Some(if preset.is_local() {
+            format!("已添加「{name}」，确认地址后点「拉取模型」或手动添加")
+        } else {
+            format!("已添加「{name}」，填入 Key 即可用")
+        });
+        cx.notify();
+    }
+
+    /// 移除厂商（两步：第一次点进入确认态，第二次才真删）。
+    ///
+    /// 已填的 Key 会随配置一起删掉，误点一下就得重新去官网申请，
+    /// 所以和删会话一样要求再点一次。
+    pub(crate) fn click_remove_provider(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx >= self.settings.providers.len() {
+            return;
+        }
+        if self.provider_remove_confirm != Some(idx) {
+            self.provider_remove_confirm = Some(idx);
+            self.action_msg = Some(format!(
+                "再点一次「确认移除」：{}的 API Key 会一起删掉",
+                self.settings.providers[idx].name
+            ));
+            cx.notify();
+            return;
+        }
+        self.provider_remove_confirm = None;
+        let p = self.settings.providers.remove(idx);
+        let removed_id = p.id.clone();
+        // 会话里还指着这个厂商的，清掉回到「跟随全局」。
+        for s in &mut self.sessions {
+            if s.provider_id == removed_id {
+                s.provider_id.clear();
+                s.model.clear();
+            }
+        }
+        if self.settings.active_provider_id == removed_id {
+            self.settings.active_provider_id = self
+                .settings
+                .providers
+                .iter()
+                .find(|p| p.ready())
+                .map(|p| p.id.clone())
+                .unwrap_or_default();
+        }
+        self.provider_view = ProviderView::List;
+        self.update_settings(|_| {}, cx);
+        self.action_msg = Some(format!("已移除「{}」，可在添加面板重新加入", p.name));
+        self.save_sessions();
+        cx.notify();
     }
 
     pub(crate) fn set_provider_temperature(&mut self, idx: usize, t: f32, cx: &mut Context<Self>) {
@@ -262,32 +434,187 @@ impl AppState {
         self.update_settings(|_| {}, cx);
     }
 
-    /// 给 agent 用的当前厂商配置。
-    pub(crate) fn active_provider_config(
+    /// 详情页：逐条启停模型。
+    pub(crate) fn toggle_provider_model(
+        &mut self,
+        idx: usize,
+        model: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.settings.providers.get_mut(idx) {
+            p.toggle_model(model);
+        }
+        self.update_settings(|_| {}, cx);
+    }
+
+    /// 详情页：把某个模型设为该厂商的默认模型。
+    pub(crate) fn set_provider_default_model(
+        &mut self,
+        idx: usize,
+        model: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.settings.providers.get_mut(idx) {
+            p.select_model(model);
+        }
+        self.update_settings(|_| {}, cx);
+    }
+
+    /// 详情页：移除模型。
+    pub(crate) fn remove_provider_model(
+        &mut self,
+        idx: usize,
+        model: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.settings.providers.get_mut(idx) {
+            p.remove_model(model);
+        }
+        self.update_settings(|_| {}, cx);
+    }
+
+    /// 详情页：手动添加模型；新加的模型直接设为默认。
+    pub(crate) fn add_provider_model(
+        &mut self,
+        idx: usize,
+        model: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let id = model.trim().to_string();
+        if id.is_empty() {
+            return;
+        }
+        if let Some(p) = self.settings.providers.get_mut(idx) {
+            if p.add_model(&id) {
+                p.model = id.clone();
+            }
+        }
+        self.update_settings(|_| {}, cx);
+        if self.active_field == Some(FormField::ProviderNewModel(idx as u8)) {
+            self.active_field = None;
+        }
+    }
+
+    /// 详情页：按协议拉取厂商模型列表（后台线程，失败保留现有列表）。
+    pub(crate) fn fetch_provider_models(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.provider_models_busy {
+            return;
+        }
+        let Some(p) = self.settings.providers.get(idx) else {
+            return;
+        };
+        if p.base_url.trim().is_empty() {
+            self.action_msg = Some("先填写 API 基址".into());
+            cx.notify();
+            return;
+        }
+        if p.protocol() != neverwork_core::Protocol::Gemini && p.api_key.trim().is_empty() {
+            self.action_msg = Some("先填写 API Key".into());
+            cx.notify();
+            return;
+        }
+        let protocol = protocol_name(p.protocol());
+        let config = neverwork_agent::ProviderConfig {
+            api_key: p.api_key.clone(),
+            base_url: p.base_url.clone(),
+            model: p.effective_model(),
+            temperature: p.temperature,
+        };
+        let name = p.name.clone();
+        self.provider_models_busy = true;
+        self.action_msg = Some(format!("正在从 {name} 拉取模型列表…"));
+        cx.notify();
+
+        let (tx, rx) = flume::unbounded::<Result<Vec<String>, String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(neverwork_agent::list_models(protocol, &config));
+        });
+        cx.spawn(async move |weak, async_cx| {
+            let Ok(result) = rx.recv_async().await else {
+                return;
+            };
+            let _ = weak.update(async_cx, move |this, cx| {
+                this.provider_models_busy = false;
+                match result {
+                    Ok(ids) => {
+                        let total = ids.len();
+                        let added = this
+                            .settings
+                            .providers
+                            .get_mut(idx)
+                            .map(|p| p.merge_models(ids))
+                            .unwrap_or(0);
+                        this.action_msg = Some(format!(
+                            "已拉取 {total} 个模型，新增 {added} 个（已有条目保留启停设置）"
+                        ));
+                        this.update_settings(|_| {}, cx);
+                    }
+                    Err(e) => {
+                        this.action_msg = Some(format!("拉取失败：{e}"));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 指定会话实际使用的厂商：会话指定且存在就用它，否则回落全局当前厂商。
+    pub(crate) fn provider_for_session(&self, session_idx: usize) -> Option<&ProviderEntry> {
+        if let Some(s) = self.sessions.get(session_idx) {
+            let id = s.provider_id.trim();
+            if !id.is_empty() {
+                if let Some(p) = self.settings.providers.iter().find(|p| p.id == id) {
+                    return Some(p);
+                }
+            }
+        }
+        self.settings.active_provider()
+    }
+
+    /// 给 agent 用的指定会话厂商配置。
+    pub(crate) fn provider_config_for(
         &self,
+        session_idx: usize,
     ) -> Option<(String, neverwork_agent::ProviderConfig)> {
         // 环境变量优先，保持与原有 `NW_*` 行为兼容。
         if let Some((id, cfg)) = neverwork_agent::config_from_env() {
             return Some((id, cfg));
         }
-        let p = self.settings.active_provider()?;
+        let p = self.provider_for_session(session_idx)?;
         if !p.ready() {
             return None;
         }
-        let protocol = match p.protocol() {
-            neverwork_core::Protocol::Anthropic => "anthropic",
-            neverwork_core::Protocol::Gemini => "gemini",
-            neverwork_core::Protocol::OpenAiCompatible => "openai",
-        };
+        let model = self
+            .sessions
+            .get(session_idx)
+            .map(|s| s.model.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| p.effective_model());
         Some((
-            protocol.to_string(),
+            protocol_name(p.protocol()).to_string(),
             neverwork_agent::ProviderConfig {
                 api_key: p.api_key.clone(),
                 base_url: p.base_url.clone(),
-                model: p.model.clone(),
+                model,
                 temperature: p.temperature,
             },
         ))
+    }
+
+    /// 指定会话的（厂商展示名, 模型 id）：头部 chip 与回答页脚共用。
+    /// 会话没选过厂商就回落全局当前厂商，模型空则用它当前的默认模型。
+    pub(crate) fn session_model_labels(&self, session_idx: usize) -> (String, String) {
+        let Some(p) = self.provider_for_session(session_idx) else {
+            return (String::new(), String::new());
+        };
+        let model = self
+            .sessions
+            .get(session_idx)
+            .map(|s| s.model.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| p.effective_model());
+        (p.name.clone(), model)
     }
 
     // ===== 技能 =====
@@ -875,6 +1202,15 @@ impl AppState {
 /// 同步目录：`~/.neverwork/sync`。
 pub(crate) fn sync_dir() -> PathBuf {
     config::config_dir().join("sync")
+}
+
+/// 协议枚举 → `neverwork_agent` 的字符串标识。
+fn protocol_name(p: neverwork_core::Protocol) -> &'static str {
+    match p {
+        neverwork_core::Protocol::Anthropic => "anthropic",
+        neverwork_core::Protocol::Gemini => "gemini",
+        neverwork_core::Protocol::OpenAiCompatible => "openai",
+    }
 }
 
 /// 写一份带时间戳的快照。
