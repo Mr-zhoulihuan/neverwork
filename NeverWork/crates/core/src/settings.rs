@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 
 // ============ 外观 ============
 
+/// 外观主题：每套是**完整色板**（背景/面板/文字/边框/强调色），不是单一强调色。
+///
+/// `System` 在启动时按 Windows 深浅解析成 `Dark` / `Light`；
+/// 旧版 settings.json 里的 `"dark"`/`"light"`/`"system"` 继续有效。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
@@ -15,8 +19,20 @@ pub enum ThemeMode {
     Dark,
     /// 浅色。
     Light,
-    /// 跟随系统。
+    /// 跟随系统（深浅二选一，不选具体风格）。
     System,
+    /// Nord：冷调蓝灰。
+    Nord,
+    /// Dracula：紫黑底 + 紫强调。
+    Dracula,
+    /// One Dark：编辑器经典深灰。
+    OneDark,
+    /// Solarized 浅：暖米色纸感。
+    SolarizedLight,
+    /// Solarized 深：青黑底。
+    SolarizedDark,
+    /// Gruvbox：暖褐 + 琥珀。
+    Gruvbox,
 }
 
 impl ThemeMode {
@@ -25,11 +41,51 @@ impl ThemeMode {
             ThemeMode::Dark => "深色",
             ThemeMode::Light => "浅色",
             ThemeMode::System => "跟随系统",
+            ThemeMode::Nord => "Nord",
+            ThemeMode::Dracula => "Dracula",
+            ThemeMode::OneDark => "One Dark",
+            ThemeMode::SolarizedLight => "Solarized 浅",
+            ThemeMode::SolarizedDark => "Solarized 深",
+            ThemeMode::Gruvbox => "Gruvbox",
         }
     }
 
-    pub fn all() -> [ThemeMode; 3] {
-        [ThemeMode::Dark, ThemeMode::Light, ThemeMode::System]
+    /// 在 `all()` 里的下标（也是 UI 色板表的下标）。
+    pub fn index(&self) -> usize {
+        Self::all().iter().position(|m| m == self).unwrap_or(0)
+    }
+
+    /// 该主题是不是浅色底（决定语义色取亮/暗档）。
+    pub fn is_light_palette(&self) -> bool {
+        matches!(self, ThemeMode::Light | ThemeMode::SolarizedLight)
+    }
+
+    /// `System` 按系统深浅解析成具体主题；其它主题原样返回。
+    pub fn resolved(self, system_light: bool) -> ThemeMode {
+        match self {
+            ThemeMode::System => {
+                if system_light {
+                    ThemeMode::Light
+                } else {
+                    ThemeMode::Dark
+                }
+            }
+            other => other,
+        }
+    }
+
+    pub fn all() -> &'static [ThemeMode] {
+        &[
+            ThemeMode::Dark,
+            ThemeMode::Light,
+            ThemeMode::System,
+            ThemeMode::Nord,
+            ThemeMode::Dracula,
+            ThemeMode::OneDark,
+            ThemeMode::SolarizedLight,
+            ThemeMode::SolarizedDark,
+            ThemeMode::Gruvbox,
+        ]
     }
 }
 

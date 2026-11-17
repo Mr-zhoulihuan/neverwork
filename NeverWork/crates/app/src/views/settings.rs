@@ -168,17 +168,23 @@ impl AppState {
             {
                 let mut g = div().flex().flex_col().gap_3();
 
+                // 主题：每套是完整色板，色卡用它的背景 + 强调色预览。
                 g = g.child(setting_row(
                     "主题",
-                    "深色护眼；跟随系统读 Windows 主题",
+                    "9 套完整配色；跟随系统读系统深浅",
                     div()
                         .flex()
                         .gap_1()
+                        .flex_wrap()
                         .children(ThemeMode::all().iter().map(|m| {
                             let mode = *m;
                             let on = self.settings.theme == mode;
+                            let (pbg, _pfg, pacc) = theme::palette_preview(mode);
                             div()
-                                .id(SharedString::from(format!("theme-{}", mode.label())))
+                                .id(SharedString::from(format!("theme-{}", mode.index())))
+                                .flex()
+                                .items_center()
+                                .gap_1()
                                 .px_2()
                                 .py_1()
                                 .rounded_md()
@@ -198,6 +204,16 @@ impl AppState {
                                 .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
                                     this.set_theme(mode, cx);
                                 }))
+                                .child(
+                                    div()
+                                        .size(px(12.0))
+                                        .rounded_sm()
+                                        .bg(pbg)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(div().size(px(5.0)).rounded_full().bg(pacc)),
+                                )
                                 .child(SharedString::from(mode.label()))
                         })),
                 ));

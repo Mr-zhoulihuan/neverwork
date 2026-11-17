@@ -41,11 +41,17 @@ fn config_path() -> PathBuf {
     config_dir().join("config.json")
 }
 
+/// 去掉 UTF-8 BOM。Windows 记事本保存的 JSON 会带 BOM，
+/// serde_json 不接受，会当成损坏文件→整份设置被静默重置成默认值。
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// 加载配置；不存在则返回默认。
 pub fn load() -> Config {
     let path = config_path();
     match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        Ok(text) => serde_json::from_str(strip_bom(&text)).unwrap_or_default(),
         Err(_) => Config::default(),
     }
 }
@@ -79,7 +85,7 @@ fn settings_path() -> PathBuf {
 /// 加载设置；文件不存在或损坏时返回默认值。
 pub fn load_settings() -> Settings {
     match std::fs::read_to_string(settings_path()) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        Ok(text) => serde_json::from_str(strip_bom(&text)).unwrap_or_default(),
         Err(_) => Settings::default(),
     }
 }
@@ -168,7 +174,7 @@ pub fn import_all(text: &str) -> AppResult<(Config, Settings, bool)> {
         #[serde(default)]
         settings: Option<Settings>,
     }
-    let b: Bundle = serde_json::from_str(text).map_err(|e| AppError::Config(e.to_string()))?;
+    let b: Bundle = serde_json::from_str(strip_bom(text)).map_err(|e| AppError::Config(e.to_string()))?;
     Ok((
         b.config.unwrap_or_default(),
         b.settings.unwrap_or_default(),
@@ -195,4 +201,28 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ThemeMode;
+
+    #[test]
+    fn bom_prefixed_settings_is_not_treated_as_corrupt() {
+        let mut s = Settings::default();
+        s.theme = ThemeMode::Light;
+        let text = format!("\u{feff}{}", serde_json::to_string(&s).unwrap());
+        let back: Settings = serde_json::from_str(strip_bom(&text)).expect("带 BOM 也要能读");
+        assert_eq!(back.theme, ThemeMode::Light);
+    }
+
+    #[test]
+    fn bom_prefixed_export_still_imports() {
+        let text = export_all(&Config::default(), &Settings::default(), ExportOptions::default())
+            .unwrap();
+        let (_, back, secrets) = import_all(&format!("\u{feff}{text}")).expect("带 BOM 也要能导");
+        assert!(!secrets);
+        assert_eq!(back.theme, Settings::default().theme);
+    }
 }

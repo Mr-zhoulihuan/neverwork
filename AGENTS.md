@@ -22,7 +22,7 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - 分支：`main` 开发主线，`master` 是 Gitee 默认分支，两者同提交；`develop/feature/release` 同指主线。
 - 应用进程没关时 `cargo build` 会报「failed to remove neverwork.exe」但**返回码仍是 0**，跑的是旧二进制——先 taskkill 再构建。
 - 配置在 `~/.neverwork/`：`config.json`（团队）、`settings.json`（偏好，**含 Key 明文**，别提交别外传），均原子写。测试用 `NW_CONFIG_DIR`。
-- **主题必须走 `theme::set_theme_mode()`**，不要在视图里写死颜色——深浅两套色板由全局原子量切换，写死 `rgb(0x…)` 在浅色主题下不可读。
+- **主题必须走 `theme::set_theme_mode()`**，不要在视图里写死颜色——`ui/theme.rs` 的 `PALETTES` 有 9 套完整色板（深色/浅色/跟随系统/Nord/Dracula/One Dark/Solarized 浅深/Gruvbox），写死 `rgb(0x…)` 只会适配其中一套；新增颜色要同步加到每套色板。
 - **API Key 一律脱敏**：导出/同步走 `config::export_all(..., ExportOptions::default())`；界面只显示 `masked_key()`；不要给 `ProviderEntry` 加回 `derive(Debug)`（手写版会打码）。新增 Settings 序列化到文件/日志的路径先确认 Key 不跟着走。
 - `design/`、`pic/` 是设计截图。
 - 计划冲突以 `gpui-ide-plan-v2.md`（最新）与 README 为准。
