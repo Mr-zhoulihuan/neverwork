@@ -179,6 +179,8 @@ fn run_turn(
         cfg(port),
         vec![],
         user_text,
+        // 纯文本轮次：不带图片
+        Vec::new(),
         neverwork_agent::tools::ToolContext::new(std::env::temp_dir()),
         true,
         neverwork_core::PermissionMode::Standard,

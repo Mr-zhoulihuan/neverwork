@@ -116,6 +116,23 @@ impl AppState {
                 )
                 .child(
                     div()
+                        .id("team-new-inline")
+                        .flex_shrink_0()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme::accent_soft())
+                        .text_xs()
+                        .text_color(theme::accent())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::border()))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.add_team(window, cx);
+                        }))
+                        .child("＋ 新建团队"),
+                )
+                .child(
+                    div()
                         .id("team-rename")
                         .flex_shrink_0()
                         .px_2()

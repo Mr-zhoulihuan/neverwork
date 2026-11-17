@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crate::diff::DiffLine;
 use crate::tools::{self, wrap_untrusted, HandoffPayload, ToolCall, ToolContext, ToolResult};
 use crate::trace::Trace;
-use crate::{build_provider, ChatMessage, ProviderConfig, Role, StreamEvent, TokenUsage};
+use crate::{build_provider, ChatMessage, ImagePart, ProviderConfig, Role, StreamEvent, TokenUsage};
 
 /// 单次运行的硬上限。三个字段都给 `0` = 不设限，让模型自己决定什么时候停。
 ///
@@ -367,6 +367,8 @@ pub fn run_agent(
     system_prompt: &str,
     history: Vec<ChatMessage>,
     user_text: &str,
+    // 随本轮用户消息发送的图片（空 = 纯文本）
+    images: Vec<ImagePart>,
     ctx: ToolContext,
     enable_tools: bool,
     permission: neverwork_core::PermissionMode,
@@ -381,6 +383,7 @@ pub fn run_agent(
         system_prompt,
         history,
         user_text,
+        images,
         ctx,
         enable_tools,
         permission,
@@ -403,6 +406,7 @@ pub fn run_agent_in_team(
     config: ProviderConfig,
     history: Vec<ChatMessage>,
     user_text: &str,
+    images: Vec<ImagePart>,
     ctx: ToolContext,
     enable_tools: bool,
     permission: neverwork_core::PermissionMode,
@@ -423,6 +427,7 @@ pub fn run_agent_in_team(
         &persona,
         history,
         user_text,
+        images,
         ctx,
         enable_tools,
         permission,
@@ -440,6 +445,7 @@ fn run_agent_impl(
     system_prompt: &str,
     history: Vec<ChatMessage>,
     user_text: &str,
+    images: Vec<ImagePart>,
     ctx: ToolContext,
     enable_tools: bool,
     permission: neverwork_core::PermissionMode,
@@ -472,7 +478,7 @@ fn run_agent_impl(
     }
     messages.push(ChatMessage::system(sys));
     messages.extend(history);
-    messages.push(ChatMessage::user(user_text.to_string()));
+    messages.push(ChatMessage::user_with_images(user_text.to_string(), images));
 
     let provider = build_provider(provider_id, config);
     let with_tools = enable_tools && provider.supports_tools();

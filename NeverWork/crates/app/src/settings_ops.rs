@@ -940,6 +940,9 @@ impl AppState {
     /// - MCP 技能：先置 `pending_mcp_install` 等用户确认（安装 = 引入外部进程）。
     pub(crate) fn install_skill(&mut self, skill: Skill, cx: &mut Context<Self>) {
         if self.is_skill_installed(&skill.id) {
+            // 必须给反馈：远程安装前的「正在解析…」提示要在这里收尾。
+            self.notice = Some(format!("「{}」已安装，无需重复安装", skill.name));
+            cx.notify();
             return;
         }
         if skill.is_mcp() {
@@ -959,6 +962,7 @@ impl AppState {
         // 文本技能：真正落盘
         if let Err(e) = crate::skills_ops::install_text(&skill) {
             self.action_msg = Some(format!("安装失败：{e}"));
+            self.notice = Some(format!("安装「{}」失败：{e}", skill.name));
             cx.notify();
             return;
         }
@@ -972,6 +976,7 @@ impl AppState {
             s.name,
             crate::skills_ops::skill_file(&s.id).display()
         ));
+        self.notice = Some(format!("已安装「{}」", s.name));
         cx.notify();
     }
 
@@ -1301,6 +1306,7 @@ impl AppState {
         self.notice = Some(format!("正在解析「{}」的正文…", skill.name));
         cx.notify();
         let page = entry.source_url.clone();
+        let fail_name = skill.name.clone();
         let (tx, rx) = flume::unbounded::<Result<String, String>>();
         std::thread::spawn(move || {
             let _ = tx.send(crate::marketplace::fetch_remote_skill_body(
@@ -1310,6 +1316,12 @@ impl AppState {
         });
         cx.spawn(async move |weak, async_cx| {
             let Ok(result) = rx.recv_async().await else {
+                // 线程提前退出也要收尾，否则「解析中」会一直挂着。
+                let _ = weak.update(async_cx, move |this, cx| {
+                    this.market_installing = None;
+                    this.notice = Some(format!("安装「{fail_name}」失败：后台任务已退出"));
+                    cx.notify();
+                });
                 return;
             };
             let _ = weak.update(async_cx, move |this, cx| {
@@ -1332,6 +1344,7 @@ impl AppState {
                             .map(|u| format!("（可在 {u} 查看原文）"))
                             .unwrap_or_default();
                         this.action_msg = Some(format!("获取技能正文失败：{e}{hint}"));
+                        this.notice = Some(format!("安装「{}」失败：{e}{hint}", skill.name));
                         cx.notify();
                     }
                 }

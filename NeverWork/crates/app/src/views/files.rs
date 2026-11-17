@@ -6,12 +6,71 @@
 //! - 之前点文件靠「按文件名递归搜索」，同名文件会打开错的那个 → 现在用相对路径。
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, SharedString};
+use gpui::{div, px, AnyElement, Context, SharedString};
 
 use neverwork_ui::theme;
 
 use crate::state::{AppState, RightTab};
 use crate::views::text_fit::fit_text;
+
+/// 文件类型 →（徽标文字, 主题色）。
+///
+/// 颜色全部取自主题语义色（深浅两套自动跟随），徽标用半透明底 + 同色字，
+/// 两个主题下对比度都够；只认常见扩展名，其余走中性灰。
+fn badge_of(name: &str) -> (&'static str, gpui::Rgba) {
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "rs" => ("RS", theme::orange()),
+        "toml" | "lock" => ("TOML", theme::dim()),
+        "md" | "markdown" => ("MD", theme::indigo()),
+        "json" => ("{}", theme::yellow()),
+        "yaml" | "yml" => ("YML", theme::purple()),
+        "py" => ("PY", theme::cyan()),
+        "js" | "mjs" | "cjs" => ("JS", theme::yellow()),
+        "ts" | "tsx" => ("TS", theme::indigo()),
+        "jsx" => ("JSX", theme::yellow()),
+        "html" | "htm" => ("<>", theme::red()),
+        "css" | "scss" | "less" => ("#", theme::pink()),
+        "sh" | "bash" | "zsh" | "ps1" | "bat" | "cmd" => ("SH", theme::green()),
+        "go" => ("GO", theme::cyan()),
+        "c" | "h" => ("C", theme::indigo()),
+        "cpp" | "cc" | "hpp" | "hxx" => ("C++", theme::indigo()),
+        "java" => ("JAVA", theme::red()),
+        "kt" => ("KT", theme::purple()),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg" => {
+            ("IMG", theme::pink())
+        }
+        "pdf" => ("PDF", theme::red()),
+        "txt" | "log" => ("TXT", theme::muted()),
+        "sql" => ("SQL", theme::cyan()),
+        "xml" => ("XML", theme::orange()),
+        _ => ("·", theme::muted()),
+    }
+}
+
+/// 文件类型彩色徽标（文件树与对话附件 chip 共用）。
+pub(crate) fn file_badge(name: &str) -> impl IntoElement {
+    let (label, color) = badge_of(name);
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(26.0))
+        .h(px(15.0))
+        .flex_shrink_0()
+        .rounded_sm()
+        .bg(theme::tint(color, 0.16))
+        .border_1()
+        .border_color(theme::tint(color, 0.45))
+        .text_size(px(9.0))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(color)
+        .child(SharedString::from(label))
+}
 
 impl AppState {
     pub(crate) fn right_panel(
@@ -257,14 +316,15 @@ impl AppState {
                 !f.is_dir && self.open_path.as_deref() == Some(abs.as_path())
             };
 
-            let icon = if f.is_dir {
-                if f.expanded {
-                    "▾"
-                } else {
-                    "▸"
-                }
+            // 文件行：目录继续用箭头，文件按类型给彩色徽标（一眼看出是什么文件）。
+            let icon: AnyElement = if f.is_dir {
+                div()
+                    .text_xs()
+                    .text_color(theme::accent())
+                    .child(SharedString::from(if f.expanded { "▾" } else { "▸" }))
+                    .into_any_element()
             } else {
-                "⬢"
+                file_badge(&f.name).into_any_element()
             };
 
             let row = div()
@@ -281,12 +341,7 @@ impl AppState {
                 .hover(|d| d.bg(theme::raised()))
                 .when(is_open, |d| d.bg(theme::raised()).text_color(theme::fg()))
                 .when(!is_open, |d| d.text_color(theme::muted()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(if f.is_dir { theme::accent() } else { theme::dim() })
-                        .child(SharedString::from(icon.to_string())),
-                )
+                .child(icon)
                 .child(div().flex_1().child(SharedString::from(f.name.clone())));
 
             let row = if f.is_dir {

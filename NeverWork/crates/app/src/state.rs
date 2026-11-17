@@ -315,6 +315,8 @@ pub struct AppState {
     pub open_path: Option<PathBuf>,
     pub editor: TextBuffer,
     pub chat: TextBuffer,
+    /// 本轮待发送的附件（粘贴图片 / 上传文件 / 拖拽进来），发送后清空。
+    pub chat_attachments: Vec<neverwork_core::Attachment>,
     pub ws_input: TextBuffer,
     pub ws_prompt_open: bool,
     pub input_target: InputTarget,
@@ -966,6 +968,7 @@ impl AppState {
             open_path: None,
             editor: TextBuffer::multi_line(),
             chat: TextBuffer::single_line(),
+            chat_attachments: Vec::new(),
             ws_input: TextBuffer::single_line(),
             ws_prompt_open: false,
             input_target: InputTarget::Chat,
@@ -1606,6 +1609,8 @@ impl AppState {
         if idx < self.sessions.len() {
             self.active_session = idx;
             self.center = CenterView::Chat;
+            // 附件是按会话落盘的，切会话时不清会误发到新会话
+            self.chat_attachments.clear();
             // 上一个会话的流水线高亮不能带到新会话
             self.active_role = None;
             // 模型选择器里的勾选 / 高亮都是上一个会话的，换会话就收起。
@@ -3241,7 +3246,38 @@ impl AppState {
                 }
             }
             KeyAction::Paste => {
+                // 对话输入优先接图片：截图后直接 Ctrl+V 就能贴进输入区。
+                if target == InputTarget::Chat {
+                    let image = cx.read_from_clipboard().and_then(|i| {
+                        i.entries().iter().find_map(|e| match e {
+                            gpui::ClipboardEntry::Image(img) => Some(img.clone()),
+                            _ => None,
+                        })
+                    });
+                    if let Some(img) = image {
+                        self.attach_image_bytes(img.format.mime_type(), img.bytes, image_ext(img.format), cx);
+                        return;
+                    }
+                }
                 if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                    // 剪贴板里是「复制的文件」（资源管理器 / Snipaste 复制文件）时
+                    // 直接挂附件；只有全部非空行都是真实文件才走这条路，避免误吃普通文本。
+                    if target == InputTarget::Chat {
+                        let lines: Vec<&str> = text
+                            .lines()
+                            .map(|l| l.trim())
+                            .filter(|l| !l.is_empty())
+                            .collect();
+                        let paths: Vec<PathBuf> = lines
+                            .iter()
+                            .map(|l| PathBuf::from(l.trim_matches('"')))
+                            .filter(|p| p.is_file())
+                            .collect();
+                        if !lines.is_empty() && paths.len() == lines.len() {
+                            self.attach_paths(paths, cx);
+                            return;
+                        }
+                    }
                     self.buffer_mut(target).insert(&text);
                     self.note_edit(target);
                     if target == InputTarget::Editor {
@@ -3354,6 +3390,155 @@ impl AppState {
         }
     }
 
+    // ===== 附件（粘贴图片 / 上传文件 / 拖拽文件） =====
+
+    /// 附件落盘目录：`<配置目录>/attachments/<会话 id>/`。
+    fn attachment_dir(&self) -> PathBuf {
+        let sid = self
+            .sessions
+            .get(self.active_session)
+            .map(|s| s.id.clone())
+            .unwrap_or_else(|| "scratch".to_string());
+        neverwork_core::settings::settings_dir()
+            .join("attachments")
+            .join(sid)
+    }
+
+    /// 把一批磁盘文件挂到输入区（＋菜单上传 / 拖拽文件共用）。
+    ///
+    /// 文件会复制到配置目录下的会话附件夹：工作区文件随时会变 / 被删，
+    /// 历史里存的路径必须指向一份稳定副本。图片进多模态图片块，
+    /// 其余按文本文件把内容注入提示词。
+    pub(crate) fn attach_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+        const MAX_TEXT_BYTES: u64 = 512 * 1024;
+        let mut skipped: Vec<String> = Vec::new();
+        for p in paths {
+            if p.is_dir() {
+                skipped.push(format!("{}（不支持文件夹）", file_label(&p)));
+                continue;
+            }
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let (kind, mime) = attachment_meta(&ext);
+            let limit = if kind == neverwork_core::AttachmentKind::Image {
+                MAX_IMAGE_BYTES
+            } else {
+                MAX_TEXT_BYTES
+            };
+            match std::fs::metadata(&p) {
+                Ok(meta) if meta.len() > limit => {
+                    skipped.push(format!("{}（超过 {}）", file_label(&p), human_size(limit)));
+                    continue;
+                }
+                Err(e) => {
+                    skipped.push(format!("{}（{e}）", file_label(&p)));
+                    continue;
+                }
+                _ => {}
+            }
+            let name = file_label(&p);
+            match self.store_attachment(&p, &name, kind, mime) {
+                Ok(a) => self.chat_attachments.push(a),
+                Err(e) => skipped.push(format!("{name}（{e}）")),
+            }
+        }
+        self.finish_attach(skipped, cx);
+    }
+
+    /// 剪贴板图片（截图直接粘）：没有源文件可复制，直接写字节。
+    pub(crate) fn attach_image_bytes(
+        &mut self,
+        mime: &str,
+        bytes: Vec<u8>,
+        ext: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let dir = self.attachment_dir();
+        let name = format!("粘贴图片-{}.{ext}", now_stamp());
+        let result = std::fs::create_dir_all(&dir).and_then(|_| {
+            let dest = unique_path(&dir, &name);
+            std::fs::write(&dest, &bytes)?;
+            Ok(neverwork_core::Attachment {
+                name: name.clone(),
+                path: dest.to_string_lossy().to_string(),
+                mime: mime.to_string(),
+                kind: neverwork_core::AttachmentKind::Image,
+            })
+        });
+        match result {
+            Ok(a) => self.chat_attachments.push(a),
+            Err(e) => self.notice = Some(format!("粘贴图片失败：{e}")),
+        }
+        self.finish_attach(Vec::new(), cx);
+    }
+
+    /// 复制一份到会话附件夹并生成 `Attachment` 记录。
+    fn store_attachment(
+        &self,
+        src: &std::path::Path,
+        name: &str,
+        kind: neverwork_core::AttachmentKind,
+        mime: &str,
+    ) -> std::io::Result<neverwork_core::Attachment> {
+        let dir = self.attachment_dir();
+        std::fs::create_dir_all(&dir)?;
+        let dest = unique_path(&dir, name);
+        std::fs::copy(src, &dest)?;
+        Ok(neverwork_core::Attachment {
+            name: name.to_string(),
+            path: dest.to_string_lossy().to_string(),
+            mime: mime.to_string(),
+            kind,
+        })
+    }
+
+    /// 附件收尾：超过个数上限 / 被跳过的文件都在 notice 里说清楚。
+    fn finish_attach(&mut self, mut skipped: Vec<String>, cx: &mut Context<Self>) {
+        const MAX_ATTACHMENTS: usize = 6;
+        if self.chat_attachments.len() > MAX_ATTACHMENTS {
+            let extra = self.chat_attachments.split_off(MAX_ATTACHMENTS);
+            skipped.push(format!(
+                "一次最多 {MAX_ATTACHMENTS} 个附件（多了 {} 个）",
+                extra.len()
+            ));
+        }
+        if !skipped.is_empty() {
+            self.notice = Some(format!("未添加：{}", skipped.join("；")));
+        }
+        cx.notify();
+    }
+
+    /// 移除一个待发附件（文件副本保留，历史里还在用）。
+    pub(crate) fn remove_attachment(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx < self.chat_attachments.len() {
+            self.chat_attachments.remove(idx);
+            cx.notify();
+        }
+    }
+
+    /// 「＋」菜单：弹系统文件选择器挑附件（图片/文本不限）。
+    pub(crate) fn pick_attachments(&mut self, cx: &mut Context<Self>) {
+        use gpui::PathPromptOptions;
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("选择要发送的文件（图片 / 文本）".into()),
+        });
+        self.composer_menu = false;
+        self.restore_input_target();
+        cx.spawn(async move |weak, async_cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                let _ = weak.update(async_cx, |this, cx| this.attach_paths(paths, cx));
+            }
+        })
+        .detach();
+    }
+
     // ===== 发送 =====
 
     pub(crate) fn send_message(&mut self, cx: &mut Context<Self>) {
@@ -3369,7 +3554,10 @@ impl AppState {
     /// `keep_prompt`：续跑时传原始任务，避免 `resume_prompt` 被「接着做」
     /// 提示覆盖——否则第二次中断就再也想不起原来要做什么了。
     fn send_text(&mut self, text: String, keep_prompt: Option<String>, cx: &mut Context<Self>) {
-        if text.is_empty() || self.streaming {
+        // 附件是本轮输入的一部分：先取走，发不出去再放回。
+        let attachments = std::mem::take(&mut self.chat_attachments);
+        if self.streaming || (text.is_empty() && attachments.is_empty()) {
+            self.chat_attachments = attachments;
             return;
         }
         let session_idx = self.active_session.min(self.sessions.len().saturating_sub(1));
@@ -3391,6 +3579,17 @@ impl AppState {
         // 模式在新建会话时选定，不能切换；需要另一种就新建一个会话。
         let team_mode = self.session_mode().is_team();
 
+        // 纯附件发送时补一句「查看附件：…」：标题/预览/历史回放都需要文字。
+        let text = if text.is_empty() {
+            let names: Vec<&str> = attachments.iter().map(|a| a.name.as_str()).collect();
+            format!("查看附件：{}", names.join("、"))
+        } else {
+            text
+        };
+        // 文本附件正文只注入当前这一轮；图片交给 Provider 的原生图片块。
+        let prompt = build_model_text(&text, &attachments);
+        let images = image_parts(&attachments);
+
         self.chat.reset("");
         self.notice = None;
         self.pending = None;
@@ -3402,6 +3601,7 @@ impl AppState {
                 kind: MessageKind::User,
                 body: text.clone(),
                 code: None,
+                attachments: attachments.clone(),
                 elapsed_ms: 0,
                 tokens_in: 0,
                 tokens_out: 0,
@@ -3467,6 +3667,8 @@ impl AppState {
             self.spawn_agents_chain(
                 session_idx,
                 text,
+                prompt,
+                images,
                 roles,
                 runtimes,
                 Some((team, entry)),
@@ -3486,6 +3688,8 @@ impl AppState {
             self.spawn_agents_chain(
                 session_idx,
                 text,
+                prompt,
+                images,
                 vec![role],
                 runtimes,
                 None,
@@ -3516,6 +3720,8 @@ impl AppState {
             self.spawn_agents_chain(
                 session_idx,
                 text,
+                prompt,
+                images,
                 vec![solo],
                 runtimes,
                 None,
@@ -3712,7 +3918,12 @@ impl AppState {
     fn spawn_agents_chain(
         &mut self,
         session_idx: usize,
+        // 会话里展示的正文（也是跳过当前提问的匹配依据）
         text: String,
+        // 真正发给模型的提示词（文本附件正文已拼入）
+        prompt: String,
+        // 随入口角色发出的图片（handoff 之后不再重复发）
+        images: Vec<neverwork_agent::ImagePart>,
         roles: Vec<neverwork_core::Role>,
         runtimes: Vec<(String, neverwork_agent::ProviderConfig)>,
         handoff: Option<(neverwork_core::Team, usize)>,
@@ -3757,7 +3968,9 @@ impl AppState {
             let mut next: Option<usize> = handoff.as_ref().map(|(_, i)| *i);
             let mut seq = 0usize;
             let mut hops = 0usize;
-            let mut input = text;
+            let mut input = prompt;
+            // 图片只跟入口角色走：handoff 后的提示词里已经没有这些图了。
+            let mut pending_images = images;
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     break;
@@ -3796,6 +4009,7 @@ impl AppState {
                             role_config.clone(),
                             history.clone(),
                             &input,
+                            std::mem::take(&mut pending_images),
                             ctx.clone(),
                             with_tools,
                             permission,
@@ -3812,6 +4026,7 @@ impl AppState {
                             &role.prompt,
                             history.clone(),
                             &input,
+                            std::mem::take(&mut pending_images),
                             ctx.clone(),
                             with_tools,
                             permission,
@@ -3891,6 +4106,7 @@ impl AppState {
                                     kind: MessageKind::Agent { participant: p },
                                     body: String::new(),
                                     code: None,
+                                    attachments: Vec::new(),
                                     elapsed_ms: 0,
                                     tokens_in: 0,
                                     tokens_out: 0,
@@ -3945,6 +4161,7 @@ impl AppState {
                                 },
                                 body: String::new(),
                                 code: None,
+                                attachments: Vec::new(),
                                 elapsed_ms: 0,
                                 tokens_in: 0,
                                 tokens_out: 0,
@@ -4058,6 +4275,7 @@ impl AppState {
                                 // 「上次谁把什么交给了谁、要求改哪些」。
                                 body: detail,
                                 code: None,
+                                attachments: Vec::new(),
                                 elapsed_ms: 0,
                                 tokens_in: 0,
                                 tokens_out: 0,
@@ -5186,6 +5404,121 @@ fn render_handoff(from: &str, p: &neverwork_agent::HandoffPayload) -> String {
     s
 }
 
+fn attachment_meta(ext: &str) -> (neverwork_core::AttachmentKind, &'static str) {
+    use neverwork_core::AttachmentKind;
+    match ext {
+        "png" => (AttachmentKind::Image, "image/png"),
+        "jpg" | "jpeg" => (AttachmentKind::Image, "image/jpeg"),
+        "gif" => (AttachmentKind::Image, "image/gif"),
+        "webp" => (AttachmentKind::Image, "image/webp"),
+        "bmp" => (AttachmentKind::Image, "image/bmp"),
+        "svg" => (AttachmentKind::Image, "image/svg+xml"),
+        "md" | "markdown" => (AttachmentKind::Text, "text/markdown"),
+        "json" => (AttachmentKind::Text, "application/json"),
+        "html" | "htm" => (AttachmentKind::Text, "text/html"),
+        "css" => (AttachmentKind::Text, "text/css"),
+        "rs" => (AttachmentKind::Text, "text/x-rust"),
+        "py" => (AttachmentKind::Text, "text/x-python"),
+        _ => (AttachmentKind::Text, "text/plain"),
+    }
+}
+
+fn file_label(p: &std::path::Path) -> String {
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("未命名文件")
+        .to_string()
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{}MB", bytes / (1024 * 1024))
+    } else {
+        format!("{}KB", (bytes / 1024).max(1))
+    }
+}
+
+/// 粘贴图片的短时间戳文件名（秒 + 毫秒，避免同名覆盖）。
+fn now_stamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}-{}", now.as_secs(), now.subsec_millis())
+}
+
+/// 目标目录里重名时自动加 `-1/-2` 后缀，不覆盖旧附件。
+fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let base = dir.join(name);
+    if !base.exists() {
+        return base;
+    }
+    let stem = std::path::Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file");
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    for n in 1..1000 {
+        let candidate = if ext.is_empty() {
+            dir.join(format!("{stem}-{n}"))
+        } else {
+            dir.join(format!("{stem}-{n}.{ext}"))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base
+}
+
+fn image_ext(f: gpui::ImageFormat) -> &'static str {
+    match f {
+        gpui::ImageFormat::Png => "png",
+        gpui::ImageFormat::Jpeg => "jpg",
+        gpui::ImageFormat::Webp => "webp",
+        gpui::ImageFormat::Gif => "gif",
+        gpui::ImageFormat::Svg => "svg",
+        gpui::ImageFormat::Bmp => "bmp",
+        _ => "img",
+    }
+}
+
+/// 把文本附件正文拼进提示词（图片走原生图片块，不在这里）。
+fn build_model_text(text: &str, attachments: &[neverwork_core::Attachment]) -> String {
+    let mut out = text.to_string();
+    for a in attachments {
+        if a.kind != neverwork_core::AttachmentKind::Text {
+            continue;
+        }
+        match std::fs::read(&a.path) {
+            // 非 UTF-8（GBK 等）用 lossy：乱码也比丢掉整个文件好
+            Ok(bytes) => out.push_str(&format!(
+                "\n\n===== 附件：{} =====\n{}",
+                a.name,
+                String::from_utf8_lossy(&bytes).trim_end()
+            )),
+            Err(e) => out.push_str(&format!("\n\n[附件 {} 读取失败：{e}]", a.name)),
+        }
+    }
+    out
+}
+
+/// 图片附件交给 Provider 的原生图片块（读不到的直接跳过）。
+fn image_parts(
+    attachments: &[neverwork_core::Attachment],
+) -> Vec<neverwork_agent::ImagePart> {
+    attachments
+        .iter()
+        .filter(|a| a.kind == neverwork_core::AttachmentKind::Image)
+        .filter_map(|a| {
+            let bytes = std::fs::read(&a.path).ok()?;
+            Some(neverwork_agent::ImagePart::from_bytes(a.mime.clone(), &bytes))
+        })
+        .collect()
+}
+
 /// 把会话里已经聊过的内容整理成喂给模型的历史。
 ///
 /// 正文（用户 / 助手）原样取用；工具卡片**连同真实输出一起回放**成
@@ -5296,7 +5629,20 @@ fn history_for_model(
             HistoryBlock::Text(m) => {
                 let body = m.body.trim();
                 out.push(match &m.kind {
-                    MessageKind::User => neverwork_agent::ChatMessage::user(body),
+                    MessageKind::User => {
+                        // 历史里的图片不会重发（只限本轮），至少告诉模型
+                        // 「当时附了哪些文件」，否则追问时对不上上下文。
+                        let mut content = body.to_string();
+                        if !m.attachments.is_empty() {
+                            let names: Vec<&str> =
+                                m.attachments.iter().map(|a| a.name.as_str()).collect();
+                            content.push_str(&format!(
+                                "\n\n[本条消息附带附件：{}]",
+                                names.join("、")
+                            ));
+                        }
+                        neverwork_agent::ChatMessage::user(content)
+                    }
                     _ => neverwork_agent::ChatMessage::assistant(body),
                 });
             }
@@ -5494,6 +5840,7 @@ mod handoff_tests {
             },
             body: detail.into(),
             code: None,
+            attachments: Vec::new(),
             elapsed_ms: 0,
             tokens_in: 0,
             tokens_out: 0,
@@ -5512,6 +5859,7 @@ mod handoff_tests {
             },
             body: body.into(),
             code: None,
+            attachments: Vec::new(),
             elapsed_ms: 0,
             tokens_in: 0,
             tokens_out: 0,
@@ -5525,6 +5873,7 @@ mod handoff_tests {
                 kind: MessageKind::User,
                 body: "验证需求".into(),
                 code: None,
+                attachments: Vec::new(),
                 elapsed_ms: 0,
                 tokens_in: 0,
                 tokens_out: 0,
@@ -5630,6 +5979,7 @@ mod history_tests {
             kind: MessageKind::User,
             body: body.into(),
             code: None,
+            attachments: Vec::new(),
             elapsed_ms: 0,
             tokens_in: 0,
             tokens_out: 0,
@@ -5648,6 +5998,7 @@ mod history_tests {
             },
             body: body.into(),
             code: None,
+            attachments: Vec::new(),
             elapsed_ms: 0,
             tokens_in: 0,
             tokens_out: 0,
@@ -5672,6 +6023,7 @@ mod history_tests {
             },
             body: String::new(),
             code: None,
+            attachments: Vec::new(),
             elapsed_ms: 0,
             tokens_in: 0,
             tokens_out: 0,

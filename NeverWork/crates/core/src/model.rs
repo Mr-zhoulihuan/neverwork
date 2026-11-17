@@ -369,6 +369,35 @@ pub struct ParallelItem {
     pub done: bool,
 }
 
+/// 一条用户消息携带的附件。
+///
+/// 只存路径与类型，正文/图片字节在发送或渲染时再读：
+/// - 图片：随消息以多模态图片块发给 Provider；
+/// - 文本文件：发送时把内容拼进提示词（大文件截断）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// 展示名（原文件名）。
+    pub name: String,
+    /// 本地绝对路径。
+    pub path: String,
+    /// MIME，例如 `image/png` / `text/plain`。
+    #[serde(default)]
+    pub mime: String,
+    /// 附件类型。
+    #[serde(default)]
+    pub kind: AttachmentKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    /// 图片：随消息发给支持视觉的模型。
+    #[default]
+    Image,
+    /// 文本文件：内容拼进提示词。
+    Text,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub kind: MessageKind,
@@ -376,6 +405,9 @@ pub struct Message {
     pub body: String,
     /// 代码块（可选）。
     pub code: Option<CodeBlock>,
+    /// 用户消息的附件（旧消息没有该字段时为空）。
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
     /// 这一轮生成耗时（毫秒）。0 表示还没结束或未记录。
     #[serde(default)]
     pub elapsed_ms: u64,
@@ -1165,6 +1197,7 @@ mod aggregate_tests {
             },
             body: String::new(),
             code: None,
+            attachments: Vec::new(),
             elapsed_ms: 0,
             tokens_in: 0,
             tokens_out: 0,
@@ -1205,6 +1238,7 @@ mod aggregate_tests {
                 kind: MessageKind::User,
                 body: "hi".into(),
                 code: None,
+                attachments: Vec::new(),
                 elapsed_ms: 0,
                 tokens_in: 0,
                 tokens_out: 0,
@@ -1364,5 +1398,32 @@ mod session_list_tests {
             Some(SessionStatus::Todo),
             Some(SessionTag::Bug)
         ));
+    }
+
+    #[test]
+    fn message_attachments_default_for_old_sessions() {
+        // 旧会话里的消息没有 attachments 字段：反序列化为空，不能报错。
+        let old = r#"{"kind":{"type":"user"},"body":"旧消息","code":null}"#;
+        let m: Message = serde_json::from_str(old).unwrap();
+        assert!(m.attachments.is_empty());
+        assert_eq!(m.body, "旧消息");
+    }
+
+    #[test]
+    fn attachment_roundtrip_keeps_kind_and_path() {
+        let a = Attachment {
+            name: "shot.png".into(),
+            path: r"C:\tmp\shot.png".into(),
+            mime: "image/png".into(),
+            kind: AttachmentKind::Image,
+        };
+        let text = serde_json::to_string(&a).unwrap();
+        let back: Attachment = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, a);
+        // 文本附件走 snake_case，旧数据缺失 kind 时默认图片（不会丢字段）
+        let legacy = r#"{"name":"a.md","path":"C:/a.md"}"#;
+        let l: Attachment = serde_json::from_str(legacy).unwrap();
+        assert_eq!(l.kind, AttachmentKind::Image);
+        assert!(l.mime.is_empty());
     }
 }

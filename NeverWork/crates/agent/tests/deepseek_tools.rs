@@ -119,6 +119,7 @@ fn run(
         system,
         Vec::new(),
         prompt,
+        Vec::new(),
         neverwork_agent::tools::ToolContext::new(dir.clone()),
         true,
         neverwork_core::PermissionMode::Standard,

@@ -12,3 +12,5 @@ ureq = { version = "3", features = ["json", "charset"] }
 encoding_rs = "0.8"
 thiserror.workspace = true
 flume = "0.11"
+# 图片附件转 base64（三家 Provider 的图片块都要 base64）
+base64 = "0.22"

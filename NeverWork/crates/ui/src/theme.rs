@@ -294,6 +294,13 @@ pub fn with_alpha(hex: u32, alpha: f32) -> Rgba {
     gpui::rgba((hex << 8) | (a & 0xff))
 }
 
+/// 给主题色叠透明度（文件类型徽标、胶囊底色等用）。
+pub fn tint(color: Rgba, alpha: f32) -> Rgba {
+    let mut c = color;
+    c.a = alpha.clamp(0.0, 1.0);
+    c
+}
+
 // ============ 字体 ============
 /// 等宽字体族名（代码块、执行命令用）。
 ///

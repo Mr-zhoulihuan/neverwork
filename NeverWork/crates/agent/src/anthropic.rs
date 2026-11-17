@@ -20,7 +20,30 @@ impl AnthropicProvider {
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: &'a str,
-    content: &'a str,
+    content: WireContent<'a>,
+}
+
+/// 纯文本消息用字符串（体积最小），带图时用内容块数组。
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WireContent<'a> {
+    Text(&'a str),
+    Blocks(Vec<WireBlock<'a>>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireBlock<'a> {
+    Text { text: &'a str },
+    Image { source: WireImageSource<'a> },
+}
+
+#[derive(Serialize)]
+struct WireImageSource<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    media_type: &'a str,
+    data: &'a str,
 }
 
 #[derive(Serialize)]
@@ -73,7 +96,25 @@ impl AnthropicProvider {
                         Role::Assistant => "assistant",
                         _ => "user",
                     },
-                    content: &m.content,
+                    content: if m.images.is_empty() {
+                        WireContent::Text(&m.content)
+                    } else {
+                        let mut blocks: Vec<WireBlock> = m
+                            .images
+                            .iter()
+                            .map(|img| WireBlock::Image {
+                                source: WireImageSource {
+                                    kind: "base64",
+                                    media_type: &img.mime,
+                                    data: &img.data_base64,
+                                },
+                            })
+                            .collect();
+                        if !m.content.is_empty() {
+                            blocks.push(WireBlock::Text { text: &m.content });
+                        }
+                        WireContent::Blocks(blocks)
+                    },
                 })
                 .collect(),
             thinking: budget.map(|b| ThinkingCfg {

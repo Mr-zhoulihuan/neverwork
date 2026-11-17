@@ -44,6 +44,33 @@ pub enum Role {
     Tool,
 }
 
+/// 一张随用户消息发送的图片（base64 编码 + MIME）。
+///
+/// 直接按各 Provider 的原生图片块发送：OpenAI 兼容走 `image_url` 的 data URI，
+/// Anthropic 走 base64 图片块，Gemini 走 `inlineData`。模型不支持视觉时
+/// 由服务端报错，界面原样展示错误。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImagePart {
+    pub mime: String,
+    pub data_base64: String,
+}
+
+impl ImagePart {
+    /// 从原始字节构造（在这里做 base64，调用方不必依赖 base64 crate）。
+    pub fn from_bytes(mime: impl Into<String>, bytes: &[u8]) -> Self {
+        use base64::Engine;
+        Self {
+            mime: mime.into(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    /// 拼成 OpenAI 兼容的 data URI。
+    pub fn data_uri(&self) -> String {
+        format!("data:{};base64,{}", self.mime, self.data_base64)
+    }
+}
+
 /// 一条对话消息（内部统一格式）。
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
@@ -53,6 +80,8 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCall>,
     /// 工具结果消息对应的调用 id（仅 `Role::Tool` 使用）。
     pub tool_call_id: Option<String>,
+    /// 用户消息附带的图片（仅 `Role::User` 可能非空）。
+    pub images: Vec<ImagePart>,
 }
 
 impl ChatMessage {
@@ -62,6 +91,7 @@ impl ChatMessage {
             content,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
 
@@ -70,6 +100,12 @@ impl ChatMessage {
     }
     pub fn user(s: impl Into<String>) -> Self {
         Self::base(Role::User, s.into())
+    }
+    /// 带图片的用户消息（本轮粘贴/上传的图片只在这里出现一次）。
+    pub fn user_with_images(s: impl Into<String>, images: Vec<ImagePart>) -> Self {
+        let mut m = Self::base(Role::User, s.into());
+        m.images = images;
+        m
     }
     pub fn assistant(s: impl Into<String>) -> Self {
         Self::base(Role::Assistant, s.into())

@@ -1,5 +1,5 @@
 use super::*;
-use gpui::{ClickEvent, CursorStyle, KeyDownEvent};
+use gpui::{img, ClickEvent, CursorStyle, KeyDownEvent};
 use neverwork_core::MessageKind;
 use crate::state::InputTarget;
 use crate::views::text_fit::fit_text;
@@ -577,6 +577,11 @@ impl AppState {
             col = col.child(self.permission_level_panel(cx));
         }
 
+        // ===== 待发附件：粘贴 / 上传 / 拖拽进来的文件都汇总在这里 =====
+        if !self.chat_attachments.is_empty() {
+            col = col.child(self.attachment_strip(cx));
+        }
+
         // ===== 输入框：大圆角容器 + 左下「＋」+ 右下权限 chip =====
         let mut input_box = div()
             .rounded_lg()
@@ -595,11 +600,18 @@ impl AppState {
             .gap_2()
             .child(input_el);
 
-        // 「＋」菜单：引用文件 / 工具开关 / 清空。
+        // 「＋」菜单：上传附件 / 引用文件 / 工具开关 / 清空。
         // 比在底栏摆一排文字按钮干净，也不会挤压窄窗口下的输入区。
         if self.composer_menu {
             input_box = input_box.child(self.composer_menu_row(has_open_file, cx));
         }
+
+        // 拖拽文件到输入框 = 上传附件（与「＋ → 上传文件」同一条路径）。
+        let entity = cx.entity();
+        input_box = input_box.on_drop::<gpui::ExternalPaths>(move |paths, _window, cx| {
+            let files = paths.paths().to_vec();
+            entity.update(cx, |this, cx| this.attach_paths(files, cx));
+        });
 
         col = col.child(
             input_box
@@ -662,6 +674,67 @@ impl AppState {
         self.switch_input_target(InputTarget::Chat);
         self.chat.insert(&format!("@{name} "));
         cx.notify();
+    }
+
+    /// 输入框上方的待发附件条：图片给缩略图，文本文件给类型徽标。
+    fn attachment_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = div().flex().items_center().gap_2().flex_wrap();
+        for (i, a) in self.chat_attachments.iter().enumerate() {
+            let is_image = a.kind == neverwork_core::AttachmentKind::Image;
+            let mut card = div()
+                .id(SharedString::from(format!("attach-{i}")))
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(40.0))
+                .pl_1()
+                .pr_2()
+                .rounded_md()
+                .border_1()
+                .border_color(theme::border())
+                .bg(theme::raised());
+            if is_image {
+                card = card.child(
+                    div()
+                        .size(px(32.0))
+                        .flex_shrink_0()
+                        .rounded_sm()
+                        .overflow_hidden()
+                        .child(
+                            img(std::path::PathBuf::from(&a.path))
+                                .size(px(32.0))
+                                .object_fit(gpui::ObjectFit::Cover),
+                        ),
+                );
+            } else {
+                card = card.child(super::files::file_badge(&a.name));
+            }
+            card = card
+                .child(
+                    div()
+                        .max_w(px(150.0))
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .whitespace_nowrap()
+                        .child(SharedString::from(fit_text(&a.name, 140.0, 11.0))),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("attach-x-{i}")))
+                        .px_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(theme::dim())
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(theme::fg()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                            this.remove_attachment(i, cx);
+                        }))
+                        .child("✕"),
+                );
+            row = row.child(card);
+        }
+        row
     }
 
     /// 输入框左下角的圆形「＋」：展开/收起工具菜单。
@@ -973,6 +1046,23 @@ impl AppState {
             .items_center()
             .gap_2()
             .flex_wrap()
+            // 上传附件（图片 / 文本文件，多选）
+            .child(
+                div()
+                    .id("composer-attach")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::raised())
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(theme::accent()))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.pick_attachments(cx);
+                    }))
+                    .child("＋ 上传图片/文件"),
+            )
             // 引用当前打开的文件
             .child(
                 div()
@@ -1474,6 +1564,7 @@ impl AppState {
                 let body = m.body.clone();
                 user_bubble(
                     &m.body,
+                    &m.attachments,
                     copy_chip(
                         SharedString::from(format!("copy-user-{idx}")),
                         cx.listener(move |this, _: &ClickEvent, _w, cx| {
@@ -1915,7 +2006,65 @@ fn tool_action(name: &str) -> &'static str {
 ///
 /// 对齐参考稿（opencode）：用户输入是一段被引用的文本块，
 /// 左右留白对齐正文，一眼能分辨「谁说的」但不抢视觉。
-pub(crate) fn user_bubble(text: &str, copy: impl IntoElement) -> impl IntoElement {
+pub(crate) fn user_bubble(
+    text: &str,
+    attachments: &[neverwork_core::Attachment],
+    copy: impl IntoElement,
+) -> impl IntoElement {
+    // 附件在正文上方：截图提问时图才是主体，文字只是补充。
+    let mut body = div().flex().flex_col().gap_2();
+    for a in attachments {
+        if a.kind == neverwork_core::AttachmentKind::Image {
+            body = body.child(
+                div()
+                    .w(px(140.0))
+                    .rounded_md()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(theme::border())
+                    .child(
+                        img(std::path::PathBuf::from(&a.path))
+                            .size(px(140.0))
+                            .object_fit(gpui::ObjectFit::Cover),
+                    ),
+            );
+        } else {
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::raised())
+                    .child(super::files::file_badge(&a.name))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .whitespace_nowrap()
+                            .child(SharedString::from(fit_text(&a.name, 180.0, 11.0))),
+                    ),
+            );
+        }
+    }
+    body = body.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_color(theme::fg())
+                    .line_height(px(22.0))
+                    .child(SharedString::from(text.to_string())),
+            )
+            .child(copy),
+    );
     div()
         .w_full()
         .pl_3()
@@ -1924,22 +2073,7 @@ pub(crate) fn user_bubble(text: &str, copy: impl IntoElement) -> impl IntoElemen
         .border_l_2()
         .border_color(theme::accent())
         .bg(theme::with_alpha(0xffffff, 0.035))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_start()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .text_color(theme::fg())
-                        .line_height(px(22.0))
-                        .child(SharedString::from(text.to_string())),
-                )
-                .child(copy),
-        )
+        .child(body)
 }
 
 /// AI 回答（单助手）：没有头像、没有气泡框，就是一段文档流 + 一行页脚。

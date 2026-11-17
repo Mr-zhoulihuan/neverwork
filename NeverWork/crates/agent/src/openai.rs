@@ -43,13 +43,37 @@ struct WireFunction {
 #[derive(Serialize)]
 struct WireMessage {
     role: &'static str,
-    /// 仅在有 tool_calls 时可以为 null。
+    /// 仅在有 tool_calls 或纯图片时可以为 null。
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<WireContent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<WireToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+}
+
+/// 多模态 content：无图时是纯字符串（兼容性最好），
+/// 有图时是 text + image_url 块数组。
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WireContent {
+    Text(String),
+    Parts(Vec<WirePart>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum WirePart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: WireImageUrl },
+}
+
+#[derive(Serialize)]
+struct WireImageUrl {
+    /// `data:<mime>;base64,<...>`。
+    url: String,
 }
 
 #[derive(Serialize)]
@@ -99,13 +123,26 @@ fn wire_role(role: Role) -> &'static str {
 }
 
 fn to_wire(m: &ChatMessage) -> WireMessage {
+    let content = if !m.images.is_empty() {
+        // 图片消息：文本在前、图片在后（各网关都认的顺序）。
+        let mut parts: Vec<WirePart> = Vec::new();
+        if !m.content.is_empty() {
+            parts.push(WirePart::Text {
+                text: m.content.clone(),
+            });
+        }
+        parts.extend(m.images.iter().map(|img| WirePart::ImageUrl {
+            image_url: WireImageUrl { url: img.data_uri() },
+        }));
+        Some(WireContent::Parts(parts))
+    } else if m.content.is_empty() && !m.tool_calls.is_empty() {
+        None
+    } else {
+        Some(WireContent::Text(m.content.clone()))
+    };
     WireMessage {
         role: wire_role(m.role),
-        content: if m.content.is_empty() && !m.tool_calls.is_empty() {
-            None
-        } else {
-            Some(m.content.clone())
-        },
+        content,
         tool_calls: m
             .tool_calls
             .iter()

@@ -27,9 +27,39 @@ impl GeminiProvider {
     }
 }
 
-#[derive(Serialize)]
+/// 一个内容块：文本或内联图片（两个字段互斥，序列化时跳过空的那个）。
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct Part {
-    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inline_data: Option<InlineData>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InlineData {
+    mime_type: String,
+    data: String,
+}
+
+impl Part {
+    fn text(t: impl Into<String>) -> Self {
+        Self {
+            text: Some(t.into()),
+            inline_data: None,
+        }
+    }
+    fn image(img: &crate::ImagePart) -> Self {
+        Self {
+            text: None,
+            inline_data: Some(InlineData {
+                mime_type: img.mime.clone(),
+                data: img.data_base64.clone(),
+            }),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -83,13 +113,25 @@ fn to_wire(messages: &[ChatMessage]) -> (Option<String>, Vec<Content>) {
                     system_parts.push(m.content.clone());
                 }
             }
-            Role::User | Role::Tool => {
+            Role::User => {
+                let mut parts: Vec<Part> = Vec::new();
+                if !m.content.is_empty() {
+                    parts.push(Part::text(m.content.clone()));
+                }
+                parts.extend(m.images.iter().map(Part::image));
+                // 纯图片 + 空正文也要发（不能因为没文字就丢了图）
+                if !parts.is_empty() {
+                    contents.push(Content {
+                        role: "user",
+                        parts,
+                    });
+                }
+            }
+            Role::Tool => {
                 // Tool 结果对 Gemini 来说也是用户侧输入
                 contents.push(Content {
                     role: "user",
-                    parts: vec![Part {
-                        text: m.content.clone(),
-                    }],
+                    parts: vec![Part::text(m.content.clone())],
                 });
             }
             Role::Assistant => {
@@ -98,9 +140,7 @@ fn to_wire(messages: &[ChatMessage]) -> (Option<String>, Vec<Content>) {
                 }
                 contents.push(Content {
                     role: "model",
-                    parts: vec![Part {
-                        text: m.content.clone(),
-                    }],
+                    parts: vec![Part::text(m.content.clone())],
                 });
             }
         }
@@ -243,7 +283,7 @@ impl GeminiProvider {
         let body = WireRequest {
             contents,
             system_instruction: system.map(|text| SystemInstruction {
-                parts: vec![Part { text }],
+                parts: vec![Part::text(text)],
             }),
             generation_config: Some(self.generation_config()),
         };
@@ -306,7 +346,7 @@ pub(crate) fn debug_body_thinking(
     let body = WireRequest {
         contents,
         system_instruction: system.map(|text| SystemInstruction {
-            parts: vec![Part { text }],
+            parts: vec![Part::text(text)],
         }),
         generation_config: Some(GenerationConfig {
             temperature,
