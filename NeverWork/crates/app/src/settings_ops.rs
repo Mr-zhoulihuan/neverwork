@@ -717,7 +717,10 @@ impl AppState {
         self.market_detail = Some(entry);
         // 市场页打开时底栏是安装 / 卸载，不带角色绑定。
         self.market_detail_role = None;
+        self.market_detail_error = None;
         cx.notify();
+        // skills.sh 列表接口不带正文：打开抽屉时懒加载真实说明
+        self.load_market_detail_body(cx);
     }
 
     /// 从团队角色面板打开详情：底栏主按钮变成「绑定到角色」。
@@ -729,13 +732,91 @@ impl AppState {
     ) {
         self.market_detail = Some(entry);
         self.market_detail_role = Some(role_idx);
+        self.market_detail_error = None;
         cx.notify();
+        self.load_market_detail_body(cx);
     }
 
     pub(crate) fn close_market_detail(&mut self, cx: &mut Context<Self>) {
         self.market_detail = None;
         self.market_detail_role = None;
+        self.market_detail_loading = false;
+        self.market_detail_error = None;
         cx.notify();
+    }
+
+    /// 懒加载详情正文：已安装直接读磁盘，否则后台拉上游 `SKILL.md`。
+    ///
+    /// 拉到的正文同时写回市场条目（`detail_loaded = true`），安装时直接复用，
+    /// 同一技能不会再请求第二次。
+    pub(crate) fn load_market_detail_body(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.market_detail.clone() else {
+            return;
+        };
+        let Some(remote) = entry.remote.clone() else {
+            return;
+        };
+        if entry.detail_loaded || self.market_detail_loading {
+            return;
+        }
+        // 已安装：正文就在本地磁盘，不用再走网络
+        if self.is_skill_installed(&entry.skill.id) {
+            if let Some(body) = crate::skills_ops::read_body(&entry.skill.id) {
+                self.set_market_detail_body(&entry.skill.id, body);
+                cx.notify();
+                return;
+            }
+        }
+        self.market_detail_loading = true;
+        self.market_detail_error = None;
+        cx.notify();
+        let id = entry.skill.id.clone();
+        let (tx, rx) = flume::unbounded::<Result<String, String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::marketplace::fetch_remote_skill_body(
+                &remote.source,
+                &remote.id,
+            ));
+        });
+        cx.spawn(async move |weak, async_cx| {
+            let Ok(result) = rx.recv_async().await else {
+                return;
+            };
+            let _ = weak.update(async_cx, move |this, cx| {
+                this.market_detail_loading = false;
+                match result {
+                    Ok(body) => {
+                        // 上游正文可能带自己的 front-matter：只取正文，名称/简介沿用条目
+                        let parsed = crate::skills_ops::parse_md(&body, &id);
+                        this.set_market_detail_body(&id, parsed.detail);
+                    }
+                    Err(e) => this.market_detail_error = Some(e),
+                }
+                // 加载期间抽屉可能已切到另一个技能：补拉它（同 id 不重试，避免失败循环）
+                let current = this.market_detail.as_ref().map(|d| d.skill.id.clone());
+                if current.as_deref() != Some(id.as_str()) {
+                    this.load_market_detail_body(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 正文回填：抽屉正在展示同一技能时同步替换，并写回市场条目缓存。
+    fn set_market_detail_body(&mut self, id: &str, body: String) {
+        if let Some(d) = self.market_detail.as_mut() {
+            if d.skill.id == id {
+                d.skill.detail = body.clone();
+                d.detail_loaded = true;
+            }
+        }
+        for list in self.market_entries.values_mut() {
+            if let Some(e) = list.iter_mut().find(|e| e.skill.id == id) {
+                e.skill.detail = body.clone();
+                e.detail_loaded = true;
+            }
+        }
     }
 
     /// 是否已安装：内存标记 + 磁盘文件（文本技能以磁盘为准，卸载后不会再误报）。
@@ -1094,6 +1175,15 @@ impl AppState {
             self.install_skill(skill, cx);
             return;
         };
+        // 详情抽屉已拉过正文：直接落盘，不再重复请求上游
+        if entry.detail_loaded {
+            let s = entry.skill.clone();
+            self.install_skill(s.clone(), cx);
+            if let Some(role_idx) = bind_role {
+                self.bind_skill_to_role(role_idx, &s.id, &s.name, cx);
+            }
+            return;
+        }
         // skills.sh 条目：列表接口不带正文，安装时再去上游解析 SKILL.md
         if self.market_installing.is_some() {
             return;

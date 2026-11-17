@@ -144,7 +144,7 @@ impl AppState {
         }
         if skill.installs > 0 {
             badges = badges.child(badge(
-                &format!("{} 次阅读", skill.installs_label()),
+                &format!("累计安装 {}", skill.installs_label()),
                 theme::raised(),
                 theme::dim(),
             ));
@@ -157,6 +157,8 @@ impl AppState {
         panel = panel.child(badges);
 
         // ---- 正文（Markdown，复用对话区的渲染器） ----
+        // skills.sh 列表接口不带正文：抽屉打开的瞬间先显示「正在拉取」，
+        // 正文到达后由 state 回填并重绘（`detail_loaded`）。
         let mut body = div()
             .id("detail-body")
             .flex()
@@ -168,16 +170,38 @@ impl AppState {
             .py_4()
             .overflow_y_scroll()
             .text_size(px(13.0));
-        if skill.detail.trim().is_empty() {
+        let loading = self.market_detail_loading && !entry.detail_loaded;
+        if loading {
             body = body.child(
                 div()
                     .text_sm()
-                    .text_color(theme::dim())
-                    .child("上游没有提供详细说明"),
+                    .text_color(theme::muted())
+                    .child("⟳ 正在拉取上游说明…"),
             );
         } else {
-            for block in crate::markdown::parse(&preview_detail(&skill.detail)) {
-                body = body.child(crate::views::chat::markdown_block(block, avail));
+            if let Some(err) = self
+                .market_detail_error
+                .as_ref()
+                .filter(|_| !entry.detail_loaded)
+            {
+                body = body.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme::red())
+                        .child(SharedString::from(format!("说明拉取失败：{err}"))),
+                );
+            }
+            if skill.detail.trim().is_empty() {
+                body = body.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme::dim())
+                        .child("上游没有提供详细说明"),
+                );
+            } else {
+                for block in crate::markdown::parse(&preview_detail(&skill.detail)) {
+                    body = body.child(crate::views::chat::markdown_block(block, avail));
+                }
             }
         }
         if pending_here {
@@ -320,7 +344,7 @@ impl AppState {
             install_btn = install_btn
                 .bg(theme::raised())
                 .text_color(theme::muted())
-                .child("获取配置…");
+                .child("安装中…");
         } else {
             install_btn = install_btn
                 .bg(theme::accent())
@@ -383,6 +407,10 @@ impl AppState {
                     .left(px(0.0))
                     .size_full()
                     .bg(theme::with_alpha(0x000000, 0.35))
+                    // 必须 occlude：gpui 的滚轮命中拿的是「鼠标下所有 hitbox」，
+                    // 不阻断的话滚抽屉正文时，底层页面的 `skills-scroll`
+                    // 也会跟着滚，看起来像「整个窗口往下拉」。
+                    .occlude()
                     .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
                         this.close_market_detail(cx);
                     })),

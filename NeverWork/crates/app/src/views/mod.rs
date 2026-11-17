@@ -98,21 +98,6 @@ pub(crate) fn titlebar(
                 }))
                 .child(if state.focus_mode { "◧ 退出专注" } else { "◧ 专注" }),
         )
-        .child(
-            div()
-                .id("open-palette")
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .text_xs()
-                .text_color(theme::muted())
-                .cursor_pointer()
-                .hover(|d| d.bg(theme::raised()))
-                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
-                    this.toggle_palette(cx);
-                }))
-                .child("⌘K 命令"),
-        )
         .child(window_controls(maximized))
         .child(titlebar_hitboxes())
 }
@@ -212,10 +197,10 @@ fn icon_close() -> impl IntoElement {
 /// - 最右侧三个按钮注册为系统窗口控制区（最小化 / 最大化还原 / 关闭），
 ///   点击由系统直接执行，不需要 `on_click`。
 ///
-/// 右侧「专注 / ⌘K / 窗口按钮」这一段的宽度要预留出来不铺拖拽热区，
+/// 右侧「专注 / 窗口按钮」这一段的宽度要预留出来不铺拖拽热区，
 /// 否则 HTCAPTION 会先截走鼠标，这几个按钮点不动。
 fn titlebar_hitboxes() -> impl IntoElement {
-    const RIGHT_RESERVED: f32 = 360.0;
+    const RIGHT_RESERVED: f32 = 300.0;
     const BTN_W: f32 = 44.0;
     gpui::canvas(
         move |bounds, window, _cx| {

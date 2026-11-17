@@ -886,7 +886,7 @@ impl AppState {
                             .child(if installed {
                                 "✓ 已安装"
                             } else if busy_here {
-                                "获取配置…"
+                                "安装中…"
                             } else if remote_only {
                                 "仅远程"
                             } else if mcp {

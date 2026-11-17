@@ -31,6 +31,8 @@ pub enum Block {
 pub struct InlineSpan {
     pub text: String,
     pub kind: InlineKind,
+    /// `Link` 的目标地址；其他样式为 None。
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +44,8 @@ pub enum InlineKind {
     Code,
     /// `*斜体*` / `_斜体_`
     Italic,
+    /// `[文字](url)`
+    Link,
 }
 
 /// 解析整段 Markdown 文本。
@@ -190,6 +194,36 @@ pub fn inline_spans(text: &str) -> Vec<InlineSpan> {
     let mut i = 0usize;
 
     while i < chars.len() {
+        // 链接：[文字](url)。未闭合、空地址或带空白的都按普通文本处理，
+        // 不吞掉后面的字符。
+        if chars[i] == '[' {
+            if let Some(close) = find_char(&chars, i + 1, ']') {
+                if chars.get(close + 1) == Some(&'(') {
+                    if let Some(end) = find_char(&chars, close + 2, ')') {
+                        let label: String = chars[i + 1..close].iter().collect();
+                        let url: String = chars[close + 2..end].iter().collect();
+                        let url = url.trim().to_string();
+                        if !url.is_empty() && !url.chars().any(char::is_whitespace) {
+                            if !plain.is_empty() {
+                                spans.push(InlineSpan {
+                                    text: std::mem::take(&mut plain),
+                                    kind: InlineKind::Plain,
+                                    url: None,
+                                });
+                            }
+                            let text = if label.trim().is_empty() { url.clone() } else { label };
+                            spans.push(InlineSpan {
+                                text,
+                                kind: InlineKind::Link,
+                                url: Some(url),
+                            });
+                            i = end + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
         // 行内代码：`...`
         if chars[i] == '`' {
             if let Some(end) = find_char(&chars, i + 1, '`') {
@@ -198,9 +232,10 @@ pub fn inline_spans(text: &str) -> Vec<InlineSpan> {
                     spans.push(InlineSpan {
                         text: std::mem::take(&mut plain),
                         kind: InlineKind::Plain,
+                        url: None,
                     });
                 }
-                spans.push(InlineSpan { text: code, kind: InlineKind::Code });
+                spans.push(InlineSpan { text: code, kind: InlineKind::Code, url: None });
                 i = end + 1;
                 continue;
             }
@@ -217,9 +252,10 @@ pub fn inline_spans(text: &str) -> Vec<InlineSpan> {
                         spans.push(InlineSpan {
                             text: std::mem::take(&mut plain),
                             kind: InlineKind::Plain,
+                            url: None,
                         });
                     }
-                    spans.push(InlineSpan { text: italic, kind: InlineKind::Italic });
+                    spans.push(InlineSpan { text: italic, kind: InlineKind::Italic, url: None });
                     i = end + 1;
                     continue;
                 }
@@ -234,9 +270,10 @@ pub fn inline_spans(text: &str) -> Vec<InlineSpan> {
                         spans.push(InlineSpan {
                             text: std::mem::take(&mut plain),
                             kind: InlineKind::Plain,
+                            url: None,
                         });
                     }
-                    spans.push(InlineSpan { text: bold, kind: InlineKind::Bold });
+                    spans.push(InlineSpan { text: bold, kind: InlineKind::Bold, url: None });
                     i = end + 2;
                     continue;
                 }
@@ -247,10 +284,10 @@ pub fn inline_spans(text: &str) -> Vec<InlineSpan> {
     }
 
     if !plain.is_empty() {
-        spans.push(InlineSpan { text: plain, kind: InlineKind::Plain });
+        spans.push(InlineSpan { text: plain, kind: InlineKind::Plain, url: None });
     }
     if spans.is_empty() {
-        spans.push(InlineSpan { text: String::new(), kind: InlineKind::Plain });
+        spans.push(InlineSpan { text: String::new(), kind: InlineKind::Plain, url: None });
     }
     spans
 }
@@ -343,36 +380,36 @@ pub fn wrap_spans(spans: &[InlineSpan], max_px: f32, font_px: f32) -> Vec<Vec<In
     use crate::views::text_fit::char_width_mono as char_width;
 
     // 先摊平成「字符 + 样式」，跨片段折行才不会丢样式
-    let mut chars: Vec<(char, InlineKind)> = Vec::new();
+    let mut chars: Vec<(char, InlineKind, Option<String>)> = Vec::new();
     for span in spans {
         for ch in span.text.chars() {
-            chars.push((ch, span.kind));
+            chars.push((ch, span.kind, span.url.clone()));
         }
     }
     if chars.is_empty() {
-        return vec![vec![InlineSpan { text: String::new(), kind: InlineKind::Plain }]];
+        return vec![vec![InlineSpan { text: String::new(), kind: InlineKind::Plain, url: None }]];
     }
 
-    let mut lines: Vec<Vec<(char, InlineKind)>> = Vec::new();
-    let mut line: Vec<(char, InlineKind)> = Vec::new();
+    let mut lines: Vec<Vec<(char, InlineKind, Option<String>)>> = Vec::new();
+    let mut line: Vec<(char, InlineKind, Option<String>)> = Vec::new();
     let mut width = 0.0f32;
     // 当前行内最近一个空格的位置，用于优先在词间断行
     let mut last_space: Option<usize> = None;
 
-    for (ch, kind) in chars {
+    for (ch, kind, url) in chars {
         let w = char_width(ch, font_px);
         if width + w > max_px && !line.is_empty() {
             // 优先退到最近空格处，避免把 `Fn` 断成 `F` + `n`
             let cut = last_space.unwrap_or(line.len());
-            let rest: Vec<(char, InlineKind)> = line.split_off(cut);
+            let rest: Vec<(char, InlineKind, Option<String>)> = line.split_off(cut);
             // 断点处的空格留在上一行末尾会被吃掉，直接去掉行首空格更自然
             lines.push(std::mem::take(&mut line));
             line = rest;
-            if line.first().is_some_and(|(c, _)| *c == ' ') {
+            if line.first().is_some_and(|(c, _, _)| *c == ' ') {
                 line.remove(0);
             }
-            width = line.iter().map(|(c, _)| char_width(*c, font_px)).sum();
-            last_space = line.iter().rposition(|(c, _)| *c == ' ');
+            width = line.iter().map(|(c, _, _)| char_width(*c, font_px)).sum();
+            last_space = line.iter().rposition(|(c, _, _)| *c == ' ');
             if ch == ' ' && line.is_empty() {
                 continue;
             }
@@ -380,22 +417,22 @@ pub fn wrap_spans(spans: &[InlineSpan], max_px: f32, font_px: f32) -> Vec<Vec<In
         if ch == ' ' {
             last_space = Some(line.len());
         }
-        line.push((ch, kind));
+        line.push((ch, kind, url));
         width += w;
     }
     if !line.is_empty() {
         lines.push(line);
     }
 
-    // 再把每行合并回样式片段
+    // 再把每行合并回样式片段（同样式且同链接才合并）
     lines
         .into_iter()
         .map(|line| {
             let mut out: Vec<InlineSpan> = Vec::new();
-            for (ch, kind) in line {
+            for (ch, kind, url) in line {
                 match out.last_mut() {
-                    Some(last) if last.kind == kind => last.text.push(ch),
-                    _ => out.push(InlineSpan { text: ch.to_string(), kind }),
+                    Some(last) if last.kind == kind && last.url == url => last.text.push(ch),
+                    _ => out.push(InlineSpan { text: ch.to_string(), kind, url }),
                 }
             }
             out
@@ -577,11 +614,11 @@ mod tests {
         assert_eq!(
             spans,
             vec![
-                InlineSpan { text: "这是 ".into(), kind: InlineKind::Plain },
-                InlineSpan { text: "重点".into(), kind: InlineKind::Bold },
-                InlineSpan { text: " 和 ".into(), kind: InlineKind::Plain },
-                InlineSpan { text: "code".into(), kind: InlineKind::Code },
-                InlineSpan { text: " 结尾".into(), kind: InlineKind::Plain },
+                InlineSpan { text: "这是 ".into(), kind: InlineKind::Plain, url: None },
+                InlineSpan { text: "重点".into(), kind: InlineKind::Bold, url: None },
+                InlineSpan { text: " 和 ".into(), kind: InlineKind::Plain, url: None },
+                InlineSpan { text: "code".into(), kind: InlineKind::Code, url: None },
+                InlineSpan { text: " 结尾".into(), kind: InlineKind::Plain, url: None },
             ]
         );
     }
@@ -599,7 +636,7 @@ mod tests {
     fn bold_wins_over_italic() {
         // `**粗**` 必须整体是粗体，不能被单星号规则切成两个斜体
         let spans = inline_spans("**粗体**");
-        assert_eq!(spans, vec![InlineSpan { text: "粗体".into(), kind: InlineKind::Bold }]);
+        assert_eq!(spans, vec![InlineSpan { text: "粗体".into(), kind: InlineKind::Bold, url: None }]);
     }
 
     #[test]
@@ -608,6 +645,29 @@ mod tests {
         let spans = inline_spans("a **b");
         let joined: String = spans.iter().map(|s| s.text.clone()).collect();
         assert_eq!(joined, "a **b");
+    }
+
+    #[test]
+    fn link_spans_parse() {
+        // 技能说明里的 `[Conventional Commits 1.0.0](https://...)` 曾原样显示
+        let spans = inline_spans("见 [规范](https://example.com/a) 说明");
+        assert_eq!(
+            spans,
+            vec![
+                InlineSpan { text: "见 ".into(), kind: InlineKind::Plain, url: None },
+                InlineSpan {
+                    text: "规范".into(),
+                    kind: InlineKind::Link,
+                    url: Some("https://example.com/a".into()),
+                },
+                InlineSpan { text: " 说明".into(), kind: InlineKind::Plain, url: None },
+            ]
+        );
+        // 空地址按普通文本处理，不吞掉字符
+        let spans = inline_spans("[坏]( )尾");
+        let joined: String = spans.iter().map(|s| s.text.clone()).collect();
+        assert_eq!(joined, "[坏]( )尾");
+        assert!(spans.iter().all(|s| s.kind != InlineKind::Link));
     }
 
     #[test]

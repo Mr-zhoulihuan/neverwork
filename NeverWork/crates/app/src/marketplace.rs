@@ -145,6 +145,9 @@ pub struct MarketEntry {
     /// 上游详情页（详情抽屉里的「打开来源」）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
+    /// 正文是否已从上游懒加载（详情抽屉打开时拉起，安装时直接复用）。
+    #[serde(default)]
+    pub detail_loaded: bool,
 }
 
 impl MarketEntry {
@@ -156,6 +159,7 @@ impl MarketEntry {
             tags: Vec::new(),
             icon_url: None,
             source_url: None,
+            detail_loaded: false,
         }
     }
 }
@@ -544,6 +548,7 @@ pub fn parse_official(v: &serde_json::Value) -> Vec<MarketEntry> {
             tags,
             icon_url,
             source_url: Some(source_url),
+            detail_loaded: false,
         });
     }
     out
@@ -791,6 +796,7 @@ pub fn parse_tencent_list(html: &str) -> Vec<MarketEntry> {
             tags,
             icon_url,
             source_url: Some(format!("{TENCENT_DETAIL}{id}")),
+            detail_loaded: false,
         });
     }
     out
@@ -985,7 +991,7 @@ fn skills_sh_entry(source: &str, id: &str, name: &str, installs: u64, official: 
         name: clean_text(display, 40),
         summary: String::new(),
         detail: format!(
-            "## 来源\n\nskills.sh：{url}\n\n## 说明\n\n安装时会从上游解析 SKILL.md 正文并写入本地技能目录。\n"
+            "## 来源\n\nskills.sh：{url}\n\n## 说明\n\n正在从上游读取技能说明…若一直没出来，可点下方「打开来源」查看原文。\n"
         ),
         category: SkillCategory::Dev,
         author: clean_text(source, 40),
@@ -1011,6 +1017,7 @@ fn skills_sh_entry(source: &str, id: &str, name: &str, installs: u64, official: 
         tags,
         icon_url: github_owner(source).map(|o| github_avatar(&o)),
         source_url: Some(url),
+        detail_loaded: false,
     }
 }
 
@@ -1067,9 +1074,18 @@ pub fn fetch_remote_skill_body(source: &str, id: &str) -> Result<String, String>
 
 /// GitHub 仓库里的 SKILL.md。
 ///
-/// 先用 jsDelivr 目录接口定位路径（各仓库布局千差万别），定位不到再按
-/// 常见路径直试；分支依次 `main` / `master`。
+/// 先直试最常见布局 `skills/<id>/SKILL.md`（main 分支，CDN→raw），命中就省掉
+/// 「列仓库文件 + 分支回退」（实测 1.5s → 0.3s）；未命中再列目录定位任意布局，
+/// 仍定位不到按常见路径直试；分支依次 `main` / `master`。
 fn fetch_github_skill_md(agent: &ureq::Agent, source: &str, id: &str) -> Result<String, String> {
+    // 快速路径：最常见布局 skills/<id>/SKILL.md，main 分支走 CDN（国内可达性好）
+    // 再回退 raw，命中即返回，省掉「列目录 + 分支回退」（实测 1.5s → 0.3s）。
+    // 短超时：raw 在国内可能不通，不能让它拖满 25s。
+    let fast = agent_with_timeout(6);
+    let rel = format!("skills/{id}/SKILL.md");
+    if let Ok(t) = get_github_file(&fast, source, "main", &rel) {
+        return Ok(t);
+    }
     let mut last = String::new();
     for branch in ["main", "master"] {
         if let Ok(files) = list_repo_files(agent, source, branch) {
@@ -1516,6 +1532,7 @@ mod tests {
         assert_eq!(remote.source, "vercel-labs/skills");
         assert_eq!(remote.id, "find-skills");
         assert!(first.tags.is_empty(), "仓库名不当标签（避免筛选条爆炸）");
+        assert!(!first.detail_loaded, "正文要等打开详情/安装时再从上游拉");
         assert_eq!(
             first.source_url.as_deref(),
             Some("https://www.skills.sh/vercel-labs/skills/find-skills")
@@ -1540,6 +1557,7 @@ mod tests {
         assert_eq!(entries[0].skill.id, "ss.github-awesome-copilot.git-commit");
         assert_eq!(entries[0].skill.installs, 48_742);
         assert!(entries[0].tags.is_empty());
+        assert!(!entries[0].detail_loaded);
         assert_eq!(entries[1].skill.author, "open.feishu.cn");
         assert!(entries[1].tags.contains(&"官方".to_string()));
         assert!(entries[1].icon_url.is_none(), "站点源没有 GitHub 头像");
@@ -1629,12 +1647,14 @@ mod tests {
             obj.remove("tags");
             obj.remove("icon_url");
             obj.remove("source_url");
+            obj.remove("detail_loaded");
         }
         let entries: Vec<MarketEntry> = serde_json::from_value(v).unwrap();
         assert_eq!(entries.len(), 3);
         assert!(entries[0].tags.is_empty());
         assert!(entries[0].icon_url.is_none());
         assert!(entries[0].source_url.is_none());
+        assert!(!entries[0].detail_loaded);
     }
 
     #[test]
@@ -1687,20 +1707,23 @@ mod tests {
         assert!(home.iter().all(|e| e.skill.id.starts_with("ss.")));
         assert!(home.iter().all(|e| e.remote.is_some()));
 
+        let t = std::time::Instant::now();
         let found = search_skills_sh("git").expect("搜索接口应有结果");
-        eprintln!("skills.sh search git: {} entries", found.len());
+        eprintln!("skills.sh search git: {} entries in {:?}", found.len(), t.elapsed());
         assert!(found
             .iter()
             .any(|e| e.remote.as_ref().is_some_and(|r| r.id == "git-commit")));
 
+        let t = std::time::Instant::now();
         let body = fetch_remote_skill_body("github/awesome-copilot", "git-commit")
             .expect("GitHub 源应能定位并下载 SKILL.md");
-        eprintln!("github body {} bytes", body.len());
+        eprintln!("github body {} bytes in {:?}", body.len(), t.elapsed());
         assert!(body.to_lowercase().contains("git"));
 
+        let t = std::time::Instant::now();
         let site = fetch_remote_skill_body("open.feishu.cn", "lark-doc")
             .expect("站点源应走 well-known 约定");
-        eprintln!("feishu body {} bytes", site.len());
+        eprintln!("feishu body {} bytes in {:?}", site.len(), t.elapsed());
         assert!(!site.trim().is_empty());
     }
 

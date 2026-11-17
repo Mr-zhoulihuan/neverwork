@@ -1,5 +1,6 @@
 //! NeverWork 应用入口。
 
+mod assets;
 mod filesystem;
 mod brackets;
 mod find;
@@ -116,44 +117,48 @@ fn main() {
     // 统一入口：团队页复用主界面里的可交互团队编辑器，不再使用静态展示页。
     let start_team = page == "team";
 
-    Application::new().run(move |cx: &mut App| {
-        let bounds = window_bounds(cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                // 最小尺寸：再小布局会碎成一团，也没有继续拖的意义。
-                window_min_size: Some(size(px(660.0), px(440.0))),
-                // 必须显式声明透明标题栏：gpui 的默认值是 `appears_transparent: false`，
-                // 那样 Windows 会在窗口最上面叠一条系统原生标题栏（浅色横条 + 左上角
-                // 默认白色窗口图标，右键弹「还原/移动/关闭」系统菜单）。界面本身已经
-                // 自绘标题栏，拖动与最小化/最大化/关闭由 `views::titlebar` 注册的热区接管。
-                titlebar: Some(gpui::TitlebarOptions {
-                    title: Some("NeverWork".into()),
-                    appears_transparent: true,
-                    traffic_light_position: None,
-                }),
-                ..Default::default()
-            },
-            move |window, cx| {
-                // 只在显式要求时最大化。之前在高 DPI 下默认自动最大化，
-                // 会让窗口启动就贴满整屏、且无法用「还原」回到正常大小，
-                // 观感上就是「一启动就超出屏幕」。
-                if std::env::var("NW_MAXIMIZE")
-                    .map(|v| v != "0")
-                    .unwrap_or(false)
-                {
-                    window.zoom_window();
-                }
-                if start_team {
-                    std::env::set_var("NW_VIEW", "team");
-                }
-                let main = cx.new(AppState::new);
-                cx.new(|_| Root::Main(main))
-            },
-        )
-        .expect("无法打开主窗口");
+    // `.with_assets`：`svg()` 元素要通过资源源取文件；默认的 `()` 资源源永远返回
+    // None，图标栏的矢量图标会直接不显示。
+    Application::new()
+        .with_assets(assets::EmbeddedAssets)
+        .run(move |cx: &mut App| {
+            let bounds = window_bounds(cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // 最小尺寸：再小布局会碎成一团，也没有继续拖的意义。
+                    window_min_size: Some(size(px(660.0), px(440.0))),
+                    // 必须显式声明透明标题栏：gpui 的默认值是 `appears_transparent: false`，
+                    // 那样 Windows 会在窗口最上面叠一条系统原生标题栏（浅色横条 + 左上角
+                    // 默认白色窗口图标，右键弹「还原/移动/关闭」系统菜单）。界面本身已经
+                    // 自绘标题栏，拖动与最小化/最大化/关闭由 `views::titlebar` 注册的热区接管。
+                    titlebar: Some(gpui::TitlebarOptions {
+                        title: Some("NeverWork".into()),
+                        appears_transparent: true,
+                        traffic_light_position: None,
+                    }),
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    // 只在显式要求时最大化。之前在高 DPI 下默认自动最大化，
+                    // 会让窗口启动就贴满整屏、且无法用「还原」回到正常大小，
+                    // 观感上就是「一启动就超出屏幕」。
+                    if std::env::var("NW_MAXIMIZE")
+                        .map(|v| v != "0")
+                        .unwrap_or(false)
+                    {
+                        window.zoom_window();
+                    }
+                    if start_team {
+                        std::env::set_var("NW_VIEW", "team");
+                    }
+                    let main = cx.new(AppState::new);
+                    cx.new(|_| Root::Main(main))
+                },
+            )
+            .expect("无法打开主窗口");
 
-        cx.activate(true);
-        let _ = (theme::SIDEBAR_W, theme::FILES_W);
-    });
+            cx.activate(true);
+            let _ = (theme::SIDEBAR_W, theme::FILES_W);
+        });
 }

@@ -37,9 +37,10 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - **折叠不重排文本**：只跳过隐藏行，真实行号映射回光标/选区。**`multi_patch` 必须先全量校验再写**，失败回滚。
 - **文字截断别只靠 `.truncate()`**：gpui 首帧没确定宽度就不生效，`flex_1` 嵌套下会硬裁且无省略号。要省略号用 `views::text_fit::fit_text(text, 预算px, 字号)` + `.whitespace_nowrap()`。
 - **布局优先级**：中栏 > 会话栏 > 右栏。窄窗口把右栏收成 16px 窄条（<1080），极窄（<620）才隐藏会话列表，图标栏永远保留。**设置/技能/编辑器页收起会话列表**（编辑器保留右栏文件树）；`CenterView::Team` 照常显示。会话列表本身也可手动收起：会话栏右边缘中部的「«」把手（id `collapse-session`，绝对定位不占列表高度）收起成 16px 窄条，再点窄条中部的「»」（`expand-session`）展开，`session_collapsed` 是内存态、默认展开，与右栏 `right_collapsed` 同构；`left_w` 计算必须把收起态算成 `RAIL_W + 16`。宽度用「可见尺寸」（见环境特性）。
-- 图标栏只有对话/团队/技能（主组垂直居中）+ 底部一个设置入口；编辑器页靠右栏文件树打开文件进入，不占图标；命令面板走标题栏「⌘K」与会话面板「⋯」入口。
+- 图标栏只有对话/团队/技能（主组垂直居中）+ 底部一个设置入口；编辑器页靠右栏文件树打开文件进入，不占图标；命令面板只走会话面板「⋯」入口（标题栏不再放 ⌘K 按钮）。三个主图标是手绘 SVG（`crates/app/assets/icons/rail-*.svg`，样式参考 `pic/minimal-dark-mode-sidebar-icon-1.jpg`），经 `src/assets.rs` 的 `EmbeddedAssets`（`Application::new().with_assets(...)`）内嵌，用 `gpui::svg().path("icons/…").text_color(...)` 按 alpha 蒙版上色、随主题与悬停变色——不要写死颜色，也不要退回字符图标（设置 ⚙ 仍是字符版 `rail_button`）；外观验收图 `pic/rail-icons.png`。
+- **弹层遮罩必须 `.occlude()`**：gpui 的滚轮命中取「鼠标下所有 hitbox」（`should_handle_scroll`），遮罩不 occlude 时滚弹层内容会同时滚背后的滚动容器（技能详情抽屉踩过：滚正文整页跟着下移）。palette / session_menu / workspace_picker / new_session / market_detail 五个遮罩都走 occlude。
 - **窗口是无边框自绘的**（`main.rs` 里 `titlebar: Some(TitlebarOptions { appears_transparent: true, .. })`）。**别退回 `WindowOptions::default()` 的 `appears_transparent: false`**——那样 Windows 会在最上面叠一条系统原生标题栏（浅色横条 + 左上角白色默认窗口图标 + 右键「还原/移动/关闭」菜单）。
-- 标题栏拖动 / 最小化 / 最大化(还原) / 关闭由 `views::titlebar_hitboxes`（绝对定位 canvas）注册系统热区 `Drag`/`Min`/`Max`/`Close` 处理，点击不经过 `on_click`；右侧 360px 不铺 Drag 热区，否则 HTCAPTION 会吞掉「专注/⌘K/窗口按钮」的点击。
+- 标题栏拖动 / 最小化 / 最大化(还原) / 关闭由 `views::titlebar_hitboxes`（绝对定位 canvas）注册系统热区 `Drag`/`Min`/`Max`/`Close` 处理，点击不经过 `on_click`；右侧 300px 不铺 Drag 热区，否则 HTCAPTION 会吞掉「专注/窗口按钮」的点击。
 - 窗口按钮图标必须用 `div` 画（横线/方框/错位双框），**不要用 `□`/`❐` 字符**：字体回退后两者几乎一样，最大化前后看不出区别。最大化状态在 `render` 里用 `window.is_maximized()` 传给 `titlebar`，窗口尺寸变化会触发重绘。
 
 ## 左侧栏
@@ -82,7 +83,7 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - `Supervisor` 是真分派（Lead 逐轮决定下一角色）。Team 开工具走 `spawn_agents_chain`（串行、每角色带工具、与单 Agent 同一套历史）；关工具走 `run_team_with_history`（纯文本、不传 tools，工具历史由 `flatten_tool_history` 压平，否则 Anthropic 空正文整轮 400）。
 - Provider：OpenAI 兼容 / Anthropic / Gemini 原生；Gemini 工具调用未接。模型列表按协议拉（GET /models），失败回退手输。
 - **Agent 联网**：`web_search`（必应 RSS）+ `web_fetch`（HTML→纯文本，去 script/style/head，中文按 Content-Type charset 解码）；两者默认常开、只读不审批。
-- 技能市场**只接真实源**：MCP 官方 Registry / 腾讯云 MCP 广场（国内直达）/ skills.sh（Skill 页唯一来源：首页热榜 + 搜索 API ≥2 字符，400ms 防抖；安装时解析上游真实 SKILL.md，GitHub 源走 jsDelivr，站点源走 `.well-known/agent-skills`），热榜缓存在 `~/.neverwork/marketplace.json`（搜索结果只进内存）；`skills_catalog.rs` 仅保留可离线验证管道的真实 npm 内建项，**不要再加虚构条目**。MCP 子进程默认注入 npmmirror / 清华 PyPI 镜像（settings.mcp_mirror 可关）。
+- 技能市场**只接真实源**：MCP 官方 Registry / 腾讯云 MCP 广场（国内直达）/ skills.sh（Skill 页唯一来源：首页热榜 + 搜索 API ≥2 字符，400ms 防抖；安装时解析上游真实 SKILL.md，GitHub 源先直试 `skills/<id>/SKILL.md` 再回退 jsDelivr，站点源走 `.well-known/agent-skills`；搜索 API 无 description，详情抽屉打开时才懒加载上游正文回填（`detail_loaded` 标记，安装时复用不二次请求）；正文/回答的 Markdown 链接渲染为可点击 span 走 `App::open_url`），热榜缓存在 `~/.neverwork/marketplace.json`（搜索结果只进内存，启动时缓存 10 分钟内不自动重拉）；`skills_catalog.rs` 仅保留可离线验证管道的真实 npm 内建项，**不要再加虚构条目**。MCP 子进程默认注入 npmmirror / 清华 PyPI 镜像（settings.mcp_mirror 可关）。
 - 无 LSP / tree-sitter / 终端 / 全局搜索。Git 有暂存/提交/丢弃/切分支，**无 push/pull、无冲突合并**。单文件 512KB、文件树 8000 节点上限。
 - **远程 SSH 工作区**（`core/src/ssh.rs` + `ToolContext` 后端化）：连接串 `ssh://[user@]host[:port]/abs/path`（输入框也收 `user@host:/path`），认证优先系统 `ssh` 的密钥/agent；只在密码登录的机器可在连接行填密码。**密码只在内存**（`AppState.remote_pw`），经 `SSH_ASKPASS` 回调应用本体（`main.rs` 最先处理 `NW_ASKPASS_MODE`），不得写 settings/日志/命令行；`RemoteAuth` 手写 `Debug` 打码，别给它 derive。会话键是连接串。远程工具路径一律相对工作区根，写操作仍逐次审批；远程 `search_code` 返回 UNSUPPORTED，提示词引导用 `search_files`。**远程树/读文件/保存都是后台线程 + `remote_gen` 代次丢弃迟到结果**；`refresh_tree`/`collapse_all`/`open_remote_file`/`save_file`/`open_file_name` 都有 `self.remote` 分支。连接串与密码共用 `ws_focus`/`InputTarget::Workspace`，靠 `ws_pw_focus` 在 `buffer()`/`active_buffer()` 里分流，加新输入框要同步这三处。改这些不要**把 `~` 展开结果写回 `SshTarget`**（会话键会变，旧会话像丢了）；Git 面板、watcher、终端不做。
 

@@ -97,12 +97,30 @@ impl AppState {
         // 不贴着 logo，也不会被底部入口拉起。
         rail = rail
             .child(div().flex_1())
-            .child(self.rail_button("rail-chat", "◐", is_chat, RailAction::Chat, cx))
-            .child(self.rail_button("rail-team", "◈", is_team, RailAction::Team, cx))
-            .child(self.rail_button("rail-skills", "✦", is_skills, RailAction::Skills, cx))
+            .child(self.rail_icon_button(
+                "rail-chat",
+                "icons/rail-chat.svg",
+                is_chat,
+                RailAction::Chat,
+                cx,
+            ))
+            .child(self.rail_icon_button(
+                "rail-team",
+                "icons/rail-team.svg",
+                is_team,
+                RailAction::Team,
+                cx,
+            ))
+            .child(self.rail_icon_button(
+                "rail-skills",
+                "icons/rail-skills.svg",
+                is_skills,
+                RailAction::Skills,
+                cx,
+            ))
             .child(div().flex_1());
 
-        // 底部固定入口：只剩设置（命令面板走标题栏「⌘K」与会话面板「⋯」）
+        // 底部固定入口：只剩设置（命令面板走会话面板「⋯」）
         rail = rail.child(self.rail_button(
             "rail-settings",
             "⚙",
@@ -114,7 +132,41 @@ impl AppState {
         rail
     }
 
-    /// 图标栏按钮：40px 方形、选中时亮底白图标（对齐参考稿的方形选中态）。
+    /// 图标栏矢量按钮：40px 方形，选中时亮底，图标悬停变亮。
+    ///
+    /// 图标走 gpui 资源系统（[`crate::assets::EmbeddedAssets`] 内嵌 SVG），
+    /// 渲染时只取蒙版，颜色由 `text_color` 决定——深浅主题自动适配。
+    fn rail_icon_button(
+        &self,
+        id: &'static str,
+        icon: &'static str,
+        active: bool,
+        action: RailAction,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(40.0))
+            .rounded_xl()
+            .cursor_pointer()
+            .when(active, |d| d.bg(theme::raised()))
+            .when(!active, |d| d.hover(|d| d.bg(theme::panel())))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                this.run_rail(action, cx);
+            }))
+            .child(
+                gpui::svg()
+                    .path(icon)
+                    .size(px(20.0))
+                    .text_color(if active { theme::fg() } else { theme::muted() })
+                    .when(!active, |s| s.hover(|s| s.text_color(theme::fg()))),
+            )
+    }
+
+    /// 图标栏字符按钮：仅设置入口还在用（⚙）。
     fn rail_button(
         &self,
         id: &'static str,

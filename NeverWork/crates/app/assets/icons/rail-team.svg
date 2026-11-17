@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- 三节点连线：上 1、下 2，中间汇成 Y -->
+  <circle cx="12" cy="5.7" r="2.4"/>
+  <circle cx="5.7" cy="17.6" r="2.4"/>
+  <circle cx="18.3" cy="17.6" r="2.4"/>
+  <path d="M12 8.1v2.6M12 10.7L6.7 15.5M12 10.7l5.3 4.8"/>
+</svg>

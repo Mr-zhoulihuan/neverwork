@@ -393,6 +393,10 @@ pub struct AppState {
     pub skill_source: MarketSource,
     /// 详情抽屉里的条目；`None` 表示抽屉关闭。
     pub market_detail: Option<MarketEntry>,
+    /// 详情抽屉正文是否正在从上游拉取（打开抽屉时懒加载）。
+    pub market_detail_loading: bool,
+    /// 详情抽屉正文拉取失败的原因。
+    pub market_detail_error: Option<String>,
     /// 详情抽屉从团队角色面板打开时要绑定的角色下标。
     /// `Some` 时底栏主按钮是「绑定到角色」而不是安装 / 卸载。
     pub market_detail_role: Option<usize>,
@@ -959,6 +963,8 @@ impl AppState {
             mcp_source: MarketSource::Official,
             skill_source: MarketSource::SkillsSh,
             market_detail: None,
+            market_detail_loading: false,
+            market_detail_error: None,
             market_detail_role: None,
             market_entries,
             market_fetched_at,
@@ -1120,12 +1126,23 @@ impl AppState {
                     .find(|e| e.skill.id == id)
                     .cloned()
             };
+            // 与点卡片打开一致：远程条目要拉真实正文
+            if me.market_detail.is_some() {
+                me.load_market_detail_body(cx);
+            }
         }
-        // 启动即刷新当前来源；NW_MARKET_NO_REFRESH=1 时只读缓存（离线验收用）。
-        if !std::env::var("NW_MARKET_NO_REFRESH")
+        // 启动即刷新当前来源；缓存足够新鲜（10 分钟）时跳过，避免每次打开
+        // 技能页都等上游首页（实测 1~5s）；刷新按钮仍强制拉。
+        // NW_MARKET_NO_REFRESH=1 时只读缓存（离线验收用）。
+        let no_refresh = std::env::var("NW_MARKET_NO_REFRESH")
             .map(|v| v == "1")
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        let fresh = me
+            .market_fetched_at
+            .get(&me.market_source)
+            .map(|at| neverwork_core::config::now_secs().saturating_sub(*at) < 600)
+            .unwrap_or(false);
+        if !no_refresh && !fresh {
             me.refresh_market(cx);
         }
         // 验证用：预置多光标（逗号分隔的字节偏移），便于截图确认渲染。

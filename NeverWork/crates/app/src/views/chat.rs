@@ -2012,6 +2012,34 @@ fn inline_row(text: &str, avail: f32, font_px: f32) -> gpui::AnyElement {
                     .italic()
                     .text_color(theme::muted())
                     .child(SharedString::from(span.text)),
+                // 链接：accent 色可点击，走系统浏览器打开。
+                // `on_click` 只挂在 Stateful 元素上，所以内层 div 先给一个
+                // 按 url+文字哈希的稳定 id（重复链接共享 id 也无副作用）；
+                // 外层包一层普通 div，让 match 各分支类型一致。
+                InlineKind::Link => {
+                    let url = span.url.clone();
+                    let id = {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        span.text.hash(&mut h);
+                        url.hash(&mut h);
+                        SharedString::from(format!("md-link-{:x}", h.finish()))
+                    };
+                    div().child(
+                        div()
+                            .id(id)
+                            .text_color(theme::accent())
+                            .cursor_pointer()
+                            .when_some(url, |d, u| {
+                                d.on_click(
+                                    move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+                                        cx.open_url(&u);
+                                    },
+                                )
+                            })
+                            .child(SharedString::from(span.text)),
+                    )
+                }
             };
             // 不参与收缩：折行已在上面按可用宽度算好，
             // 这里再让 span 被压窄只会把它自己的文字挤成竖排。
