@@ -299,6 +299,8 @@ pub enum AgentEvent {
     /// 开始执行一个工具（已决定执行或等待批准）。
     ToolStarted {
         call: ToolCall,
+        /// 该角色内的第几次模型调用（0 起），界面用它统计「思考了几轮」。
+        round: usize,
         requires_approval: bool,
         /// 写操作的 diff 预览，只读工具为空。
         preview: Vec<DiffLine>,
@@ -705,6 +707,7 @@ fn run_agent_impl(
             };
             emit(AgentEvent::ToolStarted {
                 call: call.clone(),
+                round,
                 requires_approval: need_approval,
                 preview: preview.clone(),
             });
@@ -880,8 +883,14 @@ pub(crate) fn build_system_prompt(persona: &str, ctx: &ToolContext) -> String {
     } else {
         persona
     };
-    let root_p = ctx.root.display();
-    let (where_line, path_hint) = if ctx.is_unrestricted() {
+    let root_p = ctx.describe_root();
+    let (where_line, path_hint) = if ctx.is_remote() {
+        (
+            format!("当前是远程工作区：{root_p}（通过 ssh 操作远端文件）。"),
+            "路径一律用相对远程工作区根的路径；工具直接作用于远端文件。\
+             远程暂不支持 search_code，需要定位时用 search_files 按子串搜索。",
+        )
+    } else if ctx.is_unrestricted() {
         (
             "当前没有指定工作区（用户还没选文件夹）。".to_string(),
             "当前没有指定工作区：相对路径以用户主目录为基准，也可以直接使用绝对路径。",
@@ -907,6 +916,8 @@ pub(crate) fn build_system_prompt(persona: &str, ctx: &ToolContext) -> String {
 这类问题**不要**调用任何工具，不要读文件、不要列目录。
 凭你已有的知识直接答；确实需要看代码才能回答时才读。
 不确定的事实就说不知道，不要编造，也不要靠翻文件掩盖不确定性。
+例外：需要**最新或外部**信息（版本号、发布说明、新闻、官方文档原文）时，
+用 web_search 查证，不要凭记忆猜。
 
 **B. 在本工作区里动手** —— 才使用工具。
 包括：读某个真实文件、查找某段代码在哪、修改/新建/删除文件、重构。
@@ -929,6 +940,10 @@ pub(crate) fn build_system_prompt(persona: &str, ctx: &ToolContext) -> String {
 - apply_patch(path, old_string, new_string)：把一段**唯一存在**的原文替换掉
 - multi_patch(edits[])：一次改多个文件，整批当作事务（全部校验通过才写，失败回滚），
   只弹一次审批。跨文件重构（改签名、重命名、批量替换）优先用它
+- web_search(query, count?)：联网搜索（必应），返回标题/链接/摘要。
+  需要最新信息、外部资料、官方文档、报错出处时用；不要拿旧记忆当事实。
+- web_fetch(url, max_chars?)：抓网页正文（http/https，默认 8000 字）。
+  拿到搜索结果后挑最相关的一两页读全文，不要把所有链接都抓一遍
 
 ## 工作方式
 

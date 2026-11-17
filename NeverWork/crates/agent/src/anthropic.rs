@@ -32,6 +32,56 @@ struct WireRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
     messages: Vec<WireMessage<'a>>,
+    /// 思考等级；`Auto` 时不发。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingCfg>,
+}
+
+#[derive(Serialize)]
+struct ThinkingCfg {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    budget_tokens: u32,
+}
+
+impl AnthropicProvider {
+    /// 拼请求体。开思考时有两个硬约束（不满足直接 400）：
+    /// - `temperature` 必须是 1
+    /// - `max_tokens` 必须大于 `budget_tokens`
+    fn wire<'a>(&'a self, messages: &'a [ChatMessage]) -> WireRequest<'a> {
+        let system: Option<String> = messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.content.clone())
+            .reduce(|a, b| format!("{a}\n{b}"));
+        let budget = self.config.thinking.budget();
+        WireRequest {
+            model: &self.config.model,
+            max_tokens: budget.map_or(4096, |b| b + 4096),
+            stream: true,
+            temperature: if budget.is_some() {
+                1.0
+            } else {
+                self.config.temperature.clamp(0.0, 2.0)
+            },
+            system,
+            messages: messages
+                .iter()
+                .filter(|m| m.role != Role::System)
+                .map(|m| WireMessage {
+                    role: match m.role {
+                        Role::Assistant => "assistant",
+                        _ => "user",
+                    },
+                    content: &m.content,
+                })
+                .collect(),
+            thinking: budget.map(|b| ThinkingCfg {
+                kind: "enabled",
+                budget_tokens: b,
+            }),
+        }
+    }
 }
 
 impl LlmProvider for AnthropicProvider {
@@ -48,29 +98,7 @@ impl LlmProvider for AnthropicProvider {
             "{}/messages",
             self.config.base_url.trim_end_matches('/')
         );
-        let system: Option<String> = messages
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .map(|m| m.content.clone())
-            .reduce(|a, b| format!("{a}\n{b}"));
-        let body = WireRequest {
-            model: &self.config.model,
-            max_tokens: 4096,
-            stream: true,
-            temperature: self.config.temperature.clamp(0.0, 2.0),
-            system,
-            messages: messages
-                .iter()
-                .filter(|m| m.role != Role::System)
-                .map(|m| WireMessage {
-                    role: match m.role {
-                        Role::Assistant => "assistant",
-                        _ => "user",
-                    },
-                    content: &m.content,
-                })
-                .collect(),
-        };
+        let body = self.wire(messages);
 
         let resp = match ureq::post(&url)
             .header("x-api-key", &self.config.api_key)
@@ -150,5 +178,45 @@ impl LlmProvider for AnthropicProvider {
         }
         on_event(StreamEvent::Done);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neverwork_core::ThinkingLevel;
+
+    fn cfg(thinking: ThinkingLevel) -> ProviderConfig {
+        ProviderConfig {
+            api_key: "k".into(),
+            base_url: "https://api.anthropic.com/v1".into(),
+            model: "claude-sonnet-4-5".into(),
+            temperature: 0.7,
+            thinking,
+        }
+    }
+
+    fn body(thinking: ThinkingLevel) -> Value {
+        serde_json::to_value(AnthropicProvider::new(cfg(thinking)).wire(&[ChatMessage::user("hi")]))
+            .unwrap()
+    }
+
+    #[test]
+    fn auto_thinking_sends_nothing() {
+        let v = body(ThinkingLevel::Auto);
+        assert!(v.get("thinking").is_none());
+        assert_eq!(v["max_tokens"], 4096);
+        assert!((v["temperature"].as_f64().unwrap() - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn thinking_enabled_respects_anthropic_constraints() {
+        let v = body(ThinkingLevel::High);
+        assert_eq!(v["thinking"]["type"], "enabled");
+        let budget = v["thinking"]["budget_tokens"].as_u64().unwrap();
+        assert_eq!(budget, 16384);
+        // 开思考时 temperature 必须为 1，max_tokens 必须大于 budget
+        assert_eq!(v["temperature"], 1.0);
+        assert!(v["max_tokens"].as_u64().unwrap() > budget);
     }
 }

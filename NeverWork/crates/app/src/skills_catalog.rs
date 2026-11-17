@@ -1,7 +1,7 @@
 //! 本地内建技能（不再有虚构目录）。
 //!
 //! 市场条目一律来自真实数据源（见 [`crate::marketplace`]）：MCP 官方 Registry、
-//! 腾讯云 MCP 广场、GitHub 技能仓库。这里只保留**真实存在**的内建示例，
+//! 腾讯云 MCP 广场、skills.sh。这里只保留**真实存在**的内建示例，
 //! 用于离线验证 MCP 管道（npm 包 `@modelcontextprotocol/server-everything` 真实存在）。
 
 use neverwork_core::{McpServerConfig, Skill, SkillCategory, SkillKind};

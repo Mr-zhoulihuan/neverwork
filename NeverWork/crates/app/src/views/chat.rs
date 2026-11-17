@@ -8,6 +8,9 @@ use crate::views::text_fit::fit_text;
 /// 估窄了行会顶出气泡右侧被父容器裁掉半截。
 const BODY_PX: f32 = 16.0;
 
+/// 思考档位滑杆的格子宽度（4 档 × 64px，不依赖百分比计算）。
+const THINK_CELL: f32 = 64.0;
+
 /// 列表标记（`•` / `1.`）连同 `gap_2` 占掉的横向宽度。
 fn marker_w(label: &str) -> f32 {
     label.chars().count() as f32 * BODY_PX * crate::views::text_fit::MONO_ASCII_RATIO + 8.0
@@ -327,7 +330,7 @@ impl AppState {
 
     pub(crate) fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = self.chat.text().is_empty();
-        let has_open_file = self.open_path.is_some();
+        let has_open_file = self.open_path.is_some() || self.remote_open_rel.is_some();
 
         let mut col = div()
             .px_6()
@@ -490,7 +493,7 @@ impl AppState {
                 window.focus(&this.focus_handle);
                 cx.notify();
             }))
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
                 this.on_chat_key(ev, cx);
             }))
             // 1x1 画布只为记录这块区域的真实坐标（渲染期拿 bounds 的唯一可靠时机）。
@@ -558,94 +561,44 @@ impl AppState {
             }
         }
 
+        // ===== 思考等级面板：内联在输入框上方（与模型选择器同一种做法，不做浮层）=====
+        if self.thinking_panel {
+            col = col.child(self.thinking_level_panel(cx));
+        }
+
+        // ===== 输入框：大圆角容器 + 左下「＋」+ 右下思考等级 =====
+        let mut input_box = div()
+            .rounded_lg()
+            .border_1()
+            .border_color(if self.streaming {
+                theme::accent_line()
+            } else {
+                theme::border()
+            })
+            .bg(theme::panel())
+            .px_4()
+            .pt_3()
+            .pb_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(input_el);
+
+        // 「＋」菜单：引用文件 / 工具开关 / 清空。
+        // 比在底栏摆一排文字按钮干净，也不会挤压窄窗口下的输入区。
+        if self.composer_menu {
+            input_box = input_box.child(self.composer_menu_row(has_open_file, cx));
+        }
+
         col = col.child(
-            div()
-                .rounded_lg()
-                .border_1()
-                .border_color(if self.streaming {
-                    theme::accent_line()
-                } else {
-                    theme::border()
-                })
-                .bg(theme::panel())
-                .px_4()
-                .pt_3()
-                .pb_3()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(input_el)
+            input_box
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap_2()
-                        // 这几个按钮之前只有样式、点了没反应，现在都是真功能。
-                        .child(
-                            div()
-                                .id("composer-ref")
-                                .px_2()
-                                .py_0p5()
-                                .rounded_sm()
-                                .text_xs()
-                                .cursor_pointer()
-                                .when(has_open_file, |d| {
-                                    d.text_color(theme::muted()).hover(|d| d.bg(theme::raised()))
-                                })
-                                .when(!has_open_file, |d| d.text_color(theme::dim()))
-                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                    this.insert_file_reference(cx);
-                                }))
-                                .child("@ 引用文件"),
-                        )
-                        .child(
-                            div()
-                                .id("toggle-tools")
-                                .px_2()
-                                .py_0p5()
-                                .rounded_sm()
-                                .text_xs()
-                                .cursor_pointer()
-                                .when(self.tools_enabled, |d| {
-                                    d.bg(theme::accent_soft())
-                                        .text_color(theme::accent())
-                                        .hover(|d| d.opacity(0.85))
-                                })
-                                .when(!self.tools_enabled, |d| {
-                                    d.text_color(theme::dim()).hover(|d| d.bg(theme::raised()))
-                                })
-                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                    this.tools_enabled = !this.tools_enabled;
-                                    this.notice = Some(if this.tools_enabled {
-                                        "已开启工具：Agent 可以读文件、并在你批准后改文件".into()
-                                    } else {
-                                        "已关闭工具：只做纯对话".into()
-                                    });
-                                    cx.notify();
-                                }))
-                                .child(if self.tools_enabled {
-                                    "⚒ 工具已开"
-                                } else {
-                                    "⚒ 工具已关"
-                                }),
-                        )
-                        .child(
-                            div()
-                                .id("composer-clear")
-                                .px_2()
-                                .py_0p5()
-                                .rounded_sm()
-                                .text_xs()
-                                .text_color(theme::muted())
-                                .cursor_pointer()
-                                .hover(|d| d.bg(theme::raised()))
-                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                    this.chat.reset("");
-                                    this.notice = None;
-                                    cx.notify();
-                                }))
-                                .child("清空"),
-                        )
+                        // 左：＋ 菜单（引用文件 / 工具 / 清空）
+                        .child(self.composer_plus_button(cx))
                         .child(div().flex_1())
                         // 发送走 Enter，不再占一个按钮。
                         // 只有生成中才出现「停止」，否则没有任何中断入口。
@@ -670,8 +623,8 @@ impl AppState {
                                     .child("■ 停止"),
                             )
                         })
-                        // 生成中已经有「停止」按钮和顶部状态，这里不再重复提示
-                        .when(!self.streaming, |d| {
+                        // 生成中已经有「停止」按钮和顶部状态，这里不再重复提示。
+                        .when(!self.streaming && self.layout_w.get() >= 980.0, |d| {
                             d.child(
                                 div()
                                     .text_xs()
@@ -687,14 +640,470 @@ impl AppState {
 
     /// 把当前打开的文件名以 @ 形式插入输入框。
     pub(crate) fn insert_file_reference(&mut self, cx: &mut Context<Self>) {
-        let Some(name) = self.open_path.as_ref().and_then(|p| p.file_name()) else {
+        if self.open_path.is_none() && self.remote_open_rel.is_none() {
             self.notice = Some("还没有打开文件".into());
             cx.notify();
             return;
-        };
-        let name = name.to_string_lossy().to_string();
+        }
+        let name = self.open_file_name();
         self.switch_input_target(InputTarget::Chat);
         self.chat.insert(&format!("@{name} "));
+        cx.notify();
+    }
+
+    /// 输入框左下角的圆形「＋」：展开/收起工具菜单。
+    fn composer_plus_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.composer_menu;
+        div()
+            .id("composer-plus")
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(26.0))
+            .flex_shrink_0()
+            .rounded_full()
+            .border_1()
+            .border_color(if open {
+                theme::accent_line()
+            } else {
+                theme::border()
+            })
+            .bg(if open { theme::accent_soft() } else { theme::raised() })
+            .text_sm()
+            .text_color(if open { theme::accent() } else { theme::muted() })
+            .cursor_pointer()
+            .hover(|d| d.border_color(theme::accent_line()).text_color(theme::fg()))
+            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                this.composer_menu = !this.composer_menu;
+                // 两个面板互斥，否则叠在一起把输入框顶得很高
+                if this.composer_menu {
+                    this.thinking_panel = false;
+                    this.thinking_dragging = false;
+                }
+                cx.notify();
+            }))
+            .child(if open { "−" } else { "+" })
+    }
+
+    /// 「＋」展开的那一行：引用文件 / 工具开关 / 思考档位 / 清空。
+    fn composer_menu_row(
+        &self,
+        has_open_file: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tools_on = self.tools_enabled;
+        let level = self.thinking_level();
+        let thinking_on = !level.is_auto();
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_wrap()
+            // 引用当前打开的文件
+            .child(
+                div()
+                    .id("composer-ref")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::raised())
+                    .text_xs()
+                    .when(has_open_file, |d| d.text_color(theme::muted()))
+                    .when(!has_open_file, |d| d.text_color(theme::dim()))
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(theme::accent()))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.insert_file_reference(cx);
+                    }))
+                    .child("@ 引用文件"),
+            )
+            // 工具开关
+            .child(
+                div()
+                    .id("toggle-tools")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(tools_on, |d| {
+                        d.bg(theme::accent_soft())
+                            .text_color(theme::accent())
+                            .hover(|d| d.opacity(0.85))
+                    })
+                    .when(!tools_on, |d| {
+                        d.bg(theme::raised())
+                            .text_color(theme::dim())
+                            .hover(|d| d.text_color(theme::fg()))
+                    })
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.toggle_composer_tools(cx);
+                    }))
+                    .child(if tools_on { "⚒ 工具已开" } else { "⚒ 工具已关" }),
+            )
+            // 思考档位：入口收进「＋」菜单，输入框底栏不再常驻。
+            .child(
+                div()
+                    .id("composer-thinking")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(thinking_on, |d| {
+                        d.bg(theme::accent_soft())
+                            .text_color(theme::accent())
+                            .hover(|d| d.opacity(0.85))
+                    })
+                    .when(!thinking_on, |d| {
+                        d.bg(theme::raised())
+                            .text_color(theme::muted())
+                            .hover(|d| d.text_color(theme::fg()))
+                    })
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.thinking_panel = !this.thinking_panel;
+                        this.composer_menu = false;
+                        this.thinking_dragging = false;
+                        cx.notify();
+                    }))
+                    .child(SharedString::from(format!("⚙ 思考 · {}", level.label()))),
+            )
+            .child(
+                div()
+                    .id("composer-clear")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::raised())
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(theme::fg()))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.chat.reset("");
+                        this.notice = None;
+                        cx.notify();
+                    }))
+                    .child("清空"),
+            )
+    }
+
+    /// 工具开关（从输入框菜单触发）。
+    pub(crate) fn toggle_composer_tools(&mut self, cx: &mut Context<Self>) {
+        self.tools_enabled = !self.tools_enabled;
+        self.notice = Some(if self.tools_enabled {
+            "已开启工具：Agent 可以读文件、并在你批准后改文件".into()
+        } else {
+            "已关闭工具：只做纯对话".into()
+        });
+        cx.notify();
+    }
+
+    /// 思考等级面板：当前档位 / 当前模型 / 4 档滑杆。
+    fn thinking_level_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let level = self.thinking_level();
+        let idx = level.index();
+        let (provider, model) = self.session_model_labels(self.active_session);
+        let model_label = if model.is_empty() {
+            "未配置模型".to_string()
+        } else {
+            format!("{provider} · {model}")
+        };
+        // 档位停在的格子中心，滑杆填充到那里（4 格等宽）
+        let track_w = THINK_CELL * 3.0;
+        let fill_w = idx as f32 * THINK_CELL;
+        // 轨道范围给 cursor 换算档位；拖动用窗口级监听（见 canvas）
+        let track_slot = self.think_track.clone();
+        let weak = cx.entity().downgrade();
+
+        let mut slider = div()
+            .id("think-track")
+            .relative()
+            .h(px(30.0))
+            .w(px(track_w + THINK_CELL))
+            .cursor_pointer()
+            .child(
+                // 记录轨道坐标；拖动监听必须走窗口级：
+                // 元素级 on_mouse_move 只在悬停时触发，光标一滑出这条轨道就断，
+                // 滑杆会「粘」在半路（尤其是往两端外拖的时候）。
+                gpui::canvas(
+                    |_b, _w, _cx| {},
+                    move |bounds, _w, window, _cx| {
+                        track_slot.set(Some(bounds));
+                        let weak_move = weak.clone();
+                        window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, _w, cx| {
+                            if phase != gpui::DispatchPhase::Bubble {
+                                return;
+                            }
+                            let Some(this) = weak_move.upgrade() else {
+                                return;
+                            };
+                            let x = ev.position.x;
+                            let pressed = ev.pressed_button == Some(gpui::MouseButton::Left);
+                            let _ = this.update(cx, |this, cx| {
+                                if !this.thinking_dragging {
+                                    return;
+                                }
+                                if pressed {
+                                    this.set_thinking_from_x(x, cx);
+                                } else {
+                                    // 在窗口外 / 输入桥外松开时收不到 mouse up，靠这里兜底落盘
+                                    this.thinking_dragging = false;
+                                    this.save_sessions();
+                                    cx.notify();
+                                }
+                            });
+                        });
+                        let weak_up = weak.clone();
+                        window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _w, cx| {
+                            if phase != gpui::DispatchPhase::Bubble {
+                                return;
+                            }
+                            let Some(this) = weak_up.upgrade() else {
+                                return;
+                            };
+                            let _ = this.update(cx, |this, cx| {
+                                if this.thinking_dragging {
+                                    this.thinking_dragging = false;
+                                    this.save_sessions();
+                                    cx.notify();
+                                }
+                            });
+                        });
+                    },
+                )
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .w(px(track_w + THINK_CELL))
+                .h(px(30.0)),
+            )
+            // 按下即吸到最近一档；之后的移动由上面的窗口级监听接管
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, ev: &gpui::MouseDownEvent, _w, cx| {
+                    this.thinking_dragging = true;
+                    this.set_thinking_from_x(ev.position.x, cx);
+                }),
+            )
+            .child(
+                // 底轨
+                div()
+                    .absolute()
+                    .left(px(THINK_CELL / 2.0))
+                    .top(px(13.0))
+                    .h(px(4.0))
+                    .w(px(track_w))
+                    .rounded_full()
+                    .bg(theme::raised()),
+            )
+            .child(
+                // 已选段（绿色，与图里的滑杆一致）
+                div()
+                    .absolute()
+                    .left(px(THINK_CELL / 2.0))
+                    .top(px(13.0))
+                    .h(px(4.0))
+                    .w(px(fill_w))
+                    .rounded_full()
+                    .bg(if idx == 0 {
+                        theme::raised()
+                    } else {
+                        theme::green()
+                    }),
+            );
+
+        for (i, lv) in neverwork_core::ThinkingLevel::ALL.iter().enumerate() {
+            let active = i == idx;
+            let passed = i <= idx;
+            slider = slider.child(
+                div()
+                    .id(SharedString::from(format!("think-stop-{i}")))
+                    .absolute()
+                    .left(px((i as f32 * THINK_CELL) + (THINK_CELL - 24.0) / 2.0))
+                    .top(px(3.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(24.0))
+                    .rounded_full()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.set_thinking_level(*lv, cx);
+                    }))
+                    .child(
+                        div()
+                            .size(if active { px(14.0) } else { px(8.0) })
+                            .rounded_full()
+                            .bg(if active {
+                                theme::fg()
+                            } else if passed {
+                                theme::green()
+                            } else {
+                                theme::raised()
+                            })
+                            .border_1()
+                            .border_color(if passed {
+                                theme::green()
+                            } else {
+                                theme::border()
+                            }),
+                    ),
+            );
+        }
+
+        let mut labels = div().flex().w(px(track_w + THINK_CELL));
+        for (i, lv) in neverwork_core::ThinkingLevel::ALL.iter().enumerate() {
+            labels = labels.child(
+                div()
+                    .id(SharedString::from(format!("think-label-{i}")))
+                    .w(px(THINK_CELL))
+                    .flex()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(if i == idx { theme::fg() } else { theme::dim() })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.set_thinking_level(*lv, cx);
+                    }))
+                    .child(lv.label()),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme::accent_line())
+            .bg(theme::panel())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(if level.is_auto() {
+                                theme::muted()
+                            } else {
+                                theme::accent()
+                            })
+                            .child(level.label()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_xs()
+                            .text_color(theme::dim())
+                            .child(SharedString::from(fit_text(&model_label, 320.0, 11.0))),
+                    )
+                    .child(
+                        div()
+                            .id("think-reset")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme::raised())
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(theme::accent()))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                this.set_thinking_level(neverwork_core::ThinkingLevel::Auto, cx);
+                            }))
+                            .child("重置为自动"),
+                    )
+                    .child(
+                        div()
+                            .id("think-close")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme::raised())
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(theme::fg()))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                this.thinking_panel = false;
+                                this.thinking_dragging = false;
+                                cx.notify();
+                            }))
+                            .child("收起"),
+                    ),
+            )
+            .child(slider)
+            .child(labels)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .child("可拖动滑杆（或点刻度）；随会话保存；自动 = 不向厂商发送思考参数。网关不支持时会自动去掉重试。"),
+            )
+    }
+
+    /// 按鼠标横坐标把思考档位吸到最近一格（点滑杆与拖动共用）。
+    ///
+    /// 拖动中只改内存（`preview_thinking_level`），松开鼠标才落盘：
+    /// 一次拖过两三档时每档都写一遍全部会话会卡手。
+    fn set_thinking_from_x(&mut self, x: gpui::Pixels, cx: &mut Context<Self>) {
+        let Some(bounds) = self.think_track.get() else {
+            return;
+        };
+        // 轨道两端各留半格：在端点外侧按下也能吸到端点档
+        let local = f32::from(x - bounds.left());
+        let idx = ((local - THINK_CELL / 2.0) / THINK_CELL).round().clamp(0.0, 3.0) as usize;
+        self.preview_thinking_level(neverwork_core::ThinkingLevel::from_index(idx), cx);
+    }
+
+    /// 当前会话的思考等级（没选过就是自动）。
+    pub(crate) fn thinking_level(&self) -> neverwork_core::ThinkingLevel {
+        self.sessions
+            .get(self.active_session)
+            .map(|s| s.thinking)
+            .unwrap_or_default()
+    }
+
+    /// 改当前会话的思考等级并落盘（点刻度 / 标签 / 重置按钮走这里）。
+    pub(crate) fn set_thinking_level(
+        &mut self,
+        level: neverwork_core::ThinkingLevel,
+        cx: &mut Context<Self>,
+    ) {
+        let idx = self.active_session.min(self.sessions.len().saturating_sub(1));
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.thinking = level;
+        }
+        self.save_sessions();
+        cx.notify();
+    }
+
+    /// 拖动中的档位：只改内存 + 重绘，不落盘。
+    ///
+    /// 拖一次会连续跨过好几个档位，每一档都把全部会话写一遍盘会卡手；
+    /// 松开鼠标再由滑杆的 mouse up 监听 `save_sessions` 一次。
+    pub(crate) fn preview_thinking_level(
+        &mut self,
+        level: neverwork_core::ThinkingLevel,
+        cx: &mut Context<Self>,
+    ) {
+        if self.thinking_level() == level {
+            return;
+        }
+        let idx = self.active_session.min(self.sessions.len().saturating_sub(1));
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.thinking = level;
+        }
         cx.notify();
     }
 }
@@ -849,11 +1258,8 @@ impl AppState {
         }
     }
 
-    /// 一组连续的工具调用：每步一行 `→ Read <path>`，点击展开输出 / diff。
-    ///
-    /// 参考稿（opencode）就是这种形态：工具调用不是一张张卡片，
-    /// 而是列在回答上方的一行行灰字；点开才看细节。
-    /// 待审批的步骤永远展开，否则用户看不到按钮。
+    /// 一组连续的工具调用：**只渲染一行统计**（线程 / 思考轮次 / 工具数 / 动作），
+    /// 逐条的路径与输出不再铺开；写操作的审批仍单独展示 diff 与按钮。
     fn tool_steps_group(
         &self,
         start: usize,
@@ -874,10 +1280,9 @@ impl AppState {
             name: String,
             path: String,
             status: ToolRunStatus,
-            output: String,
+            thread: Option<usize>,
+            round: Option<usize>,
             diff: Vec<neverwork_core::DiffLineView>,
-            added: u32,
-            removed: u32,
         }
 
         let mut steps: Vec<Step> = Vec::new();
@@ -886,10 +1291,9 @@ impl AppState {
                 name,
                 path,
                 status,
-                output,
+                thread,
+                round,
                 diff,
-                added,
-                removed,
                 ..
             } = &session.messages[i].kind
             {
@@ -898,10 +1302,9 @@ impl AppState {
                     name: name.clone(),
                     path: path.clone(),
                     status: *status,
-                    output: output.clone(),
+                    thread: *thread,
+                    round: *round,
                     diff: diff.clone(),
-                    added: *added,
-                    removed: *removed,
                 });
             }
         }
@@ -909,19 +1312,121 @@ impl AppState {
             return div().into_any_element();
         }
 
-        // 先把步骤搬进局部 Vec，避免借用生命周期问题
-        let mut col = div().flex().flex_col().gap_0p5();
-        for step in steps.iter() {
-            // 复制出闭包要用的下标：`move` 闭包不能捕获 `step` 的借用
-            let step_idx = step.idx;
-            let awaiting = step.status == ToolRunStatus::Awaiting;
-            let expanded =
-                awaiting || self.expand_steps_all || self.expanded_steps.contains(&step.idx);
+        // 线程 = 参与这组工具调用的角色数（单 Agent 恒 1）；
+        // 轮次 = 去重后的（线程, 轮序）对，一个角色的一轮模型思考算一轮。
+        // 旧会话没有这两个字段（`None`）：宁可不显示，也不编一个错的数字。
+        let mut threads: Vec<usize> = steps.iter().filter_map(|s| s.thread).collect();
+        threads.sort_unstable();
+        threads.dedup();
+        let mut rounds: Vec<(usize, usize)> = steps
+            .iter()
+            .filter_map(|s| Some((s.thread?, s.round?)))
+            .collect();
+        rounds.sort_unstable();
+        rounds.dedup();
 
-            // 参数：优先显示真实路径（绝对路径，同参考稿），为空时只留动词。
-            // 无工作区时工具以主目录为基准，绝对路径 join 会直接沿用。
+        // 动作直方图：按次数降序聚合成一段轻量统计
+        let mut actions: Vec<(&'static str, usize)> = Vec::new();
+        for s in &steps {
+            let action = tool_action(&s.name);
+            match actions.iter_mut().find(|(name, _)| *name == action) {
+                Some((_, count)) => *count += 1,
+                None => actions.push((action, 1)),
+            }
+        }
+        actions.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // 统计口径只拼实际有数据的项：旧会话只有工具数与动作
+        let mut metrics: Vec<String> = Vec::new();
+        if !threads.is_empty() {
+            metrics.push(format!("{} 线程", threads.len()));
+        }
+        if !rounds.is_empty() {
+            metrics.push(format!("{} 轮思考", rounds.len()));
+        }
+        metrics.push(format!("{} 个工具", steps.len()));
+
+        let mut head = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .py_0p5()
+            .text_xs()
+            .text_color(theme::dim())
+            .child(div().text_color(theme::muted()).child("⚒"))
+            .child(
+                div()
+                    .text_color(theme::muted())
+                    .child(SharedString::from(metrics.join(" · "))),
+            );
+        for (name, count) in actions.iter().take(4) {
+            head = head
+                .child(div().child("·"))
+                .child(SharedString::from(format!("{name} {count}")));
+        }
+        if actions.len() > 4 {
+            head = head.child(SharedString::from(format!("· +{}", actions.len() - 4)));
+        }
+
+        // 异常状态只给计数，不点名到具体步骤
+        let running = steps.iter().any(|s| s.status == ToolRunStatus::Running);
+        let awaiting = steps
+            .iter()
+            .filter(|s| s.status == ToolRunStatus::Awaiting)
+            .count();
+        let failed = steps
+            .iter()
+            .filter(|s| s.status == ToolRunStatus::Failed)
+            .count();
+        let stopped = steps
+            .iter()
+            .filter(|s| matches!(s.status, ToolRunStatus::Denied | ToolRunStatus::Cancelled))
+            .count();
+        if running {
+            head = head.child(div().text_color(theme::accent()).child("· 执行中"));
+        }
+        if awaiting > 0 {
+            head = head.child(
+                div()
+                    .text_color(theme::yellow())
+                    .child(SharedString::from(format!("· 待确认 {awaiting}"))),
+            );
+        }
+        if failed > 0 {
+            head = head.child(
+                div()
+                    .text_color(theme::red())
+                    .child(SharedString::from(format!("· 失败 {failed}"))),
+            );
+        }
+        if stopped > 0 {
+            head = head.child(SharedString::from(format!("· 中断 {stopped}")));
+        }
+
+        let mut col = div().flex().flex_col().gap_1().child(head);
+
+        // 待审批：只有真正在等用户决定的写操作才展示内容与按钮，
+        // 否则用户没地方点「允许」。
+        let pending_idx = self
+            .pending
+            .as_ref()
+            .filter(|p| p.session_idx == sidx)
+            .map(|p| p.msg_idx);
+        if let Some(step) = steps
+            .iter()
+            .find(|s| Some(s.idx) == pending_idx && s.status == ToolRunStatus::Awaiting)
+        {
+            let step_idx = step.idx;
             let arg = if step.path.is_empty() {
                 String::new()
+            } else if let Some(t) = &self.remote {
+                let mut p = t.root.trim_end_matches('/').to_string();
+                if !step.path.starts_with('/') {
+                    p.push('/');
+                }
+                p.push_str(&step.path);
+                format!("{}:{p}", t.host)
             } else if let Some(root) = &self.root {
                 root.join(&step.path).display().to_string()
             } else {
@@ -930,156 +1435,70 @@ impl AppState {
                     .display()
                     .to_string()
             };
-            let verb = tool_verb(&step.name);
-
-            let mark_color = match step.status {
-                ToolRunStatus::Running => theme::accent(),
-                ToolRunStatus::Awaiting => theme::yellow(),
-                ToolRunStatus::Failed => theme::red(),
-                _ => theme::dim(),
-            };
-
-            let mut head = div()
-                .id(SharedString::from(format!("step-{}", step.idx)))
+            let mut approve = div()
                 .flex()
-                .items_center()
+                .flex_col()
                 .gap_1()
-                .py_0p5()
-                .cursor_pointer()
-                .rounded_sm()
-                .hover(|d| d.bg(theme::with_alpha(0xffffff, 0.035)))
-                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
-                    this.toggle_steps(step_idx, cx);
-                }))
-                .child(div().flex_shrink_0().text_color(mark_color).child("→"))
+                .pl(px(14.0))
                 .child(
                     div()
-                        .flex_shrink_0()
-                        .text_color(if step.status == ToolRunStatus::Failed {
-                            theme::red()
-                        } else {
-                            theme::muted()
-                        })
-                        .child(SharedString::from(verb)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_color(theme::dim())
-                        .child(SharedString::from(arg)),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::yellow())
+                                .child("会改文件，确认后写入："),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_xs()
+                                .text_color(theme::muted())
+                                .child(SharedString::from(format!(
+                                    "{} {arg}",
+                                    tool_action(&step.name)
+                                ))),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("deny-{step_idx}")))
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(theme::raised())
+                                .text_color(theme::muted())
+                                .cursor_pointer()
+                                .hover(|d| d.bg(theme::border()))
+                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                    this.answer_approval(false, cx);
+                                }))
+                                .child("拒绝"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("allow-{step_idx}")))
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(theme::green())
+                                .text_color(gpui::rgb(0x000000))
+                                .cursor_pointer()
+                                .hover(|d| d.opacity(0.88))
+                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                    this.answer_approval(true, cx);
+                                }))
+                                .child("允许并写入"),
+                        ),
                 );
-
-            if step.added > 0 || step.removed > 0 {
-                head = head
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_color(theme::green())
-                            .child(SharedString::from(format!("+{}", step.added))),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_color(theme::red())
-                            .child(SharedString::from(format!("−{}", step.removed))),
-                    );
+            if !step.diff.is_empty() {
+                approve = approve.child(self.diff_box(step_idx, &step.diff));
             }
-            // 只有异常状态才加状态词，正常完成不加噪音
-            match step.status {
-                ToolRunStatus::Running => {
-                    head = head.child(div().flex_shrink_0().text_color(theme::accent()).child("…"));
-                }
-                ToolRunStatus::Awaiting => {
-                    head = head.child(div().flex_shrink_0().text_color(theme::yellow()).child("待确认"));
-                }
-                ToolRunStatus::Failed => {
-                    head = head.child(div().flex_shrink_0().text_color(theme::red()).child("失败"));
-                }
-                ToolRunStatus::Denied | ToolRunStatus::Cancelled => {
-                    head = head.child(div().flex_shrink_0().text_color(theme::dim()).child("中断"));
-                }
-                ToolRunStatus::Ok => {}
-            }
-
-            let mut item = div().flex().flex_col().gap_1().child(head);
-
-            if expanded {
-                if !step.diff.is_empty() {
-                    item = item.child(self.diff_box(step_idx, &step.diff));
-                } else if !step.output.is_empty() {
-                    // 输出直接铺在正文下方（同参考稿的命令输出块），限高防刷屏
-                    item = item.child(
-                        div()
-                            .max_h(px(220.0))
-                            .overflow_hidden()
-                            .pl(px(14.0))
-                            .py_1()
-                            .text_color(if step.status == ToolRunStatus::Failed {
-                                theme::red()
-                            } else {
-                                theme::dim()
-                            })
-                            .child(SharedString::from(step.output.clone())),
-                    );
-                }
-
-                let is_pending_step = self
-                    .pending
-                    .as_ref()
-                    .map(|p| p.session_idx == sidx && p.msg_idx == step.idx)
-                    .unwrap_or(false);
-                if is_pending_step && awaiting {
-                    item = item.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .pl(px(14.0))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::yellow())
-                                    .child("会改文件，确认后写入："),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("deny-{}", step.idx)))
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(theme::raised())
-                                    .text_color(theme::muted())
-                                    .cursor_pointer()
-                                    .hover(|d| d.bg(theme::border()))
-                                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
-                                        this.answer_approval(false, cx);
-                                    }))
-                                    .child("拒绝"),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("allow-{}", step.idx)))
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(theme::green())
-                                    .text_color(gpui::rgb(0x000000))
-                                    .cursor_pointer()
-                                    .hover(|d| d.opacity(0.88))
-                                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
-                                        this.answer_approval(true, cx);
-                                    }))
-                                    .child("允许并写入"),
-                            ),
-                    );
-                }
-            }
-
-            col = col.child(item);
+            col = col.child(approve);
         }
 
         // 待确认时给整组一圈提示色，避免混在灰字里看不见
@@ -1147,19 +1566,20 @@ impl AppState {
     }
 }
 
-/// 动作词：对齐参考稿的 `→ Read <path>` 写法。
-///
-/// 用动词原形而不是「读取了文件」这种叙述句：一行一条工具调用时，
-/// 叙述句会把整列挤满，也看不出动作类型。
-fn tool_verb(name: &str) -> &'static str {
+/// 动作词（中文）：统计行与审批行共用。用短词而不是叙述句，
+/// 一行统计里才能塞下线程、轮次、工具数与动作分布。
+fn tool_action(name: &str) -> &'static str {
     match name {
-        "read_file" => "Read",
-        "list_dir" => "List",
-        "search_files" => "Search",
-        "write_file" => "Write",
-        "apply_patch" => "Patch",
-        "multi_patch" => "Multi-edit",
-        _ => "Run",
+        "read_file" => "读取",
+        "list_dir" => "列目录",
+        "search_files" | "search_code" => "搜索",
+        "write_file" => "写入",
+        "apply_patch" => "打补丁",
+        "multi_patch" => "批量修改",
+        "handoff" => "交接",
+        "web_search" => "联网搜索",
+        "web_fetch" => "抓取网页",
+        _ => "其他",
     }
 }
 

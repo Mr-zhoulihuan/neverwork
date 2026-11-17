@@ -47,6 +47,7 @@ fn cfg(port: u16) -> ProviderConfig {
         base_url: format!("http://127.0.0.1:{port}"),
         model: "gpt-4o".into(),
         temperature: 0.2,
+        thinking: neverwork_core::ThinkingLevel::Auto,
     }
 }
 

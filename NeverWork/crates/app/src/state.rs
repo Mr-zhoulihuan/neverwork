@@ -220,6 +220,18 @@ pub struct AppState {
     pub root: Option<PathBuf>,
     pub files: Vec<FileNode>,
     pub expanded: HashSet<PathBuf>,
+    /// 远程工作区目标；`Some` 时文件/编辑器/工具全部走 ssh，`root` 为 `None`。
+    pub remote: Option<neverwork_core::SshTarget>,
+    /// 远程已展开目录（相对 POSIX 路径）。
+    pub remote_expanded: HashSet<String>,
+    /// 当前打开的远程文件（相对工作区根）。
+    pub remote_open_rel: Option<String>,
+    /// 远程树请求代次：迟到的结果不能盖掉新工作区 / 新展开状态。
+    remote_gen: u64,
+    /// 远程连接/探测代次：切工作区后，迟到的 probe 结果作废。
+    remote_conn_gen: u64,
+    /// 远程打开文件请求代次：快速连点两个文件时只采用最后一次。
+    remote_open_gen: u64,
     /// 文件监听器的停止信号：切工作区时先停旧的，再监听新根。
     watcher_stop: Option<flume::Sender<()>>,
     /// Git 仓库状态（进入 Git 面板或手动刷新时更新）。
@@ -262,6 +274,16 @@ pub struct AppState {
     pub workspace_popup: bool,
     /// 正在重命名的工作区下标（`settings.workspaces` 的下标）。
     pub ws_rename: Option<usize>,
+    /// 工作区管理器里的「连接远程 SSH」输入行是否展开。
+    pub ws_remote_open: bool,
+    /// 远程连接/探测失败原因（就地显示在管理器里，不关输入行）。
+    pub ws_remote_err: Option<String>,
+    /// 远程密码：只在内存里（每条 ssh 命令经 `SSH_ASKPASS` 传），不写配置、不进日志。
+    pub remote_pw: Option<String>,
+    /// 远程输入行的密码缓冲区（连接成功后转进 `remote_pw` 并清空）。
+    pub ws_pw_input: TextBuffer,
+    /// 远程输入行焦点是否在密码框（复用 `InputTarget::Workspace`）。
+    pub ws_pw_focus: bool,
 
     // ===== 视图 =====
     pub center: CenterView,
@@ -330,6 +352,15 @@ pub struct AppState {
     pub model_query: String,
     /// 模型选择器里键盘高亮的下标。
     pub model_highlight: usize,
+    /// 输入框下方的思考等级面板是否展开。
+    pub thinking_panel: bool,
+    /// 思考档位滑杆的轨道范围（渲染期由 canvas 写入）。
+    /// 拖动时用鼠标横坐标减去这个左边，换算成档位。
+    pub think_track: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// 正在拖动滑杆：窗口级 mouse move 只在拖动期间改档位，松开时落盘。
+    pub thinking_dragging: bool,
+    /// 输入框左下「＋」菜单是否展开（引用文件 / 工具 / 清空）。
+    pub composer_menu: bool,
     /// 导出配置时是否包含 API Key（默认不含）。
     pub export_with_secrets: bool,
     /// 是否允许 Agent 调用工具（读写文件）。关掉就退化为纯对话。
@@ -354,10 +385,12 @@ pub struct AppState {
     pub pending_mcp_attach: Option<usize>,
     /// 技能导入（.md）输入行是否展开。
     pub skill_import_open: bool,
-    /// 技能市场当前来源（MCP 页：官方 / 腾讯云；Skill 页：GitHub）。
+    /// 技能市场当前来源（MCP 页：官方 / 腾讯云；Skill 页：skills.sh）。
     pub market_source: MarketSource,
     /// MCP 页上次使用的来源；从 Skill 页切回来时恢复（默认官方）。
     pub mcp_source: MarketSource,
+    /// Skill 页来源（目前固定 skills.sh，保留字段以便将来接新源）。
+    pub skill_source: MarketSource,
     /// 详情抽屉里的条目；`None` 表示抽屉关闭。
     pub market_detail: Option<MarketEntry>,
     /// 详情抽屉从团队角色面板打开时要绑定的角色下标。
@@ -379,16 +412,12 @@ pub struct AppState {
     pub pending: Option<PendingApproval>,
     /// 自动批准写操作（仅供自动化验证，`NW_AUTO_APPROVE=1` 开启）。
     pub auto_approve: bool,
-    /// 展开的工具步骤组（键 = 该组第一条消息的下标）。
-    pub expanded_steps: std::collections::HashSet<usize>,
-    /// 展开的交接卡片（键 = 消息下标），不与 `expanded_steps` 混用。
+    /// 展开的交接卡片（键 = 消息下标）。
     pub expanded_handoff: std::collections::HashSet<usize>,
     /// 右侧栏是否收起。
     pub right_collapsed: bool,
     /// 会话列表是否收起（收成图标栏右侧的 16px 窄条，点窄条展开）。
     pub session_collapsed: bool,
-    /// 新出现的工具步骤组默认展开（仅 `NW_EXPAND_STEPS=1` 时打开）。
-    pub expand_steps_all: bool,
     /// 编辑器查找 / 替换状态。
     pub find: crate::find::FindState,
     /// 查找 / 替换输入框的缓冲区。
@@ -409,6 +438,8 @@ pub struct AppState {
     pub chat_w: f32,
     /// 自动保存计时代数（每次改动 +1，用于判定"最后一次改动"）。
     pub auto_save_gen: std::rc::Rc<std::cell::Cell<u64>>,
+    /// 技能搜索防抖代数（每次输入 +1，只有最后一次计时真正发请求）。
+    pub skill_search_gen: std::rc::Rc<std::cell::Cell<u64>>,
     /// 是否有待保存的自动保存。
     pub auto_save_pending: bool,
 
@@ -547,6 +578,30 @@ mod root_tests {
     }
 }
 
+/// 启动时该连哪个远程工作区：`NW_REMOTE` 优先，其次是上次的 `ssh://` 连接串。
+fn startup_remote(saved: &str) -> Option<neverwork_core::SshTarget> {
+    if let Ok(v) = std::env::var("NW_REMOTE") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return neverwork_core::SshTarget::parse(v).ok();
+        }
+    }
+    if neverwork_core::is_remote_url(saved) {
+        return neverwork_core::SshTarget::parse(saved.trim()).ok();
+    }
+    None
+}
+
+fn remote_workspace(target: &neverwork_core::SshTarget) -> Workspace {
+    Workspace {
+        name: target.name(),
+        path: target.url(),
+        kind: ConnectionKind::Remote,
+        remote_url: Some(target.url()),
+        online: true,
+    }
+}
+
 /// 新建会话的默认模式：默认单助手；`NW_TEAM=1` 供自动化验收直接以团队模式启动。
 fn default_session_mode() -> SessionMode {
     if std::env::var("NW_TEAM").map(|v| v == "1").unwrap_or(false) {
@@ -592,6 +647,7 @@ fn blank_session(seq: usize, config: &Config, mode: SessionMode) -> Session {
         pinned: false,
         provider_id: String::new(),
         model: String::new(),
+        thinking: neverwork_core::ThinkingLevel::Auto,
         stage: neverwork_core::TaskStage::Idle,
         resume_prompt: String::new(),
     }
@@ -744,7 +800,13 @@ fn last_preview(session: &Session) -> String {
 impl AppState {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = neverwork_core::config::load_settings();
-        let root = resolve_root(&settings.last_workspace);
+        let remote_target = startup_remote(&settings.last_workspace);
+        let root = if remote_target.is_some() {
+            // 远程工作区没有本地根；树/编辑器走 ssh。
+            None
+        } else {
+            resolve_root(&settings.last_workspace)
+        };
         let expanded = root
             .as_ref()
             .map(|r| filesystem::default_expanded(r))
@@ -753,16 +815,20 @@ impl AppState {
             .as_ref()
             .and_then(|r| filesystem::build_tree(r, &expanded).ok())
             .unwrap_or_default();
-        let ws = root.as_ref().map(|root| Workspace {
-            name: root
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "workspace".into()),
-            path: root.to_string_lossy().to_string(),
-            kind: ConnectionKind::Local,
-            remote_url: None,
-            online: true,
-        });
+        let ws = match (&remote_target, &root) {
+            (Some(t), _) => Some(remote_workspace(t)),
+            (None, Some(root)) => Some(Workspace {
+                name: root
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "workspace".into()),
+                path: root.to_string_lossy().to_string(),
+                kind: ConnectionKind::Local,
+                remote_url: None,
+                online: true,
+            }),
+            _ => None,
+        };
         let config = neverwork_core::config::load();
         // 主题立即生效，首次渲染就是用户上次选的颜色。
         neverwork_ui::theme::set_theme_mode(settings.theme);
@@ -778,10 +844,11 @@ impl AppState {
         // `load_with_recovery_key` 会把崩溃残留的 Running/AwaitingApproval 降级成
         // `Interrupted`，并告诉这里降级了几条、丢弃了几条。
         // 无工作区用固定键 `scratch`；本地工作区用路径字符串（兼容已有文件）。
-        let session_key = root
-            .as_ref()
-            .map(|r| r.to_string_lossy().to_string())
-            .unwrap_or_else(|| "scratch".to_string());
+        let session_key = match (&remote_target, &root) {
+            (Some(t), _) => t.url(),
+            (None, Some(r)) => r.to_string_lossy().to_string(),
+            _ => "scratch".to_string(),
+        };
         let (store, report) = neverwork_core::sessions::load_with_recovery_key(&session_key);
         let (sessions, active_session) = adopt_store(store, &config);
 
@@ -801,6 +868,12 @@ impl AppState {
             root,
             files,
             expanded,
+            remote: None,
+            remote_expanded: HashSet::new(),
+            remote_open_rel: None,
+            remote_gen: 0,
+            remote_conn_gen: 0,
+            remote_open_gen: 0,
             watcher_stop: None,
             git: crate::git::RepoStatus::default(),
             git_selected: None,
@@ -821,6 +894,11 @@ impl AppState {
             rename_buf: TextBuffer::single_line(),
             workspace_popup: false,
             ws_rename: None,
+            ws_remote_open: false,
+            ws_remote_err: None,
+            remote_pw: None,
+            ws_pw_input: TextBuffer::single_line(),
+            ws_pw_focus: false,
             center: initial_view(),
             settings_tab: initial_settings_tab(),
             right_tab: RightTab::Files,
@@ -863,6 +941,10 @@ impl AppState {
             model_picker: false,
             model_query: String::new(),
             model_highlight: 0,
+            thinking_panel: false,
+            think_track: Default::default(),
+            thinking_dragging: false,
+            composer_menu: false,
             export_with_secrets: false,
             turn_started: None,
             tools_enabled: true,
@@ -875,6 +957,7 @@ impl AppState {
             skill_import_open: false,
             market_source: MarketSource::Official,
             mcp_source: MarketSource::Official,
+            skill_source: MarketSource::SkillsSh,
             market_detail: None,
             market_detail_role: None,
             market_entries,
@@ -885,7 +968,6 @@ impl AppState {
             active_role: None,
             pending: None,
             auto_approve: false,
-            expanded_steps: std::collections::HashSet::new(),
             expanded_handoff: std::collections::HashSet::new(),
             // 右侧文件/Git 面板默认收起：把宽度让给对话区，
             // 需要时点一下窄条展开（`NW_RIGHT_COLLAPSED=0` 可强制展开用于验证）。
@@ -896,7 +978,6 @@ impl AppState {
             session_collapsed: std::env::var("NW_SESSION_COLLAPSED")
                 .map(|v| v == "1")
                 .unwrap_or(false),
-            expand_steps_all: false,
             find: crate::find::FindState::default(),
             find_query_buf: TextBuffer::single_line(),
             find_replace_buf: TextBuffer::single_line(),
@@ -906,6 +987,7 @@ impl AppState {
             layout_w: std::rc::Rc::new(std::cell::Cell::new(1200.0)),
             chat_w: 1200.0,
             auto_save_gen: std::rc::Rc::new(std::cell::Cell::new(0)),
+            skill_search_gen: std::rc::Rc::new(std::cell::Cell::new(0)),
             auto_save_pending: false,
             streaming: false,
             ai_ready,
@@ -919,24 +1001,40 @@ impl AppState {
             field_area_bounds: std::rc::Rc::new(Cell::new(None)),
         };
 
-        // 启动时按需打开文件（便于验证）。
-        if let Ok(path) = std::env::var("NW_OPEN") {
-            let p = PathBuf::from(&path);
-            if let Ok(content) = filesystem::read_file(&p) {
-                me.editor.reset(content);
-                me.editor.move_to(0, false);
-                me.open_path = Some(p);
-                me.center = CenterView::File;
+        // 启动时按需打开文件（便于验证）。远程工作区不支持本地路径，跳过。
+        if me.remote.is_none() {
+            if let Ok(path) = std::env::var("NW_OPEN") {
+                let p = PathBuf::from(&path);
+                if let Ok(content) = filesystem::read_file(&p) {
+                    me.editor.reset(content);
+                    me.editor.move_to(0, false);
+                    me.open_path = Some(p);
+                    me.center = CenterView::File;
+                }
             }
         }
 
         me.watcher_stop = start_watcher_opt(me.root.clone(), cx);
+        // 远程工作区：先把界面撑起来，再异步探测真实根（展开 `~` / 确认目录存在）。
+        if let Some(target) = remote_target.clone() {
+            me.remote = Some(target);
+            me.watcher_stop = None;
+            me.probe_remote_root(cx);
+        }
         // 自动化验证用：`NW_SEND=<文本>` 启动后自动发送一条消息。
         let auto_send = std::env::var("NW_SEND").ok().filter(|t| !t.trim().is_empty());
         // 验证用：启动即展开对话区模型选择器（按厂商分组）。
         if let Ok(v) = std::env::var("NW_PICK_MODEL") {
             if !v.is_empty() {
                 me.open_chat_model_picker(cx);
+            }
+        }
+        // 验证用：启动即打开输入框面板（thinking=思考档位 / menu=＋菜单）。
+        if let Ok(v) = std::env::var("NW_COMPOSER") {
+            match v.as_str() {
+                "thinking" => me.thinking_panel = true,
+                "menu" => me.composer_menu = true,
+                _ => {}
             }
         }
         // 验证用：启动即弹出「新建会话」的模式选择浮层。
@@ -965,9 +1063,12 @@ impl AppState {
                 me.market_detail_role = Some(i);
             }
         }
-        // 验证用：启动即安装一个技能（文本技能直接落盘；MCP 进入待确认）。
+        // 验证用：启动即安装一个技能（文本技能直接落盘；MCP 进入待确认；
+        // skills.sh 条目先解析上游正文再落盘）。
         if let Ok(id) = std::env::var("NW_INSTALL_SKILL") {
-            if let Some(sk) = me.find_skill(&id) {
+            if let Some(entry) = me.market_entry_for(&id) {
+                me.install_market_entry(entry, cx);
+            } else if let Some(sk) = me.find_skill(&id) {
                 me.install_skill(sk, cx);
             }
         }
@@ -983,22 +1084,25 @@ impl AppState {
         if let Ok(q) = std::env::var("NW_SKILL_QUERY") {
             me.skill_search = q;
         }
-        // 验证用：预选市场来源（official|tencent|github）。
+        // 验证用：预选市场来源（official|tencent|skillssh）。
         if let Ok(k) = std::env::var("NW_MARKET_SOURCE") {
             if let Some(src) = MarketSource::from_key(&k) {
                 me.market_source = src;
             }
         }
         // 验证用：预选技能页 Tab（0=MCP 1=Skill）。来源跟着 Tab 归一：
-        // Skill 页只展示 GitHub 技能，MCP 页不展示 GitHub。
+        // Skill 页只展示 skills.sh，MCP 页不展示 skills.sh。
         if let Ok(v) = std::env::var("NW_SKILLS_TAB") {
             if let Ok(tab) = v.parse::<u8>() {
                 me.skills_tab = tab.min(1);
             }
         }
+        if me.market_source == MarketSource::SkillsSh {
+            me.skills_tab = 1;
+        }
         if me.skills_tab == 1 {
-            me.market_source = MarketSource::GitHub;
-        } else if me.market_source == MarketSource::GitHub {
+            me.market_source = me.skill_source;
+        } else if me.market_source == MarketSource::SkillsSh {
             me.market_source = me.mcp_source;
         }
         // 验证用：启动即打开详情抽屉（`1` = 当前来源第一条，或写条目 id）。
@@ -1023,16 +1127,6 @@ impl AppState {
             .unwrap_or(false)
         {
             me.refresh_market(cx);
-        }
-        // 验证用：展开所有工具步骤组 / 收起右栏 / 预置查找词，
-        // 便于在无法点击的环境（高 DPI 远程桌面）下截图核对界面。
-        if std::env::var("NW_EXPAND_STEPS").map(|v| v == "1").unwrap_or(false) {
-            for (i, m) in me.sessions[me.active_session].messages.iter().enumerate() {
-                if matches!(m.kind, MessageKind::ToolCall { .. }) {
-                    me.expanded_steps.insert(i);
-                }
-            }
-            me.expand_steps_all = true;
         }
         // 验证用：预置多光标（逗号分隔的字节偏移），便于截图确认渲染。
         if let Ok(v) = std::env::var("NW_CURSORS") {
@@ -1159,7 +1253,12 @@ impl AppState {
         }
         // 启动就把当前工作区记进最近列表（首次运行时列表里至少有一条）。
         // 无工作区时不记——「还没选」不该变成一个最近项。
-        if let Some(root) = me.root.clone() {
+        if let Some(target) = me.remote.clone() {
+            let url = target.url();
+            me.settings.last_workspace = url.clone();
+            me.settings.record_workspace(&url, now_secs());
+            let _ = neverwork_core::config::save_settings(&me.settings);
+        } else if let Some(root) = me.root.clone() {
             me.settings
                 .record_workspace(&root.to_string_lossy(), now_secs());
             let _ = neverwork_core::config::save_settings(&me.settings);
@@ -1225,8 +1324,11 @@ impl AppState {
         self.session_mode().is_team()
     }
 
-    /// 会话库键：有工作区用本地路径（兼容旧文件），无工作区用固定 `scratch`。
+    /// 会话库键：远程用连接串，本地用路径（兼容旧文件），无工作区用 `scratch`。
     pub(crate) fn session_key(&self) -> String {
+        if let Some(t) = &self.remote {
+            return t.url();
+        }
         self.root
             .as_ref()
             .map(|r| r.to_string_lossy().to_string())
@@ -1234,7 +1336,7 @@ impl AppState {
     }
 
     pub(crate) fn has_workspace(&self) -> bool {
-        self.root.is_some()
+        self.workspace.is_some()
     }
 
     /// 把工作区相对路径还原成绝对路径；无工作区时原样返回。
@@ -1635,6 +1737,20 @@ impl AppState {
         self.ws_prompt_open = false;
         self.palette_open = false;
         self.ws_input.reset("");
+        // 远程状态整体让位：连接目标、已展开目录、打开的远程文件、在途请求代次。
+        // 不清会在本地工作区里继续显示远程树，保存还会写回远端。
+        self.remote = None;
+        self.remote_expanded.clear();
+        self.remote_open_rel = None;
+        self.remote_gen += 1;
+        self.remote_conn_gen += 1;
+        self.remote_open_gen += 1;
+        self.ws_remote_open = false;
+        self.ws_remote_err = None;
+        // 密码不留到本地工作区：那是另一台机器的凭据
+        self.remote_pw = None;
+        self.ws_pw_input.reset("");
+        self.ws_pw_focus = false;
         // 关闭路径行后把输入目标交回正文：目标留着 Workspace，
         // 焦点会一直挂在只在该行渲染时才存在的句柄上，打字/回车全部失灵。
         self.restore_input_target();
@@ -1642,17 +1758,312 @@ impl AppState {
         self.refresh_git(cx);
     }
 
+    // ===== 远程工作区 =====
+
+    /// 当前远程认证：有密码就带上（只把内存里的值克隆给后台线程）。
+    fn remote_auth(&self) -> neverwork_core::RemoteAuth {
+        match &self.remote_pw {
+            Some(pw) => neverwork_core::RemoteAuth::password(pw.clone()),
+            None => neverwork_core::RemoteAuth::key_only(),
+        }
+    }
+
+    /// 带当前认证的远程句柄（后台线程用）。
+    fn remote_fs(&self) -> Option<neverwork_core::RemoteFs> {
+        self.remote
+            .clone()
+            .map(|t| neverwork_core::RemoteFs::with_auth(t, self.remote_auth()))
+    }
+
+    /// 启动时后台探测远程根：确认 ssh 可用、目录存在，然后拉树。
+    ///
+    /// 不把探测出的绝对路径写回 `SshTarget`：会话库键就是连接串，
+    /// 展开 `~` 前后键不同会让用户以为会话丢了。后续命令统一 `cd` 到原值。
+    pub(crate) fn probe_remote_root(&mut self, cx: &mut Context<Self>) {
+        if self.remote.is_none() {
+            return;
+        }
+        let Some(fs) = self.remote_fs() else {
+            return;
+        };
+        self.remote_conn_gen += 1;
+        let conn_gen = self.remote_conn_gen;
+        let (tx, rx) = flume::bounded::<Result<(), String>>(1);
+        std::thread::spawn(move || {
+            let _ = tx.send(fs.probe().map(|_| ()));
+        });
+        cx.spawn(async move |weak, async_cx| {
+            if let Ok(msg) = rx.recv_async().await {
+                let _ = weak.update(async_cx, |this, cx| {
+                    // 期间切走了：旧探测结果不许动新工作区
+                    if this.remote_conn_gen != conn_gen || this.remote.is_none() {
+                        return;
+                    }
+                    match msg {
+                        Ok(()) => {
+                            if let Some(w) = &mut this.workspace {
+                                w.online = true;
+                            }
+                            this.ws_remote_err = None;
+                            this.refresh_remote_tree(cx);
+                        }
+                        Err(e) => {
+                            if let Some(w) = &mut this.workspace {
+                                w.online = false;
+                            }
+                            this.notice = Some(format!("连接远程失败：{e}"));
+                            cx.notify();
+                        }
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 拉远程树：只请求已展开目录，结果按代次丢弃（迟到的不能盖新状态）。
+    pub(crate) fn refresh_remote_tree(&mut self, cx: &mut Context<Self>) {
+        if self.remote.is_none() {
+            self.files.clear();
+            cx.notify();
+            return;
+        }
+        let Some(fs) = self.remote_fs() else {
+            return;
+        };
+        self.remote_gen += 1;
+        let gen = self.remote_gen;
+        let expanded = self.remote_expanded.clone();
+        let (tx, rx) = flume::bounded::<Result<Vec<neverwork_core::RemoteNode>, String>>(1);
+        std::thread::spawn(move || {
+            let _ = tx.send(fs.tree(&expanded));
+        });
+        cx.spawn(async move |weak, async_cx| {
+            if let Ok(msg) = rx.recv_async().await {
+                let _ = weak.update(async_cx, |this, cx| {
+                    if this.remote_gen != gen {
+                        return;
+                    }
+                    match msg {
+                        Ok(nodes) => {
+                            this.files = nodes
+                                .into_iter()
+                                .map(|n| FileNode {
+                                    name: n
+                                        .path
+                                        .rsplit('/')
+                                        .find(|s| !s.is_empty())
+                                        .unwrap_or(&n.path)
+                                        .to_string(),
+                                    is_dir: n.is_dir,
+                                    level: n.path.matches('/').count() as u8,
+                                    expanded: n.is_dir && this.remote_expanded.contains(&n.path),
+                                    modified: false,
+                                    owner: None,
+                                    path: n.path,
+                                })
+                                .collect();
+                            if let Some(w) = &mut this.workspace {
+                                w.online = true;
+                            }
+                            cx.notify();
+                        }
+                        Err(e) => {
+                            this.notice = Some(format!("读取远程目录失败：{e}"));
+                            cx.notify();
+                        }
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 远程目录展开/收起（路径是相对工作区根的 POSIX 路径）。
+    pub(crate) fn toggle_remote_dir(&mut self, rel: String, cx: &mut Context<Self>) {
+        if !self.remote_expanded.remove(&rel) {
+            self.remote_expanded.insert(rel);
+        }
+        self.refresh_remote_tree(cx);
+    }
+
+    /// 连一个远程工作区：先探测（目录存在 / 认证可用），成功才真正切过去。
+    ///
+    /// `password` 只在内存里流转，不写配置；留空时走密钥 / ssh-agent。
+    /// 失败后输入行会就地展开：上面是连接串，下面是密码，改完直接重试。
+    pub(crate) fn connect_remote(
+        &mut self,
+        target: neverwork_core::SshTarget,
+        password: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.streaming {
+            self.ws_remote_err = Some("正在生成，先停止再切换工作区".into());
+            cx.notify();
+            return;
+        }
+        self.ws_remote_err = None;
+        self.notice = Some(format!("正在连接 {}…", target.display()));
+        self.remote_conn_gen += 1;
+        let conn_gen = self.remote_conn_gen;
+        let auth = match &password {
+            Some(pw) if !pw.is_empty() => neverwork_core::RemoteAuth::password(pw.clone()),
+            _ => neverwork_core::RemoteAuth::key_only(),
+        };
+        let fs = neverwork_core::RemoteFs::with_auth(target.clone(), auth);
+        let (tx, rx) = flume::bounded::<Result<(), String>>(1);
+        std::thread::spawn(move || {
+            let _ = tx.send(fs.probe().map(|_| ()));
+        });
+        cx.spawn(async move |weak, async_cx| {
+            if let Ok(msg) = rx.recv_async().await {
+                let _ = weak.update(async_cx, |this, cx| {
+                    // 探测期间又切了工作区：不要强行把用户拉回这个远程
+                    if this.remote_conn_gen != conn_gen {
+                        return;
+                    }
+                    match msg {
+                        Ok(()) => this.enter_remote_workspace(target, password, cx),
+                        Err(e) => {
+                            this.ws_remote_err = Some(e.clone());
+                            this.notice = Some(format!("连接远程失败：{e}"));
+                            // 从最近列表点的远程项：就地展开输入行，带着连接串/密码方便改
+                            if this.workspace_popup {
+                                this.ws_remote_open = true;
+                                this.ws_input.reset(&target.display());
+                                if let Some(pw) = &password {
+                                    this.ws_pw_input.reset(pw);
+                                }
+                                this.ws_pw_focus = password.is_some();
+                                this.input_target = InputTarget::Workspace;
+                            }
+                            cx.notify();
+                        }
+                    }
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// 工作区管理器里「连接远程 SSH…」输入行：回车 / 按钮都到这里。
+    pub(crate) fn connect_remote_from_input(&mut self, cx: &mut Context<Self>) {
+        let input = self.ws_input.text().trim().to_string();
+        if input.is_empty() {
+            self.ws_remote_err = Some("请输入 user@host:/path".into());
+            cx.notify();
+            return;
+        }
+        let pw = self.ws_pw_input.text().trim().to_string();
+        let pw = (!pw.is_empty()).then_some(pw);
+        match neverwork_core::SshTarget::parse(&input) {
+            Ok(t) => self.connect_remote(t, pw, cx),
+            Err(e) => {
+                self.ws_remote_err = Some(e);
+                cx.notify();
+            }
+        }
+    }
+
+    /// 展开「连接远程 SSH」输入行。
+    pub(crate) fn open_remote_workspace_input(&mut self, cx: &mut Context<Self>) {
+        self.ws_remote_open = true;
+        self.ws_remote_err = None;
+        self.ws_rename = None;
+        self.ws_input.reset("");
+        self.ws_pw_input.reset("");
+        self.ws_pw_focus = false;
+        self.input_target = InputTarget::Workspace;
+        cx.notify();
+    }
+
+    /// 收起远程输入行（不再重试，错误一起清掉）。
+    pub(crate) fn close_remote_workspace_input(&mut self, cx: &mut Context<Self>) {
+        self.ws_remote_open = false;
+        self.ws_remote_err = None;
+        self.ws_input.reset("");
+        self.ws_pw_input.reset("");
+        self.ws_pw_focus = false;
+        self.restore_input_target();
+        cx.notify();
+    }
+
+    /// 切到远程工作区：存旧会话 → 清本地状态 → 换会话库 → 拉远程树。
+    pub(crate) fn enter_remote_workspace(
+        &mut self,
+        target: neverwork_core::SshTarget,
+        password: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        // 旧工作区的会话必须先落盘，否则下面换 session_key 后写进新文件
+        self.save_sessions();
+        let url = target.url();
+        self.settings.last_workspace = url.clone();
+        self.settings.record_workspace(&url, now_secs());
+        let _ = neverwork_core::config::save_settings(&self.settings);
+        // 本地那一套全部让位：监听器、根、展开态、编辑器、Git
+        self.watcher_stop = None;
+        self.root = None;
+        self.expanded.clear();
+        self.files.clear();
+        self.open_path = None;
+        self.editor.reset("");
+        self.dirty = false;
+        self.folds.clear();
+        self.remote_expanded.clear();
+        self.remote_gen += 1;
+        self.remote_conn_gen += 1;
+        self.remote_open_gen += 1;
+        self.remote_open_rel = None;
+        self.remote = Some(target.clone());
+        // 密码只活在内存：后续树/读写/Agent 工具每次 ssh 都带上它
+        self.remote_pw = password.filter(|p| !p.is_empty());
+        self.ws_pw_input.reset("");
+        self.ws_pw_focus = false;
+        self.workspace = Some(remote_workspace(&target));
+        self.center = CenterView::Chat;
+        self.adopt_session_store(neverwork_core::sessions::load_with_recovery_key(&url).0);
+        // 列表的搜索/菜单是上一个工作区的语境，全部复位
+        self.session_search.reset("");
+        self.session_menu = None;
+        self.session_menu_at = None;
+        self.session_delete_confirm = None;
+        self.rename_session = None;
+        self.archive_clean_confirm = false;
+        self.archive_open = false;
+        self.workspace_popup = false;
+        self.ws_rename = None;
+        self.ws_prompt_open = false;
+        self.ws_remote_open = false;
+        self.ws_remote_err = None;
+        self.ws_input.reset("");
+        self.palette_open = false;
+        self.restore_input_target();
+        self.notice = Some(format!("已连接到 {url}"));
+        self.refresh_git(cx);
+        self.refresh_remote_tree(cx);
+    }
+
     pub(crate) fn open_workspace_prompt(&mut self, cx: &mut Context<Self>) {
         self.workspace_popup = true;
         self.ws_rename = None;
+        self.ws_remote_open = false;
+        self.ws_remote_err = None;
         self.ws_input.reset("");
+        self.ws_pw_input.reset("");
+        self.ws_pw_focus = false;
         cx.notify();
     }
 
     pub(crate) fn close_workspace_prompt(&mut self, cx: &mut Context<Self>) {
         self.workspace_popup = false;
         self.ws_rename = None;
+        self.ws_remote_open = false;
+        self.ws_remote_err = None;
         self.ws_input.reset("");
+        self.ws_pw_input.reset("");
+        self.ws_pw_focus = false;
         self.restore_input_target();
         cx.notify();
     }
@@ -1664,6 +2075,7 @@ impl AppState {
         self.workspace_popup = false;
         self.ws_rename = None;
         self.ws_input.reset("");
+        self.ws_pw_focus = false;
         self.input_target = InputTarget::Workspace;
         cx.notify();
     }
@@ -1676,10 +2088,13 @@ impl AppState {
         if self.input_target != InputTarget::Workspace {
             return;
         }
-        if self.ws_prompt_open || self.ws_rename.is_some() {
+        if self.ws_prompt_open || self.ws_rename.is_some() || self.ws_remote_open {
             return;
         }
-        self.input_target = if self.center == CenterView::File && self.open_path.is_some() {
+        self.ws_pw_focus = false;
+        self.input_target = if self.center == CenterView::File
+            && (self.open_path.is_some() || self.remote_open_rel.is_some())
+        {
             InputTarget::Editor
         } else {
             InputTarget::Chat
@@ -1723,11 +2138,31 @@ impl AppState {
             .settings
             .workspaces
             .get(i)
-            .map(|w| PathBuf::from(&w.path))
+            .map(|w| w.path.clone())
         else {
             return;
         };
-        self.enter_workspace(path, cx);
+        // 远程条目的 path 是 `ssh://` 连接串，本地条目才走 enter_workspace。
+        if neverwork_core::is_remote_url(&path) {
+            match neverwork_core::SshTarget::parse(&path) {
+                // 就是当前这台：复用内存里的密码；换目标则先试密钥
+                Ok(t) => {
+                    let pw = if self.remote.as_ref() == Some(&t) {
+                        self.remote_pw.clone()
+                    } else {
+                        None
+                    };
+                    self.connect_remote(t, pw, cx)
+                }
+                Err(e) => {
+                    self.ws_remote_err = Some(e.clone());
+                    self.notice = Some(format!("远程连接串无效：{e}"));
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        self.enter_workspace(PathBuf::from(path), cx);
     }
 
     pub(crate) fn toggle_workspace_pin(&mut self, i: usize, cx: &mut Context<Self>) {
@@ -1753,6 +2188,7 @@ impl AppState {
         };
         self.ws_rename = Some(i);
         self.ws_input.reset(&w.name);
+        self.ws_pw_focus = false;
         self.input_target = InputTarget::Workspace;
         cx.notify();
     }
@@ -1794,6 +2230,13 @@ impl AppState {
     // ===== 文件 =====
 
     pub fn open_file_name(&self) -> String {
+        if let Some(rel) = &self.remote_open_rel {
+            return rel
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or(rel)
+                .to_string();
+        }
         self.open_path
             .as_ref()
             .and_then(|p| p.file_name())
@@ -1802,6 +2245,10 @@ impl AppState {
     }
 
     pub(crate) fn refresh_tree(&mut self, cx: &mut Context<Self>) {
+        if self.remote.is_some() {
+            self.refresh_remote_tree(cx);
+            return;
+        }
         self.files = match &self.root {
             Some(root) => filesystem::build_tree(root, &self.expanded).unwrap_or_default(),
             None => Vec::new(),
@@ -1817,12 +2264,20 @@ impl AppState {
     }
 
     pub(crate) fn collapse_all(&mut self, cx: &mut Context<Self>) {
+        if self.remote.is_some() {
+            self.remote_expanded.clear();
+            self.refresh_remote_tree(cx);
+            return;
+        }
         self.expanded.clear();
         self.refresh_tree(cx);
     }
 
-    /// 当前 Git 面板操作的目录（选中的子仓库，或工作区根）；无工作区为 `None`。
+    /// 当前 Git 面板操作的目录（选中的子仓库，或工作区根）；无工作区/远程为 `None`。
     pub(crate) fn git_dir(&self) -> Option<PathBuf> {
+        if self.remote.is_some() {
+            return None;
+        }
         self.git_active.clone().or_else(|| self.root.clone())
     }
 
@@ -2008,6 +2463,7 @@ impl AppState {
                 self.editor.move_to(0, false);
                 self.scroll_editor_to_cursor();
                 self.open_path = Some(path);
+                self.remote_open_rel = None;
                 self.center = CenterView::File;
                 self.dirty = false;
                 self.notice = None;
@@ -2020,7 +2476,62 @@ impl AppState {
         cx.notify();
     }
 
+    /// 打开远程文件：读文件走 ssh，必须放后台线程，否则界面会卡住等网络。
+    pub(crate) fn open_remote_file(&mut self, rel: String, cx: &mut Context<Self>) {
+        let Some(fs) = self.remote_fs() else {
+            return;
+        };
+        // 已经在编辑同一个文件：直接切到编辑器，不重新拉内容（否则丢失未保存改动）
+        if self.remote_open_rel.as_deref() == Some(rel.as_str()) {
+            self.center = CenterView::File;
+            self.input_target = InputTarget::Editor;
+            cx.notify();
+            return;
+        }
+        let read_rel = rel.clone();
+        self.remote_open_gen += 1;
+        let open_gen = self.remote_open_gen;
+        let (tx, rx) = flume::bounded::<Result<String, String>>(1);
+        std::thread::spawn(move || {
+            // 用 read_text_exact：超过上限直接报错，避免截断内容被保存写坏远端文件
+            let _ = tx.send(fs.read_text_exact(&read_rel));
+        });
+        cx.spawn(async move |weak, async_cx| {
+            if let Ok(msg) = rx.recv_async().await {
+                let _ = weak.update(async_cx, |this, cx| {
+                    // 期间又点了别的文件 / 切了工作区：只采用最后一次打开的请求
+                    if this.remote_open_gen != open_gen {
+                        return;
+                    }
+                    match msg {
+                        Ok(content) => {
+                            this.editor.reset(content);
+                            this.editor.move_to(0, false);
+                            this.scroll_editor_to_cursor();
+                            this.remote_open_rel = Some(rel);
+                            this.open_path = None;
+                            this.center = CenterView::File;
+                            this.dirty = false;
+                            this.notice = None;
+                            this.on_editor_opened();
+                            cx.notify();
+                        }
+                        Err(e) => {
+                            this.notice = Some(format!("无法读取远程文件：{e}"));
+                            cx.notify();
+                        }
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn save_file(&mut self, cx: &mut Context<Self>) {
+        if let Some(rel) = self.remote_open_rel.clone() {
+            self.save_remote_file(rel, cx);
+            return;
+        }
         let Some(path) = self.open_path.clone() else {
             self.notice = Some("没有打开的文件".into());
             cx.notify();
@@ -2034,6 +2545,46 @@ impl AppState {
             }
             Err(e) => self.notice = Some(format!("保存失败：{e}")),
         }
+        cx.notify();
+    }
+
+    /// 远程保存：写回走 ssh，后台线程执行；回来后按内容判断是否仍是脏的。
+    fn save_remote_file(&mut self, rel: String, cx: &mut Context<Self>) {
+        let Some(fs) = self.remote_fs() else {
+            self.notice = Some("远程连接已断开".into());
+            cx.notify();
+            return;
+        };
+        let content = self.editor.text().to_string();
+        let sent = content.clone();
+        let check_rel = rel.clone();
+        let (tx, rx) = flume::bounded::<Result<String, String>>(1);
+        std::thread::spawn(move || {
+            let r = fs.write_text(&rel, &sent);
+            let _ = tx.send(r.map(|()| sent));
+        });
+        cx.spawn(async move |weak, async_cx| {
+            if let Ok(msg) = rx.recv_async().await {
+                let _ = weak.update(async_cx, |this, cx| {
+                    // 期间切了工作区 / 换了文件：这份结果不属于当前编辑器
+                    if this.remote_open_rel.as_deref() != Some(check_rel.as_str()) {
+                        return;
+                    }
+                    match msg {
+                        Ok(saved) => {
+                            // 写盘期间可能又改了：内容一致才算干净
+                            if this.editor.text() == saved.as_str() {
+                                this.dirty = false;
+                            }
+                            this.notice = Some("已保存（远程）".into());
+                        }
+                        Err(e) => this.notice = Some(format!("保存失败：{e}")),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
         cx.notify();
     }
 
@@ -2092,6 +2643,20 @@ impl AppState {
     pub(crate) fn apply_workspace_input(&mut self, cx: &mut Context<Self>) {
         let raw = self.ws_input.text().trim().to_string();
         if raw.is_empty() {
+            return;
+        }
+        // 手输路径行也收 `ssh://` 连接串，与工作区管理器的「连接远程」一致。
+        if neverwork_core::is_remote_url(&raw) {
+            match neverwork_core::SshTarget::parse(&raw) {
+                Ok(t) => {
+                    self.ws_prompt_open = false;
+                    self.connect_remote(t, None, cx);
+                }
+                Err(e) => {
+                    self.notice = Some(format!("远程连接串无效：{e}"));
+                    cx.notify();
+                }
+            }
             return;
         }
         self.enter_workspace(PathBuf::from(&raw), cx);
@@ -2173,7 +2738,13 @@ impl AppState {
         match target {
             InputTarget::Chat => &self.chat,
             InputTarget::Editor => &self.editor,
-            InputTarget::Workspace => &self.ws_input,
+            InputTarget::Workspace => {
+                if self.ws_pw_focus {
+                    &self.ws_pw_input
+                } else {
+                    &self.ws_input
+                }
+            }
             InputTarget::SessionSearch => &self.session_search,
             InputTarget::RenameSession => &self.rename_buf,
             InputTarget::Field(_) => &self.field_buf,
@@ -2184,7 +2755,13 @@ impl AppState {
         match target {
             InputTarget::Chat => &mut self.chat,
             InputTarget::Editor => &mut self.editor,
-            InputTarget::Workspace => &mut self.ws_input,
+            InputTarget::Workspace => {
+                if self.ws_pw_focus {
+                    &mut self.ws_pw_input
+                } else {
+                    &mut self.ws_input
+                }
+            }
             InputTarget::SessionSearch => &mut self.session_search,
             InputTarget::RenameSession => &mut self.rename_buf,
             InputTarget::Field(_) => &mut self.field_buf,
@@ -2202,7 +2779,9 @@ impl AppState {
     /// 自动保存：开启时每次改动重新计时 800ms，超时后写盘。
     /// 每次新改动会推进 `auto_save_gen`，只有最后一次计时器真正落盘。
     pub(crate) fn schedule_auto_save(&mut self) {
-        if !self.settings.auto_save || self.open_path.is_none() {
+        if !self.settings.auto_save
+            || (self.open_path.is_none() && self.remote_open_rel.is_none())
+        {
             return;
         }
         let gen = self.auto_save_gen.get() + 1;
@@ -2216,6 +2795,11 @@ impl AppState {
             return;
         }
         self.auto_save_pending = false;
+        // 远程文件也走自动保存（内部已转后台线程）
+        if let Some(rel) = self.remote_open_rel.clone() {
+            self.save_remote_file(rel, cx);
+            return;
+        }
         if let Some(path) = self.open_path.clone() {
             if crate::filesystem::write_file(&path, self.editor.text()).is_ok() {
                 self.dirty = false;
@@ -2226,6 +2810,23 @@ impl AppState {
 
     pub(crate) fn on_chat_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         self.switch_input_target(InputTarget::Chat);
+        if ev.keystroke.key == "escape" {
+            let mut closed = false;
+            if self.thinking_panel {
+                self.thinking_panel = false;
+                // 面板关了就不再跟踪拖动，否则残留的 true 会让下一次鼠标移动改档位
+                self.thinking_dragging = false;
+                closed = true;
+            }
+            if self.composer_menu {
+                self.composer_menu = false;
+                closed = true;
+            }
+            if closed {
+                cx.notify();
+                return;
+            }
+        }
         if let Some(action) = keymap::route(&ev.keystroke) {
             self.apply_action(InputTarget::Chat, action, cx);
         }
@@ -2323,7 +2924,10 @@ impl AppState {
     ) {
         match field {
             FormField::SkillSearch => {
-                self.skill_search = value;
+                if self.skill_search != value {
+                    self.skill_search = value;
+                    self.on_skill_search_changed(cx);
+                }
             }
             FormField::ImportPath => {
                 self.import_path = value;
@@ -2454,7 +3058,9 @@ impl AppState {
                 }
                 // 工作区输入同时用于「切换到新路径」与「重命名工作区」两种场景
                 InputTarget::Workspace => {
-                    if self.ws_rename.is_some() {
+                    if self.ws_remote_open {
+                        self.connect_remote_from_input(cx);
+                    } else if self.ws_rename.is_some() {
                         self.commit_rename_workspace(cx);
                     } else {
                         self.apply_workspace_input(cx);
@@ -2671,8 +3277,23 @@ impl AppState {
             }
         } else {
             // 单个助手：不套任何角色 prompt，避免「规划者 / 编码」这类
-            // 与具体诉求无关的角色约束把问答带偏。
-            let solo = neverwork_core::Role::new("agent", "Assistant", "A");
+            // 与具体诉求无关的角色约束把问答带偏。但已安装的文本技能仍要
+            // 注入，否则装完技能对话没有任何变化（看起来像假安装）。
+            let mut solo = neverwork_core::Role::new("agent", "Assistant", "A");
+            let installed_ids: Vec<String> = self
+                .settings
+                .skills
+                .iter()
+                .filter(|s| s.installed && !s.is_mcp())
+                .map(|s| s.id.clone())
+                .collect();
+            if !installed_ids.is_empty() {
+                solo.prompt.push_str(&role_skills_section(
+                    &installed_ids,
+                    &self.settings.skills,
+                    &self.known_skills(),
+                ));
+            }
             self.spawn_agents_chain(
                 session_idx,
                 text,
@@ -2731,30 +3352,49 @@ impl AppState {
     }
 
     /// 在团队编辑器里给角色挂一个插件：没装过先安装，再记到 `Role.skills`。
-    /// MCP 插件需要用户确认（启动外部进程），确认通过后自动绑到这个角色。
+    /// MCP 插件需要用户确认（启动外部进程），确认通过后自动绑到这个角色；
+    /// skills.sh 条目正文要等安装时从上游解析，走远程安装并记下绑定。
     pub(crate) fn attach_skill_to_role(
         &mut self,
         role_idx: usize,
         skill: neverwork_core::Skill,
         cx: &mut Context<Self>,
     ) {
-        if skill.is_mcp() && !self.is_skill_installed(&skill.id) {
-            self.pending_mcp_attach = Some(role_idx);
-            self.install_skill(skill, cx);
-            return;
-        }
         if !self.is_skill_installed(&skill.id) {
+            if skill.is_mcp() {
+                self.pending_mcp_attach = Some(role_idx);
+                self.install_skill(skill, cx);
+                return;
+            }
+            if let Some(entry) = self
+                .market_entry_for(&skill.id)
+                .filter(|e| e.remote.is_some() && !e.remote_only)
+            {
+                self.install_remote_entry(entry, Some(role_idx), cx);
+                return;
+            }
             self.install_skill(skill.clone(), cx);
         }
+        self.bind_skill_to_role(role_idx, &skill.id, &skill.name, cx);
+    }
+
+    /// 把已安装的技能记到角色的 `Role.skills`（内存，点「保存」才写盘）。
+    pub(crate) fn bind_skill_to_role(
+        &mut self,
+        role_idx: usize,
+        id: &str,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) {
         let ti = self.active_team_index();
         if let Some(team) = self.config.teams.get_mut(ti) {
             if let Some(role) = team.roles.get_mut(role_idx) {
-                if !role.skills.contains(&skill.id) {
-                    role.skills.push(skill.id.clone());
+                if !role.skills.iter().any(|x| x == id) {
+                    role.skills.push(id.to_string());
                 }
             }
         }
-        self.notice = Some(format!("已给角色添加插件「{}」，点「保存」写盘", skill.name));
+        self.notice = Some(format!("已给角色添加插件「{name}」，点「保存」写盘"));
         cx.notify();
     }
 
@@ -2865,10 +3505,14 @@ impl AppState {
             seconds: self.settings.max_run_seconds,
         };
         let cancel = self.cancel.clone();
-        // 无工作区时工具不限制路径（阶段一）；远程工作区在阶段二换成远程后端。
-        let ctx = match &self.root {
-            Some(root) => neverwork_agent::tools::ToolContext::new(root.clone()),
-            None => neverwork_agent::tools::ToolContext::unrestricted(),
+        // 远程工作区走 ssh 后端；本地 / 无工作区保持原语义。
+        let remote_auth = self.remote_auth();
+        let ctx = match (&self.remote, &self.root) {
+            (Some(target), _) => {
+                neverwork_agent::tools::ToolContext::remote_auth(target.clone(), remote_auth)
+            }
+            (None, Some(root)) => neverwork_agent::tools::ToolContext::new(root.clone()),
+            (None, None) => neverwork_agent::tools::ToolContext::unrestricted(),
         };
         // 线程里用一份，UI 侧留一份（角色名/颜色要用来渲染气泡）
         // 本会话之前聊过的内容。不喂给模型它就「失忆」：第二轮问
@@ -3031,6 +3675,7 @@ impl AppState {
                     }
                     neverwork_agent::AgentEvent::ToolStarted {
                         call,
+                        round,
                         requires_approval,
                         preview,
                     } => {
@@ -3052,6 +3697,8 @@ impl AppState {
                                     } else {
                                         ToolRunStatus::Running
                                     },
+                                    thread: Some(ri),
+                                    round: Some(round),
                                     output: String::new(),
                                     diff: preview
                                         .iter()
@@ -3469,15 +4116,6 @@ impl AppState {
         .detach();
     }
 
-
-    /// 展开 / 收起一个工具步骤组。
-    pub(crate) fn toggle_steps(&mut self, key: usize, cx: &mut Context<Self>) {
-        if !self.expanded_steps.remove(&key) {
-            self.expanded_steps.insert(key);
-        }
-        cx.notify();
-    }
-
     // ===== 多光标 =====
 
     /// 给一段字节区间补上「额外光标」（Alt+点击用）。
@@ -3765,9 +4403,6 @@ impl AppState {
                     };
                 }
             }
-            // 保持展开：`awaiting` 是强制展开的条件，状态一回 `Running` 卡片就会
-            // 收起，用户看不到随后的写入结果和 diff。
-            self.expanded_steps.insert(p.msg_idx);
             // 决定已下：离开「等人」，回到执行中（下一次落盘才不会被当成崩溃）
             if let Some(s) = self.sessions.get_mut(p.session_idx) {
                 if s.stage == neverwork_core::TaskStage::AwaitingApproval {
@@ -3903,6 +4538,7 @@ impl Render for AppState {
         // 否则焦点每帧被拉向无节点句柄，键盘输入全部丢失。
         if self.input_target == InputTarget::Workspace
             && !self.ws_prompt_open
+            && !self.ws_remote_open
             && self.ws_rename.is_none()
         {
             self.restore_input_target();
@@ -4883,6 +5519,8 @@ mod history_tests {
                 path: "a.rs".into(),
                 summary: "读取 a.rs".into(),
                 status,
+                thread: None,
+                round: None,
                 output: "SECRET_OUTPUT".into(),
                 diff: vec![],
                 added: 0,

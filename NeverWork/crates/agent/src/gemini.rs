@@ -60,6 +60,15 @@ struct WireRequest {
 struct GenerationConfig {
     temperature: f32,
     max_output_tokens: u32,
+    /// 思考等级；`Auto` 时不发。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<ThinkingConfig>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThinkingConfig {
+    thinking_budget: i32,
 }
 
 /// 把内部消息拆成 (system 文本, contents)。
@@ -206,6 +215,19 @@ impl LlmProvider for GeminiProvider {
 }
 
 impl GeminiProvider {
+    /// 生成参数：开思考时把预算显式发给 Gemini，并把输出上限抬到预算之上
+    /// （思考 token 计入输出，低于预算会被服务端拒绝）。
+    fn generation_config(&self) -> GenerationConfig {
+        let budget = self.config.thinking.budget();
+        GenerationConfig {
+            temperature: self.config.temperature.clamp(0.0, 2.0),
+            max_output_tokens: budget.map_or(8192, |b| b + 8192),
+            thinking_config: budget.map(|b| ThinkingConfig {
+                thinking_budget: b as i32,
+            }),
+        }
+    }
+
     fn stream_impl(
         &self,
         messages: &[ChatMessage],
@@ -223,10 +245,7 @@ impl GeminiProvider {
             system_instruction: system.map(|text| SystemInstruction {
                 parts: vec![Part { text }],
             }),
-            generation_config: Some(GenerationConfig {
-                temperature: self.config.temperature.clamp(0.0, 2.0),
-                max_output_tokens: 8192,
-            }),
+            generation_config: Some(self.generation_config()),
         };
 
         let resp = match ureq::post(&url)
@@ -273,7 +292,17 @@ impl GeminiProvider {
 /// 给测试用：构造请求体。
 #[cfg(test)]
 pub(crate) fn debug_body(messages: &[ChatMessage], temperature: f32) -> Value {
+    debug_body_thinking(messages, temperature, neverwork_core::ThinkingLevel::Auto)
+}
+
+#[cfg(test)]
+pub(crate) fn debug_body_thinking(
+    messages: &[ChatMessage],
+    temperature: f32,
+    thinking: neverwork_core::ThinkingLevel,
+) -> Value {
     let (system, contents) = to_wire(messages);
+    let budget = thinking.budget();
     let body = WireRequest {
         contents,
         system_instruction: system.map(|text| SystemInstruction {
@@ -281,7 +310,10 @@ pub(crate) fn debug_body(messages: &[ChatMessage], temperature: f32) -> Value {
         }),
         generation_config: Some(GenerationConfig {
             temperature,
-            max_output_tokens: 8192,
+            max_output_tokens: budget.map_or(8192, |b| b + 8192),
+            thinking_config: budget.map(|b| ThinkingConfig {
+                thinking_budget: b as i32,
+            }),
         }),
     };
     serde_json::to_value(&body).unwrap_or_else(|_| serde_json::Value::Object(Default::default()))
@@ -413,5 +445,16 @@ mod tests {
         let data = r#"{"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0}}"#;
         assert_eq!(extract_usage(data), None);
         assert_eq!(extract_usage(r#"{"candidates":[]}"#), None);
+    }
+
+    #[test]
+    fn thinking_config_only_when_level_chosen() {
+        let msgs = [ChatMessage::user("hi")];
+        let auto = debug_body(&msgs, 0.7);
+        assert!(auto["generationConfig"].get("thinkingConfig").is_none());
+        let high = debug_body_thinking(&msgs, 0.7, neverwork_core::ThinkingLevel::High);
+        assert_eq!(high["generationConfig"]["thinkingConfig"]["thinkingBudget"], 16384);
+        // 思考 token 计入输出，输出上限必须抬到预算之上
+        assert!(high["generationConfig"]["maxOutputTokens"].as_u64().unwrap() > 16384);
     }
 }

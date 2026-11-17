@@ -66,7 +66,7 @@ impl AppState {
         // 工作区切换：内联输入，回车生效。
         if self.ws_prompt_open {
             let text = if self.ws_input.text().is_empty() {
-                "输入工作区绝对路径，回车切换".to_string()
+                "输入工作区路径或 ssh://user@host:/path，回车切换".to_string()
             } else {
                 self.ws_input.text().to_string()
             };
@@ -120,9 +120,14 @@ impl AppState {
                                     .text_color(theme::dim())
                                     .child(SharedString::from(format!(
                                         "当前：{}",
-                                        self.root
+                                        self.remote
                                             .as_ref()
-                                            .map(|r| r.display().to_string())
+                                            .map(|t| t.url())
+                                            .or_else(|| {
+                                                self.root
+                                                    .as_ref()
+                                                    .map(|r| r.display().to_string())
+                                            })
                                             .unwrap_or_else(|| "未选择".into())
                                     ))),
                             )

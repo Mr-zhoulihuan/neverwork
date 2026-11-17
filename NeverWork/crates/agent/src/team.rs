@@ -363,6 +363,7 @@ mod role_provider_tests {
             base_url: "https://api.deepseek.com/v1".into(),
             model: "deepseek-flash".into(),
             temperature: 0.7,
+            thinking: neverwork_core::ThinkingLevel::Auto,
         }
     }
 

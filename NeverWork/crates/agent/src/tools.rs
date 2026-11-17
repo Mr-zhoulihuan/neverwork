@@ -11,6 +11,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use neverwork_core::ssh::{RemoteAuth, RemoteFs, SshTarget};
 use neverwork_core::AppResult;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -121,6 +122,15 @@ impl ToolCall {
                 let q = a.get("query").and_then(|v| v.as_str()).unwrap_or("");
                 format!("\"{q}\"")
             }
+            "web_search" => {
+                let q = a.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                format!("\"{q}\"")
+            }
+            "web_fetch" => a
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             _ => String::new(),
         }
     }
@@ -219,35 +229,23 @@ fn io_retryable(e: &std::io::Error) -> bool {
     )
 }
 
-/// 应用错误（如原子写）→ 分类；IO 类再细分，其余归普通 IO 错误。
-fn app_code(e: &neverwork_core::AppError) -> &'static str {
-    match e {
-        neverwork_core::AppError::Io(io) => io_code(io),
-        _ => "IO_ERROR",
-    }
-}
-
-fn app_retryable(e: &neverwork_core::AppError) -> bool {
-    match e {
-        neverwork_core::AppError::Io(io) => io_retryable(io),
-        _ => true,
-    }
-}
-
 /// 工具执行上下文。
 #[derive(Clone)]
 pub struct ToolContext {
     /// 工作区根；无限制模式下是用户主目录，仅作相对路径基准。
+    /// 远程工作区时仅用于展示，真实路径由 `remote` 决定。
     pub root: PathBuf,
     /// 未指定工作区：不限制在 root 内，绝对路径直接可用。
     unrestricted: bool,
+    /// 远程工作区；`Some` 时读写/检索全部走 ssh。
+    remote: Option<RemoteFs>,
 }
 
 impl ToolContext {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let root = fs::canonicalize(&root).unwrap_or(root);
-        Self { root, unrestricted: false }
+        Self { root, unrestricted: false, remote: None }
     }
 
     /// 未指定工作区：绝对路径直接可用，相对路径以用户主目录为基准。
@@ -255,7 +253,34 @@ impl ToolContext {
     /// 写操作仍由 `requires_approval` → NeedApproval 流程把关，
     /// 这里放开的是「能不能看/写到工作区之外」，不是「写不用确认」。
     pub fn unrestricted() -> Self {
-        Self { root: Self::home_dir(), unrestricted: true }
+        Self { root: Self::home_dir(), unrestricted: true, remote: None }
+    }
+
+    /// 远程工作区：相对路径以远端根为基准，安全规则（`..`、`.git`、大小上限）照旧。
+    pub fn remote(target: SshTarget) -> Self {
+        Self::remote_auth(target, RemoteAuth::key_only())
+    }
+
+    /// 远程工作区（指定认证）：密钥优先，密码只留在内存，不写任何配置。
+    pub fn remote_auth(target: SshTarget, auth: RemoteAuth) -> Self {
+        let root = PathBuf::from(&target.root);
+        Self {
+            root,
+            unrestricted: false,
+            remote: Some(RemoteFs::with_auth(target, auth)),
+        }
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
+    }
+
+    /// 工作区根的一行描述（提示词与错误信息用）。
+    pub fn describe_root(&self) -> String {
+        match &self.remote {
+            Some(fs) => fs.target().display(),
+            None => self.root.display().to_string(),
+        }
     }
 
     pub fn is_unrestricted(&self) -> bool {
@@ -346,6 +371,164 @@ impl ToolContext {
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| path.to_string_lossy().to_string())
     }
+
+    // ============ 后端无关的读写（本地 / 远程） ============
+
+    pub(crate) fn read_bytes(&self, rel: &str) -> Result<Vec<u8>, FsError> {
+        if let Some(remote) = &self.remote {
+            return remote
+                .read_text(rel)
+                .map(|t| t.into_bytes())
+                .map_err(FsError::Remote);
+        }
+        let path = self.resolve(rel).map_err(FsError::Denied)?;
+        fs::read(&path).map_err(FsError::Io)
+    }
+
+    /// 写前读取旧内容（写路径规则 + `.git` 拦截）。
+    pub(crate) fn read_text_for_write(&self, rel: &str) -> Result<String, FsError> {
+        if let Some(remote) = &self.remote {
+            reject_git_write(rel)?;
+            return remote.read_text_opt(rel).map_err(FsError::Remote);
+        }
+        let path = self.resolve_write(rel).map_err(FsError::Denied)?;
+        Ok(fs::read_to_string(&path).unwrap_or_default())
+    }
+
+    pub(crate) fn write_text(&self, rel: &str, content: &str) -> Result<(), FsError> {
+        if let Some(remote) = &self.remote {
+            reject_git_write(rel)?;
+            return remote.write_text(rel, content).map_err(FsError::Remote);
+        }
+        let path = self.resolve_write(rel).map_err(FsError::Denied)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(FsError::Io)?;
+        }
+        write_atomic(&path, content).map_err(|e| match e {
+            neverwork_core::AppError::Io(io) => FsError::Io(io),
+            other => FsError::Other(other.to_string()),
+        })
+    }
+
+    pub(crate) fn exists(&self, rel: &str) -> bool {
+        match &self.remote {
+            Some(remote) => remote.exists(rel),
+            None => self.resolve(rel).map(|p| p.exists()).unwrap_or(false),
+        }
+    }
+
+    pub(crate) fn list_entries(&self, rel: &str) -> Result<Vec<(bool, String)>, FsError> {
+        if let Some(remote) = &self.remote {
+            return remote.list_entries(rel).map_err(FsError::Remote);
+        }
+        let path = self.resolve(rel).map_err(FsError::Denied)?;
+        let entries = fs::read_dir(&path).map_err(FsError::Io)?;
+        let mut items = Vec::new();
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            items.push((is_dir, name));
+        }
+        Ok(items)
+    }
+
+    pub(crate) fn search_fixed(
+        &self,
+        pattern: &str,
+        base: Option<&str>,
+    ) -> Result<Vec<String>, FsError> {
+        if let Some(remote) = &self.remote {
+            return remote
+                .search_fixed(pattern, base.unwrap_or(""), MAX_SEARCH_HITS)
+                .map_err(FsError::Remote);
+        }
+        let base_path = match base.map(str::trim).filter(|b| !b.is_empty()) {
+            Some(b) => Some(self.resolve(b).map_err(FsError::Denied)?),
+            None => None,
+        };
+        let mut hits = Vec::new();
+        walk_search(
+            base_path.as_deref().unwrap_or(&self.root),
+            &self.root,
+            pattern,
+            &mut hits,
+        );
+        Ok(hits)
+    }
+
+    /// 展示路径；远程直接归一化模型给的相对路径。
+    pub(crate) fn display(&self, rel: &str) -> String {
+        if self.remote.is_some() {
+            let d = rel.trim().replace('\\', "/");
+            let d = d.trim_start_matches("./");
+            return if d.is_empty() { ".".to_string() } else { d.to_string() };
+        }
+        match self.resolve(rel) {
+            Ok(p) => self.display_rel(&p),
+            Err(_) => rel.to_string(),
+        }
+    }
+}
+
+/// 后端无关的文件错误：本地 IO / 路径拒绝 / 远程命令失败。
+pub(crate) enum FsError {
+    Denied(String),
+    Io(std::io::Error),
+    Remote(String),
+    Other(String),
+}
+
+impl FsError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            FsError::Denied(_) => "PATH_DENIED",
+            FsError::Io(e) => io_code(e),
+            FsError::Other(_) => "IO_ERROR",
+            FsError::Remote(m) => {
+                if m.contains("越出工作区") || m.contains("不允许") {
+                    "PATH_DENIED"
+                } else if m.contains("不存在") {
+                    "NOT_FOUND"
+                } else if m.contains("认证") || m.contains("指纹") {
+                    "PERMISSION_DENIED"
+                } else {
+                    "REMOTE_ERROR"
+                }
+            }
+        }
+    }
+
+    pub(crate) fn retryable(&self) -> bool {
+        match self {
+            FsError::Denied(_) => false,
+            FsError::Io(e) => io_retryable(e),
+            FsError::Other(_) => true,
+            FsError::Remote(m) => {
+                !(m.contains("越出工作区")
+                    || m.contains("不允许")
+                    || m.contains("不存在")
+                    || m.contains("认证")
+                    || m.contains("指纹"))
+            }
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            FsError::Denied(m) | FsError::Remote(m) | FsError::Other(m) => m.clone(),
+            FsError::Io(e) => e.to_string(),
+        }
+    }
+}
+
+/// 远程写入也要挡 `.git`：hooks / config 都能变成持久后门。
+fn reject_git_write(rel: &str) -> Result<(), FsError> {
+    if rel.split(['/', '\\']).any(|seg| seg == ".git") {
+        return Err(FsError::Denied(format!(
+            "拒绝写入版本库元数据目录（.git）：{rel}"
+        )));
+    }
+    Ok(())
 }
 
 /// 词法归一化（不触碰文件系统）。
@@ -478,6 +661,32 @@ fn builtin_specs() -> Vec<ToolSpec> {
                 "required": ["path", "old_string", "new_string"]
             }),
             requires_approval: true,
+        },
+        ToolSpec {
+            name: "web_search".into(),
+            description: "联网搜索网页（必应），返回标题、链接与摘要。查最新版本、官方文档、新闻、报错出处等外部信息时用它，不要凭记忆猜。需要看某一页全文时，再对返回的链接用 web_fetch。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "搜索关键词，中文或英文均可" },
+                    "count": { "type": "integer", "description": "返回几条，默认 8，最多 10" }
+                },
+                "required": ["query"]
+            }),
+            requires_approval: false,
+        },
+        ToolSpec {
+            name: "web_fetch".into(),
+            description: "抓取一个 http/https 网页，去掉标签后返回纯文本（默认最多 8000 字）。用于读搜索结果的某一页、官方文档、README 或 issue 的具体内容。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "完整链接，如 https://example.com/doc" },
+                    "max_chars": { "type": "integer", "description": "最多返回多少字，默认 8000，上限 20000" }
+                },
+                "required": ["url"]
+            }),
+            requires_approval: false,
         },
     ]
 }
@@ -651,8 +860,7 @@ pub fn preview(call: &ToolCall, ctx: &ToolContext) -> Result<Vec<DiffLine>, Stri
         "write_file" => {
             let rel = a.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let content = a.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let path = ctx.resolve_write(rel)?;
-            let old = fs::read_to_string(&path).unwrap_or_default();
+            let old = ctx.read_text_for_write(rel).map_err(|e| e.message())?;
             Ok(diff::with_context(&diff::diff_lines(&old, content), 3))
         }
         "multi_patch" => crate::multi_patch::preview_preview(call, ctx),
@@ -660,8 +868,9 @@ pub fn preview(call: &ToolCall, ctx: &ToolContext) -> Result<Vec<DiffLine>, Stri
             let rel = a.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let old_s = a.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
             let new_s = a.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-            let path = ctx.resolve_write(rel)?;
-            let old = fs::read_to_string(&path).map_err(|e| format!("读取失败：{e}"))?;
+            let old = ctx
+                .read_text_for_write(rel)
+                .map_err(|e| format!("读取失败：{}", e.message()))?;
             match apply_patch_text(&old, old_s, new_s) {
                 Ok(Some(updated)) => Ok(diff::with_context(&diff::diff_lines(&old, &updated), 3)),
                 // 已经改过：预览就是「无变化」
@@ -689,6 +898,8 @@ pub fn execute(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
         "write_file" => write_file(call, &a, ctx),
         "apply_patch" => apply_patch(call, &a, ctx),
         "multi_patch" => crate::multi_patch::execute(call, ctx),
+        "web_search" => crate::web::search(call),
+        "web_fetch" => crate::web::fetch(call),
         other => ToolResult::err_code(
             call,
             "UNKNOWN_TOOL",
@@ -719,18 +930,14 @@ fn read_file(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
     if rel.trim().is_empty() {
         return ToolResult::err_code(call, "BAD_ARGS", "缺少 path 参数", false);
     }
-    let path = match ctx.resolve(rel) {
-        Ok(p) => p,
-        Err(e) => return ToolResult::err_code(call, "PATH_DENIED", e, false),
-    };
-    let bytes = match fs::read(&path) {
+    let bytes = match ctx.read_bytes(rel) {
         Ok(b) => b,
         Err(e) => {
             return ToolResult::err_code(
                 call,
-                io_code(&e),
-                format!("读取 {rel} 失败：{e}"),
-                io_retryable(&e),
+                e.code(),
+                format!("读取 {rel} 失败：{}", e.message()),
+                e.retryable(),
             )
         }
     };
@@ -770,7 +977,7 @@ fn read_file(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
         shown += 1;
     }
 
-    let rel_disp = ctx.display_rel(&path);
+    let rel_disp = ctx.display(rel);
     let mut header = format!("文件 {rel_disp}（共 {total} 行");
     if shown < total {
         header.push_str(&format!("，显示 {offset}–{}", offset + shown - 1));
@@ -784,38 +991,23 @@ fn read_file(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
 
 fn list_dir(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
     let rel = a.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    let path = match ctx.resolve(rel) {
-        Ok(p) => p,
-        Err(e) => return ToolResult::err_code(call, "PATH_DENIED", e, false),
-    };
-    let entries = match fs::read_dir(&path) {
-        Ok(e) => e,
+    let mut items = match ctx.list_entries(rel) {
+        Ok(v) => v,
         Err(e) => {
             return ToolResult::err_code(
                 call,
-                io_code(&e),
-                format!("无法读取目录 {rel}：{e}"),
-                io_retryable(&e),
+                e.code(),
+                format!("无法读取目录 {rel}：{}", e.message()),
+                e.retryable(),
             )
         }
     };
-    let mut items: Vec<(bool, String)> = Vec::new();
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if name == ".git" || name == "target" || name == "node_modules" {
-            continue;
-        }
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        items.push((is_dir, name));
-    }
+    items.retain(|(_, name)| !matches!(name.as_str(), ".git" | "target" | "node_modules"));
     items.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.to_lowercase().cmp(&y.1.to_lowercase())));
     let total = items.len();
     items.truncate(MAX_LIST_ENTRIES);
 
-    let mut out = format!(
-        "目录 {}（{total} 项）\n",
-        ctx.display_rel(&path)
-    );
+    let mut out = format!("目录 {}（{total} 项）\n", ctx.display(rel));
     for (is_dir, name) in &items {
         out.push_str(if *is_dir { "  " } else { "  " });
         out.push_str(name);
@@ -835,16 +1027,19 @@ fn search_files(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
     if pattern.is_empty() {
         return ToolResult::err_code(call, "BAD_ARGS", "缺少 pattern 参数", false);
     }
-    let base = match a.get("path").and_then(|v| v.as_str()) {
-        Some(p) if !p.trim().is_empty() => match ctx.resolve(p) {
-            Ok(x) => x,
-            Err(e) => return ToolResult::err_code(call, "PATH_DENIED", e, false),
-        },
-        _ => ctx.root.clone(),
-    };
+    let base = a.get("path").and_then(|v| v.as_str()).filter(|p| !p.trim().is_empty());
 
-    let mut hits: Vec<String> = Vec::new();
-    walk_search(&base, &ctx.root, pattern, &mut hits);
+    let hits = match ctx.search_fixed(pattern, base) {
+        Ok(h) => h,
+        Err(e) => {
+            return ToolResult::err_code(
+                call,
+                e.code(),
+                format!("搜索失败：{}", e.message()),
+                e.retryable(),
+            )
+        }
+    };
     let mut out = format!("搜索 \"{pattern}\"：命中 {} 处\n", hits.len());
     for h in &hits {
         out.push_str(h);
@@ -871,6 +1066,14 @@ fn search_code(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
         .trim();
     if query.is_empty() {
         return ToolResult::err_code(call, "BAD_ARGS", "缺少 query 参数", false);
+    }
+    if ctx.is_remote() {
+        return ToolResult::err_code(
+            call,
+            "UNSUPPORTED",
+            "远程工作区暂不支持语义检索（search_code），请改用 search_files 按子串搜索",
+            false,
+        );
     }
     let top_k = a
         .get("top_k")
@@ -950,20 +1153,23 @@ fn write_file(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
             false,
         );
     }
-    let path = match ctx.resolve_write(rel) {
-        Ok(p) => p,
-        Err(e) => return ToolResult::err_code(call, "PATH_DENIED", e, false),
+    let old = match ctx.read_text_for_write(rel) {
+        Ok(t) => t,
+        Err(e) => {
+            return ToolResult::err_code(
+                call,
+                e.code(),
+                format!("读取 {rel} 失败：{}", e.message()),
+                e.retryable(),
+            )
+        }
     };
-    let old = fs::read_to_string(&path).unwrap_or_default();
     // 幂等：内容一模一样就不再重写。断点续跑/重试时同一笔写会被重放，
     // 每次真去写盘只会白改 mtime、多一轮 diff 预览与审批。
     if old == content {
         return ToolResult::ok_with_diff(
             call,
-            format!(
-                "{} 内容未变化（幂等跳过，未写入）",
-                ctx.display_rel(&path)
-            ),
+            format!("{} 内容未变化（幂等跳过，未写入）", ctx.display(rel)),
             Vec::new(),
             0,
             0,
@@ -972,26 +1178,16 @@ fn write_file(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
     let lines = diff::diff_lines(&old, content);
     let st = diff::stats(&lines);
 
-    if let Some(parent) = path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            return ToolResult::err_code(
-                call,
-                io_code(&e),
-                format!("创建目录失败：{e}"),
-                io_retryable(&e),
-            );
-        }
-    }
-    if let Err(e) = write_atomic(&path, content) {
+    if let Err(e) = ctx.write_text(rel, content) {
         return ToolResult::err_code(
             call,
-            app_code(&e),
-            format!("写入失败：{e}"),
-            app_retryable(&e),
+            e.code(),
+            format!("写入失败：{}", e.message()),
+            e.retryable(),
         );
     }
 
-    let rel_disp = ctx.display_rel(&path);
+    let rel_disp = ctx.display(rel);
     let existed = !old.is_empty();
     ToolResult::ok_with_diff(
         call,
@@ -1022,18 +1218,14 @@ fn apply_patch(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
             false,
         );
     }
-    let path = match ctx.resolve_write(rel) {
-        Ok(p) => p,
-        Err(e) => return ToolResult::err_code(call, "PATH_DENIED", e, false),
-    };
-    let old = match fs::read_to_string(&path) {
+    let old = match ctx.read_text_for_write(rel) {
         Ok(t) => t,
         Err(e) => {
             return ToolResult::err_code(
                 call,
-                io_code(&e),
-                format!("读取 {rel} 失败：{e}"),
-                io_retryable(&e),
+                e.code(),
+                format!("读取 {rel} 失败：{}", e.message()),
+                e.retryable(),
             )
         }
     };
@@ -1043,22 +1235,25 @@ fn apply_patch(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
         Ok(None) => {
             return ToolResult::ok(
                 call,
-                format!("{} 已经是目标内容（幂等跳过，未写入）", ctx.display_rel(&path)),
+                format!(
+                    "{} 已经是目标内容（幂等跳过，未写入）",
+                    ctx.display(rel)
+                ),
             )
         }
         Err(e) => return ToolResult::err_code(call, "PATCH_NO_MATCH", e, false),
     };
     let lines = diff::diff_lines(&old, &updated);
     let st = diff::stats(&lines);
-    if let Err(e) = write_atomic(&path, &updated) {
+    if let Err(e) = ctx.write_text(rel, &updated) {
         return ToolResult::err_code(
             call,
-            app_code(&e),
-            format!("写入失败：{e}"),
-            app_retryable(&e),
+            e.code(),
+            format!("写入失败：{}", e.message()),
+            e.retryable(),
         );
     }
-    let rel_disp = ctx.display_rel(&path);
+    let rel_disp = ctx.display(rel);
     ToolResult::ok_with_diff(
         call,
         format!("已修改 {rel_disp}：+{} −{} 行", st.added, st.removed),
@@ -1135,6 +1330,8 @@ mod tests {
             "write_file",
             "apply_patch",
             "multi_patch",
+            "web_search",
+            "web_fetch",
         ] {
             assert!(names.iter().any(|x| x == n), "缺少工具 {n}");
         }
@@ -1146,6 +1343,8 @@ mod tests {
         assert!(!requires_approval("list_dir"));
         assert!(!requires_approval("search_files"));
         assert!(!requires_approval("search_code"), "检索只读，不该弹审批");
+        assert!(!requires_approval("web_search"), "联网搜索只读，不该弹审批");
+        assert!(!requires_approval("web_fetch"), "抓网页只读，不该弹审批");
         assert!(requires_approval("write_file"));
         assert!(requires_approval("apply_patch"));
         assert!(requires_approval("multi_patch"));

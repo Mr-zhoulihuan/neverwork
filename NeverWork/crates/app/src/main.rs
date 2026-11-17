@@ -94,6 +94,16 @@ impl Render for Root {
 }
 
 fn main() {
+    // 远程密码认证的 askpass 端点：ssh 用 `SSH_ASKPASS` 调回本程序要密码。
+    // 必须最先判断，不能先建窗口 / 初始化日志；密码只从环境变量读一次，
+    // 打印到 stdout 后立即退出（不落盘、不进命令行）。
+    if std::env::var("NW_ASKPASS_MODE").as_deref() == Ok("1") {
+        if let Ok(secret) = std::env::var("NW_ASKPASS_SECRET") {
+            println!("{secret}");
+        }
+        return;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

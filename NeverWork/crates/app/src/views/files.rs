@@ -227,12 +227,14 @@ impl AppState {
                     div()
                         .text_xs()
                         .text_color(theme::dim())
-                        .child(SharedString::from(
+                        .child(SharedString::from(if let Some(t) = &self.remote {
+                            fit_text(&t.display(), 140.0, 12.0)
+                        } else {
                             self.workspace
                                 .as_ref()
                                 .map(|w| w.name.clone())
-                                .unwrap_or_else(|| "无工作区".into()),
-                        )),
+                                .unwrap_or_else(|| "无工作区".into())
+                        })),
                 ),
         );
 
@@ -245,10 +247,15 @@ impl AppState {
             .flex_1()
             .overflow_scroll();
 
+        let remote = self.remote.is_some();
         for f in &self.files {
             let indent = 8.0 + (f.level as f32) * 12.0;
             let abs = self.abs_path(&f.path);
-            let is_open = !f.is_dir && self.open_path.as_deref() == Some(abs.as_path());
+            let is_open = if remote {
+                !f.is_dir && self.remote_open_rel.as_deref() == Some(f.path.as_str())
+            } else {
+                !f.is_dir && self.open_path.as_deref() == Some(abs.as_path())
+            };
 
             let icon = if f.is_dir {
                 if f.expanded {
@@ -283,9 +290,21 @@ impl AppState {
                 .child(div().flex_1().child(SharedString::from(f.name.clone())));
 
             let row = if f.is_dir {
-                let path = abs.clone();
+                if remote {
+                    let rel = f.path.clone();
+                    row.on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                        this.toggle_remote_dir(rel.clone(), cx);
+                    }))
+                } else {
+                    let path = abs.clone();
+                    row.on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                        this.toggle_dir(path.clone(), cx);
+                    }))
+                }
+            } else if remote {
+                let rel = f.path.clone();
                 row.on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
-                    this.toggle_dir(path.clone(), cx);
+                    this.open_remote_file(rel.clone(), cx);
                 }))
             } else {
                 let path = abs.clone();
@@ -329,6 +348,24 @@ impl AppState {
                 .into_any_element();
         }
         let st = &self.git;
+
+        // 远程工作区的 Git 面板还没接：说明清楚，别让用户以为仓库坏了
+        if self.remote.is_some() {
+            return div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .text_xs()
+                .text_color(theme::dim())
+                .child("远程工作区暂不支持 Git 面板")
+                .child(
+                    div()
+                        .text_color(theme::muted())
+                        .child("文件树、编辑器与 Agent 工具照常可用"),
+                )
+                .into_any_element();
+        }
 
         let mut col = div().flex().flex_col().flex_1().min_h(px(0.0));
 
@@ -1130,7 +1167,7 @@ impl AppState {
             .overflow_scroll()
             .text_xs();
 
-        if self.open_path.is_none() {
+        if self.open_path.is_none() && self.remote_open_rel.is_none() {
             body = body.child(
                 div()
                     .p_3()

@@ -6,8 +6,9 @@
 //! - `Tencent` ：腾讯云 MCP 广场（国内直达）。列表页 SSR 里嵌着 30 条真实
 //!   条目的 JSON；安装时再抓详情页，从页面里的 `{"mcpServers":{...}}` 取
 //!   真实启动命令。
-//! - `GitHub`  ：真实技能仓库（anthropics/skills、vercel-labs/agent-skills）
-//!   里 `skills/<name>/SKILL.md` 的全文；正文缓存在条目里，安装即落盘。
+//! - `SkillsSh`：skills.sh（Agent Skills 目录）。首页服务端渲染的热榜用于
+//!   浏览，`/api/search` 用于搜索；列表不带正文，安装时按 GitHub 仓库
+//!   （或站点 `.well-known/agent-skills`）解析出 `SKILL.md` 再落盘。
 //!
 //! 网络失败时读 `~/.neverwork/marketplace.json` 缓存并在 UI 标注「上次同步」；
 //! 从未成功过就把错误原因交给 UI 显示，而不是回退到编造的条目。
@@ -27,17 +28,22 @@ pub const OFFICIAL_LIMIT: usize = 100;
 pub const TENCENT_LIST: &str = "https://cloud.tencent.com/developer/mcp";
 /// 腾讯云详情页前缀（`{前缀}{mcpId}`）。
 pub const TENCENT_DETAIL: &str = "https://cloud.tencent.com/developer/mcp/server/";
-/// 真实技能仓库：owner / repo / 分支。只收录已验证存在 `skills/` 目录的仓库。
-pub const GITHUB_REPOS: &[(&str, &str, &str)] = &[
-    ("anthropics", "skills", "main"),
-    ("vercel-labs", "agent-skills", "main"),
-];
-/// 每个仓库最多收录多少个技能（并行下载正文，太多会拖慢首次刷新）。
-const GITHUB_MAX_PER_REPO: usize = 24;
-/// 单个仓库内并行下载 SKILL.md 的线程数（TLS 握手是主要耗时，并发能线性提速）。
-const GITHUB_CONCURRENCY: usize = 12;
-/// 正文缓存上限：超过就截断（只用于安装初始正文，避免缓存文件过大）。
-const GITHUB_BODY_LIMIT: usize = 60_000;
+/// skills.sh 站点根（首页热榜与详情页共用）。
+pub const SKILLS_SH: &str = "https://www.skills.sh";
+/// skills.sh 搜索接口（`q` 至少 2 个字符）。
+pub const SKILLS_SH_SEARCH: &str = "https://www.skills.sh/api/search";
+/// jsDelivr 目录接口：列 GitHub 仓库某分支下的全部文件，用来定位 SKILL.md。
+pub const JSDELIVR_DATA: &str = "https://data.jsdelivr.com/v1/packages/gh";
+/// jsDelivr 文件 CDN（国内可达性好；失败回退 raw.githubusercontent.com）。
+pub const JSDELIVR_CDN: &str = "https://cdn.jsdelivr.net/gh";
+/// 搜索一次最多取多少条（上游上限 200）。
+const SKILLS_SH_LIMIT: usize = 200;
+/// 首页热榜里安装量单元格的 class 前缀（只取其后到 `<` 的文本）。
+const INSTALLS_MARK: &str = "font-mono text-sm text-foreground\">";
+/// 首页热榜最多收多少条（首页约 80 行，留一点余量）。
+const SKILLS_SH_HOME_MAX: usize = 100;
+/// 单个 SKILL.md 正文上限：超过就截断（防止设置文件与提示词过大）。
+const SKILL_BODY_LIMIT: usize = 200_000;
 /// 单个图标上限：超过就不缓存（有的图标地址指向的是大截图）。
 const ICON_MAX_BYTES: u64 = 256 * 1024;
 /// 并发下载图标的线程数（TLS 握手占大头，并发能线性提速）。
@@ -52,13 +58,13 @@ pub enum MarketSource {
     Official,
     #[serde(rename = "tencent")]
     Tencent,
-    #[serde(rename = "github")]
-    GitHub,
+    #[serde(rename = "skillssh")]
+    SkillsSh,
 }
 
 impl MarketSource {
     pub fn all() -> [MarketSource; 3] {
-        [MarketSource::Official, MarketSource::Tencent, MarketSource::GitHub]
+        [MarketSource::Official, MarketSource::Tencent, MarketSource::SkillsSh]
     }
 
     /// 缓存与状态键。
@@ -66,7 +72,7 @@ impl MarketSource {
         match self {
             MarketSource::Official => "official",
             MarketSource::Tencent => "tencent",
-            MarketSource::GitHub => "github",
+            MarketSource::SkillsSh => "skillssh",
         }
     }
 
@@ -74,7 +80,7 @@ impl MarketSource {
         match self {
             MarketSource::Official => "MCP 官方",
             MarketSource::Tencent => "腾讯云广场",
-            MarketSource::GitHub => "GitHub 技能",
+            MarketSource::SkillsSh => "skills.sh",
         }
     }
 
@@ -83,7 +89,7 @@ impl MarketSource {
         match self {
             MarketSource::Official => "registry.modelcontextprotocol.io",
             MarketSource::Tencent => "cloud.tencent.com",
-            MarketSource::GitHub => "raw.githubusercontent.com（jsDelivr 加速）",
+            MarketSource::SkillsSh => "www.skills.sh",
         }
     }
 
@@ -92,7 +98,7 @@ impl MarketSource {
         match self {
             MarketSource::Official => 0xa855f7,
             MarketSource::Tencent => 0x3b82f6,
-            MarketSource::GitHub => 0x6b7280,
+            MarketSource::SkillsSh => 0x10b981,
         }
     }
 
@@ -100,7 +106,7 @@ impl MarketSource {
         match key {
             "official" => Some(MarketSource::Official),
             "tencent" => Some(MarketSource::Tencent),
-            "github" => Some(MarketSource::GitHub),
+            "skillssh" => Some(MarketSource::SkillsSh),
             _ => None,
         }
     }
@@ -108,14 +114,23 @@ impl MarketSource {
 
 // ============ 条目与缓存 ============
 
+/// skills.sh 条目的上游身份：来源（`owner/repo` 或站点域名）与技能 id。
+///
+/// 列表接口只给名字和安装量，正文要等安装时按这对值去仓库/站点解析。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteSkillRef {
+    pub source: String,
+    pub id: String,
+}
+
 /// 市场条目：技能本体 + 下载来源标注。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketEntry {
     #[serde(flatten)]
     pub skill: Skill,
-    /// GitHub 技能的仓库路径（`owner/repo/skills/<dir>`），重新下载时用。
+    /// skills.sh 条目的上游身份；安装时按它解析 `SKILL.md` 正文。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub github_path: Option<String>,
+    pub remote: Option<RemoteSkillRef>,
     /// 只有远程端点（SSE / streamable-http），本项目只支持 stdio，不能装。
     #[serde(default)]
     pub remote_only: bool,
@@ -136,7 +151,7 @@ impl MarketEntry {
     pub fn new(skill: Skill) -> Self {
         Self {
             skill,
-            github_path: None,
+            remote: None,
             remote_only: false,
             tags: Vec::new(),
             icon_url: None,
@@ -310,7 +325,10 @@ pub fn icon_path(entry: &MarketEntry) -> Option<PathBuf> {
 pub fn source_label(id: &str) -> &'static str {
     if id.starts_with("tencent.") {
         "腾讯云广场"
+    } else if id.starts_with("ss.") {
+        "skills.sh"
     } else if id.starts_with("gh.") {
+        // 旧版 GitHub 技能源装下的条目：市场不再展示，但已装的可继续用
         "GitHub 技能"
     } else if id.starts_with("mcp.") {
         "MCP 官方"
@@ -410,7 +428,7 @@ pub fn fetch(source: MarketSource) -> Result<Vec<MarketEntry>, String> {
     match source {
         MarketSource::Official => fetch_official(),
         MarketSource::Tencent => fetch_tencent(),
-        MarketSource::GitHub => fetch_github(),
+        MarketSource::SkillsSh => fetch_skills_sh_home(),
     }
 }
 
@@ -521,7 +539,7 @@ pub fn parse_official(v: &serde_json::Value) -> Vec<MarketEntry> {
         }
         out.push(MarketEntry {
             skill,
-            github_path: None,
+            remote: None,
             remote_only,
             tags,
             icon_url,
@@ -768,7 +786,7 @@ pub fn parse_tencent_list(html: &str) -> Vec<MarketEntry> {
         };
         out.push(MarketEntry {
             skill,
-            github_path: None,
+            remote: None,
             remote_only: hosted,
             tags,
             icon_url,
@@ -837,141 +855,346 @@ pub fn parse_tencent_detail(html: &str) -> Result<McpServerConfig, String> {
     Err("详情页配置里没有可用的 command（该条目可能只提供远程端点）".into())
 }
 
-// ============ GitHub 技能仓库 ============
+// ============ skills.sh ============
 
-fn fetch_github() -> Result<Vec<MarketEntry>, String> {
-    let agent = agent_with_timeout(15);
-    let mut out: Vec<MarketEntry> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    for (owner, repo, branch) in GITHUB_REPOS {
-        match fetch_github_repo(&agent, owner, repo, branch) {
-            Ok(mut items) => out.append(&mut items),
-            Err(e) => errors.push(format!("{owner}/{repo}：{e}")),
+/// 首页热榜：`https://www.skills.sh/` 服务端渲染的表格行。
+fn fetch_skills_sh_home() -> Result<Vec<MarketEntry>, String> {
+    let agent = agent_with_timeout(20);
+    let html = get_text(&agent, &format!("{SKILLS_SH}/"))?;
+    let entries = parse_skills_sh_home(&html);
+    if entries.is_empty() {
+        return Err("skills.sh 首页没有解析到条目（页面结构可能变了）".into());
+    }
+    Ok(entries)
+}
+
+/// skills.sh 搜索：`q` 至少 2 个字符（上游限制）。
+pub fn search_skills_sh(query: &str) -> Result<Vec<MarketEntry>, String> {
+    let q = query.trim();
+    if q.chars().count() < 2 {
+        return Err("skills.sh 搜索至少需要 2 个字符".into());
+    }
+    let agent = agent_with_timeout(20);
+    let url = format!("{SKILLS_SH_SEARCH}?q={}&limit={SKILLS_SH_LIMIT}", urlencode(q));
+    let v = get_json(&agent, &url)?;
+    let entries = parse_skills_sh_search(&v);
+    if entries.is_empty() {
+        return Err(format!("skills.sh 没有找到与「{q}」相关的技能"));
+    }
+    Ok(entries)
+}
+
+/// 解析首页热榜 HTML。
+///
+/// 每行的稳定特征：`href="/<source>/<skillId>"` + `<h3 …>name</h3>` +
+/// `<p …>source</p>`，安装量在最右列（如 `4.4M`）。
+pub fn parse_skills_sh_home(html: &str) -> Vec<MarketEntry> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut rest = html;
+    while let Some(pos) = rest.find("href=\"/") {
+        let after = &rest[pos + 7..];
+        let Some(end) = after.find('"') else { break };
+        let path = &after[..end];
+        rest = &after[end..];
+        let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if segs.len() < 2 || segs.len() > 3 {
+            continue;
+        }
+        if !segs.iter().all(|s| valid_segment(s)) {
+            continue;
+        }
+        let Some(anchor_end) = rest.find("</a>") else { break };
+        let row = &rest[..anchor_end];
+        rest = &rest[anchor_end..];
+        // 技能行一定有 <h3>名称</h3>；没有就当成普通链接跳过
+        let Some(name) = html_between(row, "<h3", "</h3>") else {
+            continue;
+        };
+        let source = html_between(row, "<p", "</p>")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| segs[..segs.len() - 1].join("/"));
+        let skill_id = segs[segs.len() - 1];
+        if !seen.insert(format!("{source}/{skill_id}")) {
+            continue;
+        }
+        let installs = row
+            .find(INSTALLS_MARK)
+            .and_then(|i| {
+                let tail = &row[i + INSTALLS_MARK.len()..];
+                let end = tail.find('<')?;
+                Some(parse_installs_label(&tail[..end]))
+            })
+            .unwrap_or(0);
+        out.push(skills_sh_entry(&source, skill_id, &name, installs, false));
+        if out.len() >= SKILLS_SH_HOME_MAX {
+            break;
         }
     }
-    if out.is_empty() {
-        return Err(if errors.is_empty() {
-            "GitHub 技能仓库没有返回条目".into()
-        } else {
-            errors.join("；")
-        });
-    }
-    Ok(out)
+    out
 }
 
-fn fetch_github_repo(
-    agent: &ureq::Agent,
-    owner: &str,
-    repo: &str,
-    branch: &str,
-) -> Result<Vec<MarketEntry>, String> {
-    let dirs = list_github_skill_dirs(agent, owner, repo)?;
-    let dirs: Vec<String> = dirs.into_iter().take(GITHUB_MAX_PER_REPO).collect();
-    if dirs.is_empty() {
-        return Err("skills/ 目录下没有技能".into());
-    }
+/// 解析搜索接口的 `{"skills":[{source, skillId, name, installs}]}`。
+pub fn parse_skills_sh_search(v: &serde_json::Value) -> Vec<MarketEntry> {
     let mut out = Vec::new();
-    let mut errs = Vec::new();
-    // 并发下载，既快又不至于把匿名 CDN 打崩
-    for chunk in dirs.chunks(GITHUB_CONCURRENCY) {
-        std::thread::scope(|scope| {
-            let mut handles = Vec::new();
-            for dir in chunk {
-                let agent = agent.clone();
-                let owner = owner.to_string();
-                let repo = repo.to_string();
-                let branch = branch.to_string();
-                let dir = dir.clone();
-                handles.push(scope.spawn(move || {
-                    download_github_skill(&agent, &owner, &repo, &branch, &dir)
-                }));
-            }
-            for (dir, h) in chunk.iter().zip(handles) {
-                match h.join() {
-                    Ok(Ok(entry)) => out.push(entry),
-                    Ok(Err(e)) => errs.push(format!("{dir}：{e}")),
-                    Err(_) => errs.push(format!("{dir}：下载线程异常退出")),
+    let mut seen = HashSet::new();
+    let Some(list) = v.get("skills").and_then(|x| x.as_array()) else {
+        return out;
+    };
+    for item in list {
+        let source = item
+            .get("source")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .trim();
+        let id = item
+            .get("skillId")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .trim();
+        if !valid_remote_source(source) || !valid_segment(id) {
+            continue;
+        }
+        if !seen.insert(format!("{source}/{id}")) {
+            continue;
+        }
+        let name = item.get("name").and_then(|x| x.as_str()).unwrap_or(id);
+        let installs = item.get("installs").and_then(|x| x.as_u64()).unwrap_or(0);
+        let official = item
+            .get("isOfficial")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        out.push(skills_sh_entry(source, id, name, installs, official));
+    }
+    out
+}
+
+/// 一个 skills.sh 条目：列表只带展示信息与上游身份，正文等安装时再解析。
+fn skills_sh_entry(source: &str, id: &str, name: &str, installs: u64, official: bool) -> MarketEntry {
+    let source = source.trim();
+    let id = id.trim();
+    // 来源已在作者与摘要里展示；不再把仓库名当标签，否则筛选条会被上百个仓库名挤爆
+    let mut tags: Vec<String> = Vec::new();
+    if official {
+        push_tag(&mut tags, "官方");
+    }
+    let url = skill_page_url(source, id);
+    let display = if name.trim().is_empty() { id } else { name.trim() };
+    let mut skill = Skill {
+        id: format!("ss.{}.{}", slug_id(source), slug_id(id)),
+        name: clean_text(display, 40),
+        summary: String::new(),
+        detail: format!(
+            "## 来源\n\nskills.sh：{url}\n\n## 说明\n\n安装时会从上游解析 SKILL.md 正文并写入本地技能目录。\n"
+        ),
+        category: SkillCategory::Dev,
+        author: clean_text(source, 40),
+        installs,
+        stars: 0,
+        glyph: "技".into(),
+        installed: false,
+        kind: SkillKind::Text,
+        mcp: None,
+    };
+    skill.summary = if installs > 0 {
+        format!("skills.sh · {}（累计安装 {}）", source, skill.installs_label())
+    } else {
+        format!("skills.sh · {source}")
+    };
+    MarketEntry {
+        skill,
+        remote: Some(RemoteSkillRef {
+            source: source.to_string(),
+            id: id.to_string(),
+        }),
+        remote_only: false,
+        tags,
+        icon_url: github_owner(source).map(|o| github_avatar(&o)),
+        source_url: Some(url),
+    }
+}
+
+fn skill_page_url(source: &str, id: &str) -> String {
+    format!("{SKILLS_SH}/{source}/{id}")
+}
+
+/// 取 HTML 里 `<tag …>` 与 `</tag>` 之间的文本（去标签、解码常见实体）。
+fn html_between(html: &str, open: &str, close: &str) -> Option<String> {
+    let start = html.find(open)?;
+    let gt = html[start..].find('>')? + start + 1;
+    let end = html[gt..].find(close)? + gt;
+    Some(decode_html_entities(&strip_tags(&html[gt..end])))
+}
+
+/// `4.4M` / `12.3k` / `48,742` → 数字；解析不到记 0。
+fn parse_installs_label(s: &str) -> u64 {
+    let t = s.trim().replace(',', "");
+    let (num, mult) = match t.chars().last() {
+        Some('K') | Some('k') => (&t[..t.len() - 1], 1_000f64),
+        Some('M') | Some('m') => (&t[..t.len() - 1], 1_000_000f64),
+        Some('B') | Some('b') => (&t[..t.len() - 1], 1_000_000_000f64),
+        _ => (t.as_str(), 1f64),
+    };
+    num.parse::<f64>()
+        .ok()
+        .map(|n| (n * mult) as u64)
+        .unwrap_or(0)
+}
+
+/// 安装时解析真实 SKILL.md：GitHub 仓库走 jsDelivr/raw，站点源走 well-known 约定。
+pub fn fetch_remote_skill_body(source: &str, id: &str) -> Result<String, String> {
+    let agent = agent_with_timeout(25);
+    let body = if is_github_source(source) {
+        fetch_github_skill_md(&agent, source, id)?
+    } else {
+        let url = format!(
+            "https://{}/.well-known/agent-skills/{}/SKILL.md",
+            source.trim(),
+            id.trim()
+        );
+        get_text(&agent, &url)?
+    };
+    let mut text = body.trim().to_string();
+    if text.is_empty() {
+        return Err("上游 SKILL.md 是空的".into());
+    }
+    if text.len() > SKILL_BODY_LIMIT {
+        text = text.chars().take(SKILL_BODY_LIMIT).collect();
+        text.push_str("\n\n…（正文过长已截断）");
+    }
+    Ok(text)
+}
+
+/// GitHub 仓库里的 SKILL.md。
+///
+/// 先用 jsDelivr 目录接口定位路径（各仓库布局千差万别），定位不到再按
+/// 常见路径直试；分支依次 `main` / `master`。
+fn fetch_github_skill_md(agent: &ureq::Agent, source: &str, id: &str) -> Result<String, String> {
+    let mut last = String::new();
+    for branch in ["main", "master"] {
+        if let Ok(files) = list_repo_files(agent, source, branch) {
+            if let Some(path) = pick_skill_path(&files, id) {
+                match get_github_file(agent, source, branch, &path) {
+                    Ok(t) => return Ok(t),
+                    Err(e) => last = e,
                 }
             }
-        });
+        }
+        for rel in [
+            format!("skills/{id}/SKILL.md"),
+            format!("{id}/SKILL.md"),
+            format!(".claude/skills/{id}/SKILL.md"),
+            format!(".agents/skills/{id}/SKILL.md"),
+        ] {
+            if let Ok(t) = get_github_file(agent, source, branch, &rel) {
+                return Ok(t);
+            }
+        }
     }
-    if out.is_empty() {
-        return Err(errs.join("；"));
-    }
-    Ok(out)
+    Err(if last.is_empty() {
+        format!("在 {source} 里没找到 {id}/SKILL.md（仓库可能改名或技能已删除）")
+    } else {
+        last
+    })
 }
 
-/// 列出仓库 `skills/` 下的子目录名（GitHub contents API）。
-fn list_github_skill_dirs(
-    agent: &ureq::Agent,
-    owner: &str,
-    repo: &str,
-) -> Result<Vec<String>, String> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/contents/skills");
+fn list_repo_files(agent: &ureq::Agent, source: &str, branch: &str) -> Result<Vec<String>, String> {
+    let url = format!("{JSDELIVR_DATA}/{source}@{branch}?structure=flat");
     let v = get_json(agent, &url)?;
-    let Some(items) = v.as_array() else {
-        return Err("GitHub 返回的不是目录列表（仓库可能不存在或已改名）".into());
+    let Some(files) = v.get("files").and_then(|x| x.as_array()) else {
+        return Err("jsDelivr 返回的不是文件列表".into());
     };
-    Ok(items
+    Ok(files
         .iter()
-        .filter(|it| it.get("type").and_then(|x| x.as_str()) == Some("dir"))
-        .filter_map(|it| it.get("name").and_then(|x| x.as_str()))
+        .filter_map(|f| f.get("name").and_then(|x| x.as_str()))
         .map(|s| s.to_string())
         .collect())
 }
 
-fn download_github_skill(
+fn get_github_file(
     agent: &ureq::Agent,
-    owner: &str,
-    repo: &str,
+    source: &str,
     branch: &str,
-    dir: &str,
-) -> Result<MarketEntry, String> {
-    // jsDelivr 国内可达性好；失败再直连 raw
-    let cdn = format!("https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/skills/{dir}/SKILL.md");
-    let text = match get_text(agent, &cdn) {
-        Ok(t) => t,
-        Err(_) => {
-            let raw =
-                format!("https://raw.githubusercontent.com/{owner}/{repo}/{branch}/skills/{dir}/SKILL.md");
-            get_text(agent, &raw)?
+    rel: &str,
+) -> Result<String, String> {
+    let rel = rel.trim_start_matches('/');
+    let cdn = format!("{JSDELIVR_CDN}/{source}@{branch}/{rel}");
+    if let Ok(t) = get_text(agent, &cdn) {
+        if !t.trim().is_empty() {
+            return Ok(t);
         }
-    };
-    let mut skill = parse_github_skill(&text, owner, repo, dir);
-    // 正文缓存截断，避免 marketplace.json 过大
-    if skill.detail.len() > GITHUB_BODY_LIMIT {
-        skill.detail = skill.detail.chars().take(GITHUB_BODY_LIMIT).collect();
-        skill.detail.push_str("\n\n…（正文过长已截断）");
     }
-    Ok(MarketEntry {
-        github_path: Some(format!("{owner}/{repo}/skills/{dir}")),
-        skill,
-        remote_only: false,
-        tags: vec![format!("{owner}/{repo}")],
-        icon_url: Some(github_avatar(owner)),
-        source_url: Some(format!(
-            "https://github.com/{owner}/{repo}/tree/{branch}/skills/{dir}"
-        )),
-    })
+    let raw = format!("https://raw.githubusercontent.com/{source}/{branch}/{rel}");
+    get_text(agent, &raw)
 }
 
-/// SKILL.md → Skill。id 固定为 `gh.<owner>.<repo>.<dir>`，卸载/重装稳定。
-pub fn parse_github_skill(text: &str, owner: &str, repo: &str, dir: &str) -> Skill {
-    let mut s = crate::skills_ops::parse_md(text, dir);
-    s.id = format!(
-        "gh.{}.{}.{}",
-        slug_id(owner),
-        slug_id(repo),
-        slug_id(dir)
-    );
-    s.author = format!("{owner}/{repo}");
-    s.installed = false;
-    s.summary = clean_text(&s.summary, 160);
-    // 上游 SKILL.md 没有分类字段：分类只认 front-matter 里的声明，不猜
-    if s.glyph.trim().is_empty() {
-        s.glyph = "技".into();
+/// 从仓库文件列表里挑 `<…>/<id>/SKILL.md`：优先非隐藏目录、层级最浅的路径。
+pub fn pick_skill_path(files: &[String], id: &str) -> Option<String> {
+    let mut best: Option<(usize, usize, String)> = None; // (hidden, depth, path)
+    for f in files {
+        let path = f.trim_start_matches('/');
+        if !path.to_ascii_lowercase().ends_with("/skill.md") {
+            continue;
+        }
+        let mut segs: Vec<&str> = path.split('/').collect();
+        let Some(file) = segs.pop() else { continue };
+        let Some(dir) = segs.last() else { continue };
+        if !dir.eq_ignore_ascii_case(id) {
+            continue;
+        }
+        let hidden = segs.iter().any(|s| s.starts_with('.')).into();
+        let depth = segs.len();
+        let cand = (hidden, depth, format!("{}/{}", segs.join("/"), file));
+        if best
+            .as_ref()
+            .map(|(h, d, _)| (hidden, depth) < (*h, *d))
+            .unwrap_or(true)
+        {
+            best = Some(cand);
+        }
     }
-    s
+    best.map(|(_, _, p)| p)
+}
+
+/// source 是不是 GitHub 仓库（恰好 `owner/repo`，owner 不含点）。
+pub fn is_github_source(source: &str) -> bool {
+    let segs: Vec<&str> = source.trim().split('/').collect();
+    segs.len() == 2 && segs.iter().all(|s| !s.is_empty()) && !segs[0].contains('.')
+}
+
+fn github_owner(source: &str) -> Option<String> {
+    if !is_github_source(source) {
+        return None;
+    }
+    source.trim().split('/').next().map(|s| s.to_string())
+}
+
+/// 域名或 `owner/repo` 形式的来源：1~2 段、只含 `[A-Za-z0-9._-]`。
+fn valid_remote_source(source: &str) -> bool {
+    let segs: Vec<&str> = source.trim().split('/').collect();
+    (1..=2).contains(&segs.len()) && segs.iter().all(|s| valid_segment(s))
+}
+
+fn valid_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+/// 百分号编码（查询参数用）：只保留 RFC 3986 unreserved 字符。
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 // ============ 文本工具 ============
@@ -1275,17 +1498,102 @@ mod tests {
         assert!(parse_tencent_detail(html).is_err());
     }
 
+    // 首页 SSR 表格行的最小结构（真实页面每行还带很多 class，这里只留解析依赖的部分）。
+    const SKILLS_SH_HOME_HTML: &str = r#"<a class="group grid grid-cols-[auto_1fr_auto]" href="/vercel-labs/skills/find-skills"><div><h3 class="font-medium">find-skills</h3><p class="text-sm text-muted-foreground">vercel-labs/skills</p></div><span class="font-mono text-sm text-foreground">4.4M</span></a><a href="/github/awesome-copilot/git-commit"><h3>git-commit</h3><p>github/awesome-copilot</p><span class="font-mono text-sm text-foreground">48,742</span></a><a href="/trending">Trending</a>"#;
+
     #[test]
-    fn github_skill_md_becomes_installable_skill() {
-        let md = "---\nname: Frontend Design\ndescription: 生成有品味的界面\nlicense: MIT\n---\n\n# Frontend Design\n\n先定信息层级。\n";
-        let s = parse_github_skill(md, "anthropics", "skills", "frontend-design");
-        assert_eq!(s.id, "gh.anthropics.skills.frontend-design");
-        assert_eq!(s.name, "Frontend Design");
-        assert_eq!(s.summary, "生成有品味的界面");
-        assert_eq!(s.category, SkillCategory::Dev, "上游无分类声明时不猜");
-        assert!(!s.installed, "市场条目不该预置已安装");
-        assert!(s.detail.contains("先定信息层级"));
-        assert_eq!(s.author, "anthropics/skills");
+    fn skills_sh_home_parses_rows() {
+        let entries = parse_skills_sh_home(SKILLS_SH_HOME_HTML);
+        assert_eq!(entries.len(), 2, "非技能链接（/trending）应被跳过");
+        let first = &entries[0];
+        assert_eq!(first.skill.id, "ss.vercel-labs-skills.find-skills");
+        assert_eq!(first.skill.name, "find-skills");
+        assert_eq!(first.skill.author, "vercel-labs/skills");
+        assert_eq!(first.skill.installs, 4_400_000, "4.4M 要还原成数字");
+        assert_eq!(first.skill.kind, SkillKind::Text);
+        assert!(!first.remote_only, "skills.sh 条目安装时解析正文，不是仅远程");
+        let remote = first.remote.as_ref().expect("要记住上游身份才能装正文");
+        assert_eq!(remote.source, "vercel-labs/skills");
+        assert_eq!(remote.id, "find-skills");
+        assert!(first.tags.is_empty(), "仓库名不当标签（避免筛选条爆炸）");
+        assert_eq!(
+            first.source_url.as_deref(),
+            Some("https://www.skills.sh/vercel-labs/skills/find-skills")
+        );
+        assert_eq!(entries[1].skill.installs, 48_742);
+    }
+
+    #[test]
+    fn skills_sh_search_parses_dedups_and_skips_invalid() {
+        let v = serde_json::json!({
+            "skills": [
+                {"id":"github/awesome-copilot/git-commit","source":"github/awesome-copilot","skillId":"git-commit","name":"git-commit","installs":48742},
+                {"id":"github/awesome-copilot/git-commit","source":"github/awesome-copilot","skillId":"git-commit","name":"git-commit","installs":48742},
+                {"source":"open.feishu.cn","skillId":"lark-doc","name":"Lark Doc","installs":10,"isOfficial":true},
+                {"source":"..","skillId":"x"},
+                {"source":"a/b/c","skillId":"x"},
+                {"source":"github/foo","skillId":"bad id!"}
+            ]
+        });
+        let entries = parse_skills_sh_search(&v);
+        assert_eq!(entries.len(), 2, "去重后只剩 2 条合法条目");
+        assert_eq!(entries[0].skill.id, "ss.github-awesome-copilot.git-commit");
+        assert_eq!(entries[0].skill.installs, 48_742);
+        assert!(entries[0].tags.is_empty());
+        assert_eq!(entries[1].skill.author, "open.feishu.cn");
+        assert!(entries[1].tags.contains(&"官方".to_string()));
+        assert!(entries[1].icon_url.is_none(), "站点源没有 GitHub 头像");
+    }
+
+    #[test]
+    fn pick_skill_path_prefers_shallow_non_hidden() {
+        let files = vec![
+            "/.claude/skills/git-commit/SKILL.md".to_string(),
+            "/skills/git-commit/SKILL.md".to_string(),
+            "/other/SKILL.md".to_string(),
+        ];
+        assert_eq!(
+            pick_skill_path(&files, "git-commit").as_deref(),
+            Some("skills/git-commit/SKILL.md")
+        );
+        let root = vec!["/git-commit/SKILL.md".to_string()];
+        assert_eq!(
+            pick_skill_path(&root, "git-commit").as_deref(),
+            Some("git-commit/SKILL.md"),
+            "根级目录也要认"
+        );
+        let hidden_only = vec!["/.claude/skills/git-commit/SKILL.md".to_string()];
+        assert_eq!(
+            pick_skill_path(&hidden_only, "git-commit").as_deref(),
+            Some(".claude/skills/git-commit/SKILL.md"),
+            "只有隐藏目录时也要回退到它"
+        );
+        assert!(pick_skill_path(&files, "missing").is_none());
+    }
+
+    #[test]
+    fn github_source_detection() {
+        assert!(is_github_source("github/awesome-copilot"));
+        assert!(is_github_source("obra/superpowers"));
+        assert!(!is_github_source("open.feishu.cn"));
+        assert!(!is_github_source("a/b/c"));
+        assert!(!is_github_source("../../evil"));
+    }
+
+    #[test]
+    fn urlencode_keeps_unreserved() {
+        assert_eq!(urlencode("git flow"), "git%20flow");
+        assert_eq!(urlencode("中文"), "%E4%B8%AD%E6%96%87");
+        assert_eq!(urlencode("a-b_c.d~e"), "a-b_c.d~e");
+        assert_eq!(urlencode("a&b=c"), "a%26b%3Dc");
+    }
+
+    #[test]
+    fn install_labels_parse() {
+        assert_eq!(parse_installs_label("4.4M"), 4_400_000);
+        assert_eq!(parse_installs_label("12.3k"), 12_300);
+        assert_eq!(parse_installs_label("48,742"), 48_742);
+        assert_eq!(parse_installs_label("n/a"), 0);
     }
 
     #[test]
@@ -1305,7 +1613,7 @@ mod tests {
         assert_eq!(snap.entries.len(), 3);
         assert_eq!(snap.entries[0].skill.id, "mcp.io-github-example-weather");
         assert_eq!(snap.fetched_at, 1_700_000_000);
-        assert!(back.snapshot(MarketSource::GitHub).is_none());
+        assert!(back.snapshot(MarketSource::SkillsSh).is_none());
 
         assert_eq!(ago_label(neverwork_core::config::now_secs()), "刚刚");
         assert!(ago_label(1).contains("天前"));
@@ -1368,18 +1676,32 @@ mod tests {
         assert_eq!(slug_id(""), "item");
     }
 
-    /// 真实网络冒烟：`cargo test -p neverwork live_fetch -- --ignored --nocapture`
+    /// 真实网络冒烟：`cargo test -p neverwork skills_sh_live -- --ignored --nocapture`
     #[test]
     #[ignore = "manual: hits the real network"]
-    fn github_live_fetch_smoke() {
+    fn skills_sh_live_fetch_smoke() {
         let t = std::time::Instant::now();
-        match fetch(MarketSource::GitHub) {
-            Ok(v) => {
-                eprintln!("GITHUB OK {} entries in {:?}", v.len(), t.elapsed());
-                assert!(v.iter().all(|e| e.skill.id.starts_with("gh.")));
-            }
-            Err(e) => panic!("GITHUB failed in {:?}: {e}", t.elapsed()),
-        }
+        let home = fetch(MarketSource::SkillsSh).expect("skills.sh 首页应能解析出热榜");
+        eprintln!("skills.sh home {} entries in {:?}", home.len(), t.elapsed());
+        assert!(home.len() >= 20);
+        assert!(home.iter().all(|e| e.skill.id.starts_with("ss.")));
+        assert!(home.iter().all(|e| e.remote.is_some()));
+
+        let found = search_skills_sh("git").expect("搜索接口应有结果");
+        eprintln!("skills.sh search git: {} entries", found.len());
+        assert!(found
+            .iter()
+            .any(|e| e.remote.as_ref().is_some_and(|r| r.id == "git-commit")));
+
+        let body = fetch_remote_skill_body("github/awesome-copilot", "git-commit")
+            .expect("GitHub 源应能定位并下载 SKILL.md");
+        eprintln!("github body {} bytes", body.len());
+        assert!(body.to_lowercase().contains("git"));
+
+        let site = fetch_remote_skill_body("open.feishu.cn", "lark-doc")
+            .expect("站点源应走 well-known 约定");
+        eprintln!("feishu body {} bytes", site.len());
+        assert!(!site.trim().is_empty());
     }
 
     /// 腾讯云详情页冒烟（11698 = 云开发MCP，启动命令为 npx）。

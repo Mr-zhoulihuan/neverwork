@@ -521,16 +521,22 @@ Agent 现在能直接操作工作区文件，而不是只会「说话」。
   - `ProviderEntry` 手写 `Debug`，任何 `{:?}` 日志都只输出打码后的 Key。
   - **关于**：版本、依赖、仓库、统计。
 - **技能市场**（图标栏 ✦ 或 ⌘K）：数据全部来自真实源，不再有内置的虚构目录。
-  - 顶部「技能 / Agent 模板」两个 Tab；搜索框按名称、id、简介、作者过滤。
+  - 顶部「MCP / Skill」两个 Tab；MCP 页搜索框按名称、简介、作者本地过滤，
+    Skill 页直连 skills.sh 搜索（≥2 字符，400ms 防抖，清空回落热榜）。
   - 三个来源切换：**MCP 官方 Registry**（registry.modelcontextprotocol.io）、
     **腾讯云 MCP 广场**（国内直达，30 条热门条目，安装时再抓详情页取真实启动命令）、
-    **GitHub 技能仓库**（anthropics/skills、vercel-labs/agent-skills，jsDelivr 加速下载 SKILL.md）。
+    **skills.sh**（官网首页热榜 + 搜索 API，条目带累计安装量；安装时解析上游真实
+    `SKILL.md`——GitHub 源走 jsDelivr 数据接口列文件后取 CDN/raw，站点源走
+    `/.well-known/agent-skills/<id>/SKILL.md`，失败回退常见路径与 main/master 双分支）。
   - 结果按来源缓存到 `~/.neverwork/marketplace.json`：断网继续显示上次快照，
     状态行标出「数据来自 … · 上次同步 …」；刷新失败只记错误，不清空旧数据。
   - 分类预览卡（办公效率 / 知识管理 / 开发编程 / 内容创作 / 设计多媒体）与 11 个筛选，
     三种排序（推荐 / 名称 / 热度）；推荐里可安装的排在「仅远程」前面。
-  - 安装：文本技能把正文落盘到 `skills/<id>/SKILL.md`；MCP 插件先取启动配置，
+  - 安装：文本技能把正文落盘到 `skills/<id>/SKILL.md`（skills.sh 条目先从上游解析真实
+    正文再写入）；MCP 插件先取启动配置，
     经用户确认后写入 `mcp_servers`，工具以 `mcp__<server>__<tool>` 出现且逐次审批。
+  - 已安装文本技能在**单助手对话与团队角色**都会注入系统提示（每个技能截断 1500 字），
+    装完就能在对话里生效。
   - **国内镜像**（技能页右上角 / 设置 → 常规）：MCP 子进程注入
     `npm_config_registry=https://registry.npmmirror.com` 与清华 PyPI 索引，
     用户已设置的环境变量不覆盖；关掉开关则用系统默认源。
@@ -545,6 +551,95 @@ Agent 现在能直接操作工作区文件，而不是只会「说话」。
 `Session` 之外新增 `Settings` / `ProviderEntry` / `ProviderPreset` / `Protocol` /
 `Skill` / `SkillCategory` / `ThemeMode`。
 
+### M15 — 远程 SSH 工作区（本期）
+
+工作区不再限于本机目录：文件树、编辑器与 Agent 工具都直接作用于远端开发机。
+
+- **连接串**：`ssh://[user@]host[:port]/abs/path`，输入框也收 `user@host:/path`。
+  认证优先用密钥 / ssh-agent；只在密码登录的机器（如内置 root 账号）可在连接行里填密码。
+  密码**只保存在内存**（不写 settings、不进命令行、不进日志），通过 `SSH_ASKPASS`
+  回调本程序交给系统 ssh；关掉应用即失效。不自动信任主机指纹（首次连接请先在终端 `ssh` 一次）。
+- **传输层**（`core/src/ssh.rs`）：`RemoteFs` 提供 probe / tree / list / read / write /
+  exists / search_fixed；路径统一为相对工作区根的 POSIX 路径；命令统一
+  `cd <root> && …`，单引号转义，写入走 `.nw-tmp` + `mv -f`（与本地一样是原子替换）。
+- **工具**：`ToolContext` 后端化，`read_file / list_dir / search_files / write_file /
+  apply_patch / multi_patch` 在远程下语义不变，写操作仍逐次审批；
+  `search_code`（语义检索）远程不可用，提示词会引导模型改用 `search_files`。
+- **界面**：工作区管理器新增「⇅ 连接远程 SSH…」内联输入（连接串 + 可选密码，回车即连）；
+  密码框失焦时只显示圆点，连接成功后从输入框清掉、转存内存；
+  最近列表用 ⇅ 标记远程项；文件树异步拉取（只请求已展开目录，迟到的结果按代次丢弃）；
+  点文件异步读取、保存异步写回；左栏工作区细条与右栏文件树标题显示 `host:path`；
+  远程下 Git 面板显示「暂不支持」占位。
+- **会话**：远程工作区以连接串为键单独存一份会话库；切回本地时旧状态
+  （树 / 打开的远程文件 / 连接目标 / 在途请求）整体清理。
+
+**限制**（明确不做）：远程 Git 面板、远端文件监听（不自动刷新，点 ⟳ 手动刷）、
+终端 / 端口转发、远程目录选择器。密码不做持久化：每次启动重连需要重新输入
+（已有密钥的机器不受影响）。
+
+**测试**：`core/src/ssh.rs` 单测覆盖连接串解析 / 路径规范化 / `sh_quote` / 树解析 /
+认证 Debug 不泄密；真实远端往返测试默认 `#[ignore]`，密钥认证设
+`NW_SSH_TEST=user@host:/tmp/nw` 即可跑；密码认证再加 `NW_SSH_TEST_PASSWORD` 与
+`NW_ASKPASS_EXE=<target/debug/neverwork.exe>`（askpass 由应用本体提供）。
+
+### M16 — 思考等级 + 输入框改版（本期）
+
+输入框按参考稿重排，并给模型一个真正生效的「思考深度」旋钮。
+
+- **输入框**：大圆角卡片，左下圆形「＋」（引用文件 / 工具开关 / 思考档位 / 清空），
+  底栏不再常驻思考 chip；发送仍走 Enter（Shift+Enter 换行）。
+- **思考等级**（会话级，随会话保存）：`自动 / 低 / 中 / 高`，默认自动。
+  - OpenAI 兼容：`reasoning_effort=low|medium|high`；Anthropic：`thinking.budget_tokens`
+    （1024/4096/16384，同时 `temperature=1`、`max_tokens>budget`）；Gemini：
+    `generationConfig.thinkingConfig.thinkingBudget`（思考 token 计入输出，上限同比抬高）。
+  - **自动 = 不发任何思考参数**，与旧行为完全一致；旧会话没有该字段时按自动处理。
+  - 网关不认参数（400）时先去掉 `reasoning_effort` 重试，再去掉 `stream_options` 重试。
+  - 面板：4 格滑杆**可拖动**（按下即吸到最近一档，窗口级监听保证滑出轨道也跟手），
+    也可点刻度/标签；拖动期间只改内存，松开鼠标才落盘。
+- **输入联想已移除**：输入框下方不再出候选，聊天框 Tab 不做任何事，设置里的 `ai_suggest` 也已删除。
+- **思考入口默认隐藏**：右下不再常驻「思考 · 档位」chip；档位从「＋」菜单进入，
+  面板内可「重置为自动 / 收起」（Esc 也可关），详见 M18。
+- **验证**：`NW_COMPOSER=thinking|menu` 启动即展开对应面板。
+
+### M17 — 工具步骤合成一行统计（本期）
+
+连续的工具调用不再逐条列出路径与输出，只留一行：
+
+```
+⚒ 2 线程 · 6 轮思考 · 24 个工具 · 列目录 10 · 读取 8 · 搜索 6
+```
+
+- **线程**：发起调用的角色数（单 Agent 恒 1）；**轮次**：去重后的「角色 × 第几轮模型调用”。
+- **动作**：按工具语义归类计数（读取 / 列目录 / 搜索 / 写入 / 打补丁 / 批量修改 /
+  联网搜索 / 抓取网页 / 交接）。
+- 行尾只给异常计数（`执行中 / 待确认 N / 失败 N / 中断 N`），不点名到具体步骤。
+- 明细完全隐藏（`expanded_steps` 与 `NW_EXPAND_STEPS` 已删）；
+  **写操作审批是唯一例外**：仍旧弹 diff 与「拒绝 / 允许并写入」。
+- `MessageKind::ToolCall` 新增 `thread` / `round` 字段；旧会话没有这两个字段时
+  只显示工具数与动作（不编造线程/轮次），`AgentEvent::ToolStarted` 带上 `round` 供界面记录。
+
+### M18 — 对话联网：搜索 + 抓网页；思考入口默认隐藏（本期）
+
+**联网**（`agent/src/web.rs`，两个只读内置工具，默认常开、不弹审批）：
+
+- `web_search(query, count?)`：走必应 RSS（`https://www.bing.com/search?q=…&format=rss`），
+  返回标题 / 链接 / 摘要（默认 8 条，最多 10）。用 RSS 而不是爬搜索结果页：结构稳定、
+  不需要 Key、中文结果由必应本地化。
+- `web_fetch(url, max_chars?)`：只收 http/https，12s 超时、300KB 体积上限，
+  HTML 去掉 script/style/head 后转纯文本（默认 8000 字，上限 20000）；
+  拒绝 localhost 与内网地址（防止被网页内容诱导去探测本机/内网）。
+- 复用 `models.rs` 的代理感知 ureq（`Proxy::try_from_env`）；开启 ureq `charset`
+  特性按 Content-Type 解码，中文站点不乱码。
+- 返回正文照常被 `wrap_untrusted` 包成不可信数据；提示词新增「需要最新/外部信息
+  （版本号、发布说明、新闻、官方文档）就用 web_search，不要凭记忆猜」。
+- **验证**：自然问句「Rust 最近发布了什么新版本？」→ 模型自己连发 2 次 `web_search` →
+  4 次 `web_fetch`（含 `blog.rust-lang.org` 正文 13.5KB，全部 `ok=true`）→ 给出带链接的回答；
+  `agent/tests/web_live.rs`（`#[ignore]`，真网冒烟）覆盖搜索 + 抓取 + 中文乱码断言。
+
+**思考入口默认隐藏**：输入框右下不再常驻「思考 · 档位」chip；档位入口收进左下「＋」菜单
+（`⚙ 思考 · 当前档位`）。点开后输入框上方出现滑杆面板，面板头部有「重置为自动 / 收起」，
+Esc 也可关。档位本身与各厂商映射不变（见 M16）。
+
 ## 运行
 
 ```bash
@@ -552,6 +647,8 @@ Agent 现在能直接操作工作区文件，而不是只会「说话」。
 cargo run -p neverwork
 # 指定工作区根
 set NW_ROOT=E:\path\to\project && cargo run -p neverwork
+# 直接连远程工作区（密钥/agent 优先；密码登录的机器在界面里补密码，首次请先在终端 ssh 确认指纹）
+set NW_REMOTE=me@10.0.0.2:/srv/app && cargo run -p neverwork
 # 启用 AI 对话（OpenAI 兼容）
 set NW_API_KEY=sk-xxx
 set NW_MODEL=gpt-4o        # 可选

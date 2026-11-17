@@ -8,7 +8,7 @@ use std::ops::Range;
 
 use gpui::{Bounds, Context, EntityInputHandler, Pixels, Point, UTF16Selection, Window};
 
-use crate::state::{AppState, InputTarget};
+use crate::state::{AppState, FormField, InputTarget};
 use crate::text_buffer::TextBuffer;
 
 /// UTF-16 索引范围 → UTF-8 字节范围（对齐到 char boundary）。
@@ -81,7 +81,13 @@ impl AppState {
         match self.input_target {
             InputTarget::Chat => &mut self.chat,
             InputTarget::Editor => &mut self.editor,
-            InputTarget::Workspace => &mut self.ws_input,
+            InputTarget::Workspace => {
+                if self.ws_pw_focus {
+                    &mut self.ws_pw_input
+                } else {
+                    &mut self.ws_input
+                }
+            }
             InputTarget::SessionSearch => &mut self.session_search,
             InputTarget::RenameSession => &mut self.rename_buf,
             InputTarget::Field(_) => &mut self.field_buf,
@@ -93,7 +99,13 @@ impl AppState {
         match self.input_target {
             InputTarget::Chat => &self.chat,
             InputTarget::Editor => &self.editor,
-            InputTarget::Workspace => &self.ws_input,
+            InputTarget::Workspace => {
+                if self.ws_pw_focus {
+                    &self.ws_pw_input
+                } else {
+                    &self.ws_input
+                }
+            }
             InputTarget::SessionSearch => &self.session_search,
             InputTarget::RenameSession => &self.rename_buf,
             InputTarget::Field(_) => &self.field_buf,
@@ -104,6 +116,17 @@ impl AppState {
     pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
         if self.input_target == InputTarget::Editor {
             self.dirty = true;
+        }
+        // 技能搜索框：IME 上屏的文本也要同步到搜索词并触发防抖搜索。
+        // 组合串（marked）期间不发请求，避免拿拼音去搜。
+        if self.input_target == InputTarget::Field(FormField::SkillSearch)
+            && self.marked_range.is_none()
+        {
+            let value = self.field_buf.text().to_string();
+            if self.skill_search != value {
+                self.skill_search = value;
+                self.on_skill_search_changed(cx);
+            }
         }
         cx.notify();
     }

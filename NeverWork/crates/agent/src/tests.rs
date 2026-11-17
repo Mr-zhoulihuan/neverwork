@@ -59,3 +59,16 @@ fn prompt_does_not_demand_reading_before_answering() {
     // 「B 类任务先 read_file」这个限定出现了
     assert!(p.contains("B 类任务先 read_file"));
 }
+
+#[test]
+fn prompt_marks_remote_workspace() {
+    let target = neverwork_core::SshTarget {
+        host: "dev".into(),
+        port: 22,
+        root: "/srv/app".into(),
+    };
+    let p = crate::agent_loop::build_system_prompt("", &crate::tools::ToolContext::remote(target));
+    assert!(p.contains("远程工作区"), "远程要明确告知模型");
+    assert!(p.contains("dev:/srv/app"), "要带上远端根：{p}");
+    assert!(p.contains("search_files"), "远程检索降级提示要给出替代");
+}

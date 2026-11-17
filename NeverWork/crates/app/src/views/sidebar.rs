@@ -268,7 +268,16 @@ impl AppState {
                 .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                     this.open_workspace_prompt(cx);
                 }))
-                .child(div().text_xs().text_color(theme::green()).child("▤"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if self.remote.is_some() {
+                            theme::yellow()
+                        } else {
+                            theme::green()
+                        })
+                        .child(if self.remote.is_some() { "⇅" } else { "▤" }),
+                )
                 .child(
                     div()
                         .flex_shrink_0()

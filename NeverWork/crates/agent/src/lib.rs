@@ -17,6 +17,7 @@ mod supervisor;
 mod team;
 pub mod tools;
 pub mod trace;
+mod web;
 #[cfg(test)]
 mod tests;
 
@@ -138,6 +139,8 @@ pub struct ProviderConfig {
     pub model: String,
     /// 采样温度（0.0–2.0）。
     pub temperature: f32,
+    /// 思考等级；`Auto` 不向厂商发任何思考参数（与旧行为一致）。
+    pub thinking: neverwork_core::ThinkingLevel,
 }
 
 impl Default for ProviderConfig {
@@ -147,6 +150,7 @@ impl Default for ProviderConfig {
             base_url: "https://api.openai.com/v1".into(),
             model: "gpt-4o".into(),
             temperature: 0.7,
+            thinking: neverwork_core::ThinkingLevel::Auto,
         }
     }
 }
@@ -200,6 +204,7 @@ pub fn config_from_env() -> Option<(String, ProviderConfig)> {
             base_url,
             model,
             temperature: 0.7,
+            thinking: neverwork_core::ThinkingLevel::Auto,
         },
     ))
 }

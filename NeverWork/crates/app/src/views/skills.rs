@@ -1,7 +1,7 @@
 //! 技能页：MCP 插件市场 / Skill（文本技能）两列。
 //!
 //! - MCP：官方 Registry + 腾讯云广场，安装后注册为外部进程工具；
-//! - Skill：`SKILL.md` 文本技能，GitHub 市场 + 已安装区，安装即落盘。
+//! - Skill：`SKILL.md` 文本技能，skills.sh 市场（首页热榜 + 搜索）+ 已安装区，安装即落盘。
 //! 两列共用搜索 / 标签筛选 / 排序；点卡片主体从右侧打开详情抽屉。
 
 use gpui::prelude::*;
@@ -151,11 +151,11 @@ impl AppState {
                 }
                 if ev.keystroke.key == "backspace" && this.field_buf.text().is_empty() {
                     this.skill_search.clear();
+                    this.on_skill_search_changed(cx);
                     cx.notify();
                     return;
                 }
                 this.on_field_key(ev, cx);
-                this.skill_search = this.field_buf.text().to_string();
                 cx.notify();
             }))
             .child(div().text_xs().text_color(theme::dim()).child("⌕"))
@@ -168,7 +168,7 @@ impl AppState {
                     .text_xs()
                     .text_color(if empty { theme::dim() } else { theme::fg() })
                     .child(SharedString::from(if empty {
-                        "搜索技能或技能包".to_string()
+                        "搜索 skills.sh 技能（至少 2 个字符）".to_string()
                     } else {
                         fit_text(&display, 230.0, 12.0)
                     })),
@@ -185,6 +185,7 @@ impl AppState {
                             this.skill_search.clear();
                             this.field_buf.reset("");
                             this.active_field = None;
+                            this.on_skill_search_changed(cx);
                             cx.notify();
                         }))
                         .child("✕"),
@@ -370,14 +371,14 @@ impl AppState {
 
     /// 市场工具条：来源切换 + 同步状态 + 刷新 + 镜像（一行）。
     ///
-    /// 来源按 Tab 分组：MCP 列只有官方 / 腾讯云，Skill 列只有 GitHub。
+    /// 来源按 Tab 分组：MCP 列只有官方 / 腾讯云，Skill 列只有 skills.sh。
     fn market_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = div().flex().items_center().gap_1().flex_wrap();
 
         let sources: Vec<MarketSource> = if self.skills_tab == 0 {
             vec![MarketSource::Official, MarketSource::Tencent]
         } else {
-            vec![MarketSource::GitHub]
+            vec![MarketSource::SkillsSh]
         };
         for src in sources {
             let on = self.market_source == src;
@@ -402,12 +403,23 @@ impl AppState {
         }
 
         // 真实来源 + 上次同步时间：数据不是编的，直接标出来
+        let searching = self.market_source == MarketSource::SkillsSh
+            && self.skill_search.trim().chars().count() >= 2;
         let (status, color) = if self.market_loading {
             ("⟳ 正在拉取…".to_string(), theme::dim())
         } else if let Some(err) = &self.market_error {
             (
-                fit_text(&format!("拉取失败：{err}（显示缓存）"), 320.0, 11.0),
+                fit_text(&format!("拉取失败：{err}"), 320.0, 11.0),
                 theme::accent(),
+            )
+        } else if searching {
+            (
+                format!(
+                    "{} · 搜索「{}」",
+                    self.market_source.origin(),
+                    self.skill_search.trim()
+                ),
+                theme::dim(),
             )
         } else if let Some(at) = self.market_fetched_at.get(&self.market_source).copied() {
             (
@@ -617,7 +629,10 @@ impl AppState {
         if let Some(tag) = &self.market_tag {
             list.retain(|(e, _)| e.tags.iter().any(|t| t == tag));
         }
-        if !q.is_empty() {
+        // skills.sh 的结果由服务端按相关度返回，不再本地按词过滤（会误删）
+        let server_filtered =
+            self.market_source == MarketSource::SkillsSh && !q.is_empty();
+        if !q.is_empty() && !server_filtered {
             list.retain(|(e, _)| {
                 let s = &e.skill;
                 s.name.to_lowercase().contains(&q)
@@ -947,7 +962,7 @@ impl AppState {
 
     // ==================== Skill（文本技能） ====================
 
-    /// Skill 列：已安装区 + GitHub `SKILL.md` 市场。
+    /// Skill 列：已安装区 + skills.sh 市场。
     fn skill_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut col = div().flex().flex_col().gap_5();
         col = col.child(self.installed_skills_section(cx));
@@ -1114,10 +1129,16 @@ impl AppState {
 
     /// 列表为空时的提示（区分「还在拉」「拉失败」「搜不到」）。
     fn market_empty_hint(&self) -> impl IntoElement {
+        let searching = self.market_source == MarketSource::SkillsSh
+            && !self.skill_search.trim().is_empty();
         let hint = if self.market_loading {
             "正在从远端拉取…"
         } else if self.market_error.is_some() {
-            "拉取失败，且本地没有缓存"
+            if searching {
+                "换个关键词再搜，或清空搜索看热榜"
+            } else {
+                "拉取失败，且本地没有缓存"
+            }
         } else if self.skill_search.trim().is_empty() && self.market_tag.is_none() {
             "该来源暂无条目，点「⟳」刷新重试"
         } else {

@@ -40,6 +40,7 @@ fn openai_streaming_end_to_end() {
         base_url: format!("http://{addr}"),
         model: "test-model".into(),
         temperature: 0.7,
+        thinking: neverwork_core::ThinkingLevel::Auto,
     };
     let provider = build_provider("openai", config);
     let messages = vec![ChatMessage::user("hi")];

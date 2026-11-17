@@ -73,6 +73,7 @@ fn pipeline_runs_roles_in_order() {
         base_url: format!("http://127.0.0.1:{port}"),
         model: "gpt-4o".into(),
         temperature: 0.7,
+        thinking: neverwork_core::ThinkingLevel::Auto,
     };
     let cancel = Arc::new(AtomicBool::new(false));
     let mut starts = Vec::new();
@@ -103,6 +104,7 @@ fn pipeline_cancel_stops_early() {
         base_url: format!("http://127.0.0.1:{port}"),
         model: "gpt-4o".into(),
         temperature: 0.7,
+        thinking: neverwork_core::ThinkingLevel::Auto,
     };
     let cancel = Arc::new(AtomicBool::new(true));
     let mut starts = 0;
@@ -186,6 +188,7 @@ fn session_history_reaches_the_model() {
         base_url: format!("http://127.0.0.1:{port}"),
         model: "gpt-4o".into(),
         temperature: 0.7,
+        thinking: neverwork_core::ThinkingLevel::Auto,
     };
     let history = vec![
         neverwork_agent::ChatMessage::user("上一轮的问题：读一下 a.rs"),
@@ -219,6 +222,7 @@ fn plain_team_flattens_tool_history() {
         base_url: format!("http://127.0.0.1:{port}"),
         model: "gpt-4o".into(),
         temperature: 0.7,
+        thinking: neverwork_core::ThinkingLevel::Auto,
     };
     let history = vec![
         neverwork_agent::ChatMessage::user("读一下 a.rs"),

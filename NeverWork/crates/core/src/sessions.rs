@@ -255,6 +255,7 @@ mod tests {
             pinned: false,
             provider_id: String::new(),
             model: String::new(),
+            thinking: crate::model::ThinkingLevel::Auto,
             stage,
             resume_prompt: String::new(),
         }

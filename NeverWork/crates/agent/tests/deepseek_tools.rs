@@ -54,6 +54,7 @@ fn run(
         base_url: "https://api.deepseek.com/v1".into(),
         model: std::env::var("NW_DEEPSEEK_MODEL").unwrap_or_else(|_| "deepseek-flash".into()),
         temperature: 0.2,
+        thinking: neverwork_core::ThinkingLevel::Auto,
     };
     let cancel = Arc::new(AtomicBool::new(false));
     let mut trace = Trace::default();

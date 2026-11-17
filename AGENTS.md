@@ -12,9 +12,9 @@ cargo test --workspace          # 全部测试（3 条打真实 DeepSeek，需 N
 cargo build -p neverwork        # 只编应用（增量约 6s）
 ```
 
-运行期变量：`NW_ROOT`、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_EXPAND_STEPS`/`NW_RIGHT_COLLAPSED`/`NW_SESSION_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_PROVIDER_VIEW`（`add`|下标）/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_INSTALL_SKILL`/`NW_SESSION_QUERY`/`NW_SESSION_MENU`/`NW_ARCHIVE_OPEN`/`NW_WORKSPACE_POPUP`/`NW_DEMO_STATUS`/`NW_SWITCH_WS`。
+运行期变量：`NW_ROOT`、`NW_REMOTE`（`user@host:/path`）、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_RIGHT_COLLAPSED`/`NW_SESSION_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_PROVIDER_VIEW`（`add`|下标）/`NW_COMPOSER`（`thinking`|`menu`）/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_SKILLS_TAB`/`NW_SKILL_QUERY`/`NW_INSTALL_SKILL`/`NW_SESSION_QUERY`/`NW_SESSION_MENU`/`NW_ARCHIVE_OPEN`/`NW_WORKSPACE_POPUP`/`NW_DEMO_STATUS`/`NW_SWITCH_WS`；`NW_ASKPASS_MODE`/`NW_ASKPASS_SECRET` 由 ssh 回调应用自身时使用，不要手动设置；密码往返测试用 `NW_ASKPASS_EXE` 指向 `target/debug/neverwork.exe`。
 
-工作区回落：`NW_ROOT` → `settings.last_workspace` → `~/.neverwork/workspace`。**不要**回落到当前目录/向上找 `Cargo.toml`——会把 IDE 自己的仓库当工作区。
+工作区回落：`NW_ROOT` → `settings.last_workspace` → `~/.neverwork/workspace`。**不要**回落到当前目录/向上找 `Cargo.toml`——会把 IDE 自己的仓库当工作区。`last_workspace` 是 `ssh://` 时走远程工作区（本地 `root` 为 `None`）。
 
 ## 红线
 
@@ -55,6 +55,7 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 ## Agent 工具（改前必读）
 
 - 工具在 `agent/src/tools.rs`。**所有路径走 `ToolContext::resolve`**（挡 `..`、跨盘绝对路径、符号链接逃逸）。
+- **联网工具在 `agent/src/web.rs`**：`web_search`（必应 RSS，不引 Key）/`web_fetch`（只收公网 http/https，拒 localhost 与内网，12s + 300KB 上限，HTML 转纯文本）。两者只读、`requires_approval = false`、**默认常开不设开关**；返回正文与文件内容一样走 `wrap_untrusted`，别让网页内容绕过这层。
 - **写操作必须 `requires_approval = true`**，经 `NeedApproval` → 用户允许后才执行；不要在工具内部直接落盘。不新增 shell。
 - 团队角色的 `model` 是**展示标签**（`Claude Opus`），不能当模型 id 或据此切厂商——只有全小写真实 id 才算。
 - **运行上限三项（tokens/rounds/seconds）默认 0=不限**，从 settings 读；不要加回常量上限（读中型项目必被掐断）。防失控靠 `MAX_REPEAT=3`（同工具同参数）与手动停止。
@@ -66,9 +67,13 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 
 ## 对话区与查找（改前先读）
 
-- 工具调用由 `views/chat.rs::tool_steps_group` 按连续同类消息聚合；改这块要同步 `expanded_steps` 的键（组首条下标）。待审批组必须自动展开。
+- 工具调用由 `views/chat.rs::tool_steps_group` 把连续调用聚合成**一行统计**（线程 / 思考轮次 / 工具数 / 动作直方图），逐条路径与输出不再展示；不要再加展开明细的入口。写操作审批必须单独显示 diff 与「拒绝 / 允许并写入」。工具消息里的 `thread`（角色序号）/`round`（该角色第几轮模型调用）用于统计，旧会话缺省 0。
 - 模型/厂商是**会话级**：`Session.provider_id`/`model`（空 = 跟随设置里的当前厂商），头部 chip 切换、按厂商分组；新会话继承上一个会话的选择（厂商被删/停用则回「跟随默认」）。
 - 移除厂商是两步确认（`provider_remove_confirm`）：Key 会随配置一起删掉，不允许一点就没了。
+- **思考等级是会话级**（`Session.thinking`，实现见 `views/chat.rs`）：`自动` 不向厂商发任何思考参数，只有低/中/高才映射 `reasoning_effort` / Anthropic `thinking.budget_tokens` / Gemini `thinkingConfig`。Anthropic 开思考必须 `temperature=1` 且 `max_tokens > budget`；Gemini 思考 token 计入输出，`maxOutputTokens` 要同比抬高。改这几处先看 `agent` 里对应的单测。
+- 思考滑杆用**窗口级 `window.on_mouse_event`**（在 canvas paint 里注册）跟踪拖动，不要换成元素级 `on_mouse_move`：后者只在悬停时触发，光标滑出 256px 轨道就断，滑杆会粘在半路。拖动中只 `preview_thinking_level` 改内存，松开鼠标才 `save_sessions`。
+- 输入框不再做自动联想（本地历史补全与模型补全都已移除）：不要在 `after_edit`/`on_chat_key` 里挂补全请求，聊天框的 Tab 不做任何事。
+- **思考档位入口默认隐藏**：不常驻输入框底栏，从「＋」菜单（`⚙ 思考 · 档位`）进入滑杆面板；不要再加回右下 chip。面板互斥（开一个关另一个）与拖动实现见上一条。
 - 查找替换在 `app/src/find.rs`（纯逻辑）+ `views/editor.rs::find_bar`（UI），按字节区间匹配，中文安全。
 
 ## 代码现状
@@ -76,8 +81,10 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 - 编辑器：光标/多光标/选区/撤销重做/剪贴板/按字符点击/行号/高亮/虚拟滚动/保存/查找替换/折叠/括号匹配。
 - `Supervisor` 是真分派（Lead 逐轮决定下一角色）。Team 开工具走 `spawn_agents_chain`（串行、每角色带工具、与单 Agent 同一套历史）；关工具走 `run_team_with_history`（纯文本、不传 tools，工具历史由 `flatten_tool_history` 压平，否则 Anthropic 空正文整轮 400）。
 - Provider：OpenAI 兼容 / Anthropic / Gemini 原生；Gemini 工具调用未接。模型列表按协议拉（GET /models），失败回退手输。
-- 技能市场**只接真实源**：MCP 官方 Registry / 腾讯云 MCP 广场（国内直达）/ GitHub 技能仓库（jsDelivr 加速），缓存在 `~/.neverwork/marketplace.json`；`skills_catalog.rs` 仅保留可离线验证管道的真实 npm 内建项，**不要再加虚构条目**。MCP 子进程默认注入 npmmirror / 清华 PyPI 镜像（settings.mcp_mirror 可关）。
+- **Agent 联网**：`web_search`（必应 RSS）+ `web_fetch`（HTML→纯文本，去 script/style/head，中文按 Content-Type charset 解码）；两者默认常开、只读不审批。
+- 技能市场**只接真实源**：MCP 官方 Registry / 腾讯云 MCP 广场（国内直达）/ skills.sh（Skill 页唯一来源：首页热榜 + 搜索 API ≥2 字符，400ms 防抖；安装时解析上游真实 SKILL.md，GitHub 源走 jsDelivr，站点源走 `.well-known/agent-skills`），热榜缓存在 `~/.neverwork/marketplace.json`（搜索结果只进内存）；`skills_catalog.rs` 仅保留可离线验证管道的真实 npm 内建项，**不要再加虚构条目**。MCP 子进程默认注入 npmmirror / 清华 PyPI 镜像（settings.mcp_mirror 可关）。
 - 无 LSP / tree-sitter / 终端 / 全局搜索。Git 有暂存/提交/丢弃/切分支，**无 push/pull、无冲突合并**。单文件 512KB、文件树 8000 节点上限。
+- **远程 SSH 工作区**（`core/src/ssh.rs` + `ToolContext` 后端化）：连接串 `ssh://[user@]host[:port]/abs/path`（输入框也收 `user@host:/path`），认证优先系统 `ssh` 的密钥/agent；只在密码登录的机器可在连接行填密码。**密码只在内存**（`AppState.remote_pw`），经 `SSH_ASKPASS` 回调应用本体（`main.rs` 最先处理 `NW_ASKPASS_MODE`），不得写 settings/日志/命令行；`RemoteAuth` 手写 `Debug` 打码，别给它 derive。会话键是连接串。远程工具路径一律相对工作区根，写操作仍逐次审批；远程 `search_code` 返回 UNSUPPORTED，提示词引导用 `search_files`。**远程树/读文件/保存都是后台线程 + `remote_gen` 代次丢弃迟到结果**；`refresh_tree`/`collapse_all`/`open_remote_file`/`save_file`/`open_file_name` 都有 `self.remote` 分支。连接串与密码共用 `ws_focus`/`InputTarget::Workspace`，靠 `ws_pw_focus` 在 `buffer()`/`active_buffer()` 里分流，加新输入框要同步这三处。改这些不要**把 `~` 展开结果写回 `SshTarget`**（会话键会变，旧会话像丢了）；Git 面板、watcher、终端不做。
 
 <!-- proma:memory:start -->
 ## 记忆维护

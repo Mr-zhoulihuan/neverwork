@@ -10,12 +10,11 @@
 //! 于是用户只看到一次 diff、点一次允许，要么全落地要么全不动。
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use serde_json::Value;
 
 use crate::diff::{self, DiffLine};
-use crate::tools::{self, ToolCall, ToolContext, ToolResult};
+use crate::tools::{ToolCall, ToolContext, ToolResult};
 
 /// 单次 multi_patch 最多几个文件（防止模型一口气改几百个）。
 pub const MAX_FILES: usize = 20;
@@ -35,7 +34,8 @@ pub struct FileEdit {
 
 /// 校验通过后的一次待写入。
 struct PlannedEdit {
-    path: PathBuf,
+    /// 相对工作区根的路径（本地与远程统一）。
+    rel: String,
     display: String,
     old: String,
     new: String,
@@ -130,9 +130,8 @@ fn plan(
 ) -> Result<Vec<PlannedEdit>, String> {
     let mut planned = Vec::new();
     for e in edits {
-        // 写路径：除了越界，还要拦下 `.git` 元数据目录（hooks 等于持久后门）
-        let path = ctx.resolve_write(&e.path)?;
-        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        // 写路径规则（越界 / `.git` / 符号链接）由上下文统一把关。
+        let old = ctx.read_text_for_write(&e.path).map_err(|e| e.message())?;
 
         let new = if let Some(content) = &e.content {
             if content.len() > MAX_FILE_BYTES {
@@ -150,7 +149,7 @@ fn plan(
             if old_s.is_empty() {
                 return Err(format!("{} 的 old_string 不能为空", e.path));
             }
-            if !path.exists() {
+            if !ctx.exists(&e.path) {
                 return Err(format!(
                     "{} 不存在。新建文件请用 content 而不是 old_string",
                     e.path
@@ -176,8 +175,8 @@ fn plan(
         };
 
         planned.push(PlannedEdit {
-            display: ctx.display_rel(&path),
-            path,
+            rel: e.path.clone(),
+            display: ctx.display(&e.path),
             old,
             new,
         });
@@ -234,25 +233,23 @@ pub fn execute(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
     // ---- 第二阶段：写入，失败回滚 ----
     let mut written: Vec<&PlannedEdit> = Vec::new();
     for p in &planned {
-        if let Some(parent) = p.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match tools::write_atomic(&p.path, &p.new) {
+        match ctx.write_text(&p.rel, &p.new) {
             Ok(()) => written.push(p),
             Err(e) => {
                 // 回滚已经写过的
                 for w in &written {
-                    let _ = tools::write_atomic(&w.path, &w.old);
+                    let _ = ctx.write_text(&w.rel, &w.old);
                 }
                 return ToolResult::err_code(
                     call,
                     "IO_ERROR",
                     format!(
-                        "写入 {} 失败：{e}。已回滚 {} 个文件，全部保持原样",
+                        "写入 {} 失败：{}。已回滚 {} 个文件，全部保持原样",
                         p.display,
+                        e.message(),
                         written.len()
                     ),
-                    true,
+                    e.retryable(),
                 );
             }
         }
@@ -289,7 +286,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn ctx() -> (ToolContext, PathBuf) {
+    fn ctx() -> (ToolContext, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "nw-multi-{}-{:?}",
             std::process::id(),

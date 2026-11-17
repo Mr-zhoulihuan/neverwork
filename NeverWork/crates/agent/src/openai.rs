@@ -70,6 +70,9 @@ struct WireRequest<'a> {
     /// 不加这个，大多数网关不会在流里返回 token 用量。
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
+    /// 思考等级（OpenAI 兼容用）。不认识该参数的网关会 400，见下方重试。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -194,6 +197,7 @@ impl OpenAiProvider {
             stream_options: Some(StreamOptions {
                 include_usage: true,
             }),
+            reasoning_effort: self.config.thinking.effort(),
         };
 
         let send = |body: &WireRequest| {
@@ -203,32 +207,26 @@ impl OpenAiProvider {
                 .send_json(body)
         };
 
-        let resp = match send(&body) {
-            Ok(r) => r,
-            // 个别老网关/自建代理不认 `stream_options`，会直接回 400。
-            // 不要为了一个用量字段把整轮对话搞挂：去掉再发一次。
-            Err(ureq::Error::StatusCode(400)) => {
-                body.stream_options = None;
-                match send(&body) {
-                    Ok(r) => r,
-                    Err(ureq::Error::StatusCode(code)) => {
-                        on_event(StreamEvent::Error(format!("HTTP {code}")));
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        on_event(StreamEvent::Error(format!("请求失败：{e}")));
-                        return Ok(());
-                    }
+        // 可选字段（思考参数 / 用量流选项）都可能被网关当成非法参数回 400。
+        // 不要为了可选项把整轮对话搞挂：先去掉思考参数重试，再去掉 stream_options。
+        let resp = loop {
+            match send(&body) {
+                Ok(r) => break r,
+                Err(ureq::Error::StatusCode(400)) if body.reasoning_effort.is_some() => {
+                    body.reasoning_effort = None;
                 }
-            }
-            Err(ureq::Error::StatusCode(code)) => {
-                // 尽力把服务端的错误正文带出来，否则用户只会看到 HTTP 401 不知道原因
-                on_event(StreamEvent::Error(format!("HTTP {code}")));
-                return Ok(());
-            }
-            Err(e) => {
-                on_event(StreamEvent::Error(format!("请求失败：{e}")));
-                return Ok(());
+                Err(ureq::Error::StatusCode(400)) if body.stream_options.is_some() => {
+                    body.stream_options = None;
+                }
+                Err(ureq::Error::StatusCode(code)) => {
+                    // 尽力把服务端的错误正文带出来，否则用户只会看到 HTTP 401 不知道原因
+                    on_event(StreamEvent::Error(format!("HTTP {code}")));
+                    return Ok(());
+                }
+                Err(e) => {
+                    on_event(StreamEvent::Error(format!("请求失败：{e}")));
+                    return Ok(());
+                }
             }
         };
 
@@ -406,7 +404,12 @@ pub(crate) fn parse_usage_frame(data: &str) -> Option<TokenUsage> {
 /// 与实际请求保持一致（包括 `stream_options`）：形状对不上，就只会测出一个
 /// 线上根本不存在的请求。
 #[cfg(test)]
-pub(crate) fn debug_request_body(model: &str, messages: &[ChatMessage], tools: &[ToolSpec]) -> Value {
+pub(crate) fn debug_request_body(
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[ToolSpec],
+    thinking: neverwork_core::ThinkingLevel,
+) -> Value {
     use serde_json::json;
     let body = WireRequest {
         model,
@@ -428,6 +431,7 @@ pub(crate) fn debug_request_body(model: &str, messages: &[ChatMessage], tools: &
         stream_options: Some(StreamOptions {
             include_usage: true,
         }),
+        reasoning_effort: thinking.effort(),
     };
     serde_json::to_value(&body).unwrap_or(json!({}))
 }
@@ -436,13 +440,22 @@ pub(crate) fn debug_request_body(model: &str, messages: &[ChatMessage], tools: &
 mod usage_tests {
     use super::{debug_request_body, parse_usage_frame};
     use crate::{ChatMessage, TokenUsage};
+    use neverwork_core::ThinkingLevel;
 
     #[test]
     fn request_asks_for_stream_usage() {
         // 不带 `stream_options.include_usage`，大多数网关不在流里回 usage，
         // token 预算与用量记账就全是 0。
-        let body = debug_request_body("gpt-4o", &[ChatMessage::user("hi")], &[]);
+        let body = debug_request_body("gpt-4o", &[ChatMessage::user("hi")], &[], ThinkingLevel::Auto);
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn reasoning_effort_only_when_level_chosen() {
+        let auto = debug_request_body("o3", &[ChatMessage::user("hi")], &[], ThinkingLevel::Auto);
+        assert!(auto.get("reasoning_effort").is_none(), "自动档不能发 reasoning_effort");
+        let high = debug_request_body("o3", &[ChatMessage::user("hi")], &[], ThinkingLevel::High);
+        assert_eq!(high["reasoning_effort"], "high");
     }
 
     #[test]

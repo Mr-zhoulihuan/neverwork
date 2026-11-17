@@ -294,6 +294,13 @@ pub enum MessageKind {
         /// 参数摘要，如 `src/main.rs（写入 12 行）`。
         summary: String,
         status: ToolRunStatus,
+        /// 发起这次调用的角色序号（单 Agent 恒 0）。
+        /// 旧会话没有该字段：`None` 表示未知，统计行里直接不显示线程数。
+        #[serde(default)]
+        thread: Option<usize>,
+        /// 该角色内的第几次模型调用（0 起）。旧会话为 `None`，不显示轮次。
+        #[serde(default)]
+        round: Option<usize>,
         /// 执行输出 / 错误信息。
         output: String,
         /// 变化内容（写操作为 diff，读操作为空）。
@@ -606,6 +613,84 @@ impl SessionMode {
     }
 }
 
+/// 思考等级（会话级）。
+///
+/// 只做「一个档位 → 三家协议各自的参数」的映射，不在 core 里判断模型能力：
+/// - OpenAI 兼容：`reasoning_effort`（不认识这个参数的网关会 400，请求层自动去掉重试）
+/// - Anthropic：`thinking.budget_tokens`
+/// - Gemini：`generationConfig.thinkingConfig.thinkingBudget`
+///
+/// `Auto` 表示**什么都不发**，行为与加这个功能之前完全一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingLevel {
+    /// 自动：不向厂商发送任何思考参数，由模型自己决定。
+    #[default]
+    Auto,
+    Low,
+    Medium,
+    High,
+}
+
+impl ThinkingLevel {
+    /// 滑杆上的四档，顺序即从浅到深。
+    pub const ALL: [ThinkingLevel; 4] = [
+        ThinkingLevel::Auto,
+        ThinkingLevel::Low,
+        ThinkingLevel::Medium,
+        ThinkingLevel::High,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThinkingLevel::Auto => "自动",
+            ThinkingLevel::Low => "低",
+            ThinkingLevel::Medium => "中",
+            ThinkingLevel::High => "高",
+        }
+    }
+
+    /// 档位下标（0–3），滑杆与存档用。
+    pub fn index(self) -> usize {
+        match self {
+            ThinkingLevel::Auto => 0,
+            ThinkingLevel::Low => 1,
+            ThinkingLevel::Medium => 2,
+            ThinkingLevel::High => 3,
+        }
+    }
+
+    pub fn from_index(i: usize) -> ThinkingLevel {
+        Self::ALL[i.min(Self::ALL.len() - 1)]
+    }
+
+    /// OpenAI 兼容协议的 `reasoning_effort`；`Auto` 不发送。
+    pub fn effort(self) -> Option<&'static str> {
+        match self {
+            ThinkingLevel::Auto => None,
+            ThinkingLevel::Low => Some("low"),
+            ThinkingLevel::Medium => Some("medium"),
+            ThinkingLevel::High => Some("high"),
+        }
+    }
+
+    /// Anthropic 的 `thinking.budget_tokens` / Gemini 的 `thinkingBudget`；`Auto` 不发送。
+    ///
+    /// 低档就取 Anthropic 允许的最小值 1024，免得「开了低档反而 400」。
+    pub fn budget(self) -> Option<u32> {
+        match self {
+            ThinkingLevel::Auto => None,
+            ThinkingLevel::Low => Some(1024),
+            ThinkingLevel::Medium => Some(4096),
+            ThinkingLevel::High => Some(16384),
+        }
+    }
+
+    pub fn is_auto(self) -> bool {
+        matches!(self, ThinkingLevel::Auto)
+    }
+}
+
 /// 一个会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -660,6 +745,9 @@ pub struct Session {
     /// 本会话使用的模型 id；空表示用该厂商的默认模型。
     #[serde(default)]
     pub model: String,
+    /// 本会话的思考等级；旧会话没有这个字段时按 `Auto`（不发送参数）处理。
+    #[serde(default)]
+    pub thinking: ThinkingLevel,
 
     // ===== 断点续跑（旧配置反序列化时为空/默认） =====
     /// 机器可读的任务阶段。崩溃恢复的依据。
@@ -929,6 +1017,20 @@ mod mention_tests {
             _ => panic!("应反序列化为 Handoff"),
         }
     }
+
+    #[test]
+    fn tool_call_thread_round_default_for_old_sessions() {
+        // 旧会话没有 thread/round 字段：反序列化必须是 None，否则统计行会编造数字。
+        let json = r#"{"type":"tool_call","name":"list_dir","summary":"","status":"ok","output":"","diff":[],"added":0,"removed":0}"#;
+        let kind: MessageKind = serde_json::from_str(json).unwrap();
+        match kind {
+            MessageKind::ToolCall { thread, round, .. } => {
+                assert_eq!(thread, None);
+                assert_eq!(round, None);
+            }
+            _ => panic!("应反序列化为 ToolCall"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -944,6 +1046,8 @@ mod aggregate_tests {
                 path: path.into(),
                 summary: String::new(),
                 status,
+                thread: None,
+                round: None,
                 output: String::new(),
                 diff: Vec::new(),
                 added,
@@ -1036,9 +1140,39 @@ mod session_list_tests {
             pinned: false,
             provider_id: String::new(),
             model: String::new(),
+            thinking: ThinkingLevel::Auto,
             stage: TaskStage::Idle,
             resume_prompt: String::new(),
         }
+    }
+
+    #[test]
+    fn thinking_level_maps_to_provider_params() {
+        assert_eq!(ThinkingLevel::default(), ThinkingLevel::Auto);
+        // 自动什么都不发
+        assert_eq!(ThinkingLevel::Auto.effort(), None);
+        assert_eq!(ThinkingLevel::Auto.budget(), None);
+        assert_eq!(ThinkingLevel::High.effort(), Some("high"));
+        assert_eq!(ThinkingLevel::Medium.budget(), Some(4096));
+        // 低档不能低于 Anthropic 的最小预算 1024
+        assert_eq!(ThinkingLevel::Low.budget(), Some(1024));
+    }
+
+    #[test]
+    fn thinking_level_serde_and_old_session_default() {
+        let text = serde_json::to_string(&ThinkingLevel::High).unwrap();
+        assert_eq!(text, "\"high\"");
+        // 旧会话 JSON 没有 thinking 字段：必须回落 Auto（不改变原有行为）
+        let old = r#"{"id":"a","title":"旧","subtitle":"","team_name":"","messages":[],"updated_label":"","preview":""}"#;
+        let s: Session = serde_json::from_str(old).unwrap();
+        assert_eq!(s.thinking, ThinkingLevel::Auto);
+        // 下标往返（滑杆用）
+        for (i, lv) in ThinkingLevel::ALL.iter().enumerate() {
+            assert_eq!(ThinkingLevel::from_index(i), *lv);
+            assert_eq!(lv.index(), i);
+        }
+        // 越界下标收敛到最后一档，不 panic
+        assert_eq!(ThinkingLevel::from_index(99), ThinkingLevel::High);
     }
 
     #[test]

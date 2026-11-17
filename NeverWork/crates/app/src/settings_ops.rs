@@ -170,6 +170,8 @@ impl AppState {
             base_url: p.base_url.clone(),
             model: model.clone(),
             temperature: p.temperature,
+            // 连通性测试不带思考档位：最小请求，不把预算花在测试上。
+            thinking: neverwork_core::ThinkingLevel::Auto,
         };
         self.action_msg = Some(format!("测试中：{} …", model));
         self.provider_test_busy = true;
@@ -237,6 +239,7 @@ impl AppState {
         match field {
             FormField::SkillSearch => {
                 self.skill_search = value;
+                self.on_skill_search_changed(cx);
                 cx.notify();
                 return;
             }
@@ -531,6 +534,8 @@ impl AppState {
             base_url: p.base_url.clone(),
             model: p.effective_model(),
             temperature: p.temperature,
+            // 拉模型列表只是 GET，不带推理参数。
+            thinking: neverwork_core::ThinkingLevel::Auto,
         };
         let name = p.name.clone();
         self.provider_models_busy = true;
@@ -656,6 +661,12 @@ impl AppState {
                 base_url: p.base_url.clone(),
                 model: self.session_model_for(session_idx, p),
                 temperature: p.temperature,
+                // 思考档位是会话级的：同一个厂商在不同会话可以用不同深度。
+                thinking: self
+                    .sessions
+                    .get(session_idx)
+                    .map(|s| s.thinking)
+                    .unwrap_or_default(),
             },
         ))
     }
@@ -682,7 +693,7 @@ impl AppState {
 
     /// 切换 MCP / Skill 两列。
     ///
-    /// 来源跟着 Tab 归一：Skill 只展示 GitHub 技能；MCP 回到上次用的
+    /// 来源跟着 Tab 归一：Skill 只展示 skills.sh；MCP 回到上次用的
     /// MCP 来源（默认官方）。搜索词与标签随来源一起清。
     pub(crate) fn set_skills_tab(&mut self, tab: u8, cx: &mut Context<Self>) {
         let tab = tab.min(1);
@@ -691,8 +702,8 @@ impl AppState {
         }
         self.skills_tab = tab;
         let target = if tab == 1 {
-            MarketSource::GitHub
-        } else if self.market_source == MarketSource::GitHub {
+            self.skill_source
+        } else if self.market_source == MarketSource::SkillsSh {
             self.mcp_source
         } else {
             self.market_source
@@ -828,10 +839,11 @@ impl AppState {
 
     /// 切换市场来源；没有缓存且没在拉时自动拉一次。
     ///
-    /// 来源与 Tab 绑定：GitHub 只属于 Skill 页，其余属于 MCP 页。
+    /// 来源与 Tab 绑定：skills.sh 只属于 Skill 页，其余属于 MCP 页。
     pub(crate) fn set_market_source(&mut self, source: MarketSource, cx: &mut Context<Self>) {
-        if source == MarketSource::GitHub {
+        if source == MarketSource::SkillsSh {
             self.skills_tab = 1;
+            self.skill_source = source;
         } else {
             self.skills_tab = 0;
             self.mcp_source = source;
@@ -856,26 +868,36 @@ impl AppState {
     }
 
     /// 拉当前来源的真实条目（后台线程 + 写缓存；失败保留旧缓存）。
+    ///
+    /// skills.sh 带搜索词（≥2 字符）时改走搜索接口：结果只进内存，
+    /// 不覆盖首页热榜缓存。
     pub(crate) fn refresh_market(&mut self, cx: &mut Context<Self>) {
+        if self.market_source == MarketSource::SkillsSh
+            && self.skill_search.trim().chars().count() >= 2
+        {
+            self.refresh_skill_search(cx);
+            return;
+        }
         if self.market_loading {
             return;
         }
         let source = self.market_source;
+        let query = self.skill_search.trim().to_string();
         self.market_loading = true;
         self.market_error = None;
         cx.notify();
         let (tx, rx) =
-            flume::unbounded::<(MarketSource, Result<(Vec<MarketEntry>, u64), String>)>();
+            flume::unbounded::<(MarketSource, String, Result<(Vec<MarketEntry>, u64), String>)>();
         std::thread::spawn(move || {
             let r = crate::marketplace::fetch_and_cache(source);
-            let _ = tx.send((source, r));
+            let _ = tx.send((source, query, r));
         });
         cx.spawn(async move |weak, async_cx| {
-            let Ok((source, result)) = rx.recv_async().await else {
+            let Ok((source, query, result)) = rx.recv_async().await else {
                 return;
             };
-            let _ = weak.update(async_cx, |this, cx| {
-                this.apply_market_refresh(source, result, cx);
+            let _ = weak.update(async_cx, move |this, cx| {
+                this.apply_market_refresh(source, query, result, cx);
             });
         })
         .detach();
@@ -884,10 +906,27 @@ impl AppState {
     fn apply_market_refresh(
         &mut self,
         source: MarketSource,
+        query: String,
         result: Result<(Vec<MarketEntry>, u64), String>,
         cx: &mut Context<Self>,
     ) {
         self.market_loading = false;
+        // 用户已经切走来源：丢弃这批结果；新来源还没有条目就补拉一次。
+        if self.market_source != source {
+            let empty = self
+                .market_entries
+                .get(&self.market_source)
+                .map(|e| e.is_empty())
+                .unwrap_or(true);
+            if empty {
+                self.refresh_market(cx);
+            }
+            return;
+        }
+        // 搜索结果回来了但用户又改了词：按旧词排的序，丢弃
+        if source == MarketSource::SkillsSh && self.skill_search.trim() != query {
+            return;
+        }
         match result {
             Ok((entries, at)) => {
                 self.market_entries.insert(source, entries);
@@ -898,6 +937,80 @@ impl AppState {
             Err(e) => self.market_error = Some(e),
         }
         cx.notify();
+    }
+
+    /// skills.sh 搜索请求（防抖由 [`AppState::on_skill_search_changed`] 负责）。
+    ///
+    /// 结果只进内存，不写缓存；应用前校验防抖代数与来源，丢弃过期响应。
+    pub(crate) fn refresh_skill_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.skill_search.trim().to_string();
+        if query.chars().count() < 2 {
+            return;
+        }
+        let gen = self.skill_search_gen.get();
+        self.market_error = None;
+        cx.notify();
+        let (tx, rx) = flume::unbounded::<Result<Vec<MarketEntry>, String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::marketplace::search_skills_sh(&query));
+        });
+        cx.spawn(async move |weak, async_cx| {
+            let Ok(result) = rx.recv_async().await else {
+                return;
+            };
+            let _ = weak.update(async_cx, move |this, cx| {
+                if this.skill_search_gen.get() != gen
+                    || this.market_source != MarketSource::SkillsSh
+                {
+                    return; // 用户还在输入或已经切走
+                }
+                match result {
+                    Ok(entries) => {
+                        this.market_entries.insert(MarketSource::SkillsSh, entries);
+                        this.market_fetched_at.remove(&MarketSource::SkillsSh);
+                        this.market_error = None;
+                    }
+                    Err(e) => this.market_error = Some(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 技能搜索词变化：400ms 防抖后请求 skills.sh（仿编辑器自动保存）。
+    ///
+    /// 少于 2 个字符不发请求（上游限制）；清空搜索回到首页热榜。
+    pub(crate) fn on_skill_search_changed(&mut self, cx: &mut Context<Self>) {
+        let gen = self.skill_search_gen.get() + 1;
+        self.skill_search_gen.set(gen);
+        if self.market_source != MarketSource::SkillsSh {
+            return;
+        }
+        let query = self.skill_search.trim().to_string();
+        let gen_cell = self.skill_search_gen.clone();
+        cx.spawn(async move |weak, async_cx| {
+            async_cx
+                .background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            // 期间又改过：让那一轮的计时器负责
+            if gen_cell.get() != gen {
+                return;
+            }
+            let _ = weak.update(async_cx, move |this, cx| {
+                if this.market_source != MarketSource::SkillsSh {
+                    return;
+                }
+                if query.is_empty() {
+                    // 清空搜索：回到首页热榜（搜索结果不缓存，需要重新拉）
+                    this.refresh_market(cx);
+                } else if query.chars().count() >= 2 {
+                    this.refresh_skill_search(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// 安装市场条目：文本技能直接落盘；MCP 插件先取启动配置，再进入确认流程。
@@ -960,7 +1073,72 @@ impl AppState {
             .detach();
             return;
         }
+        if entry.remote.is_some() {
+            self.install_remote_entry(entry, None, cx);
+            return;
+        }
         self.install_skill(skill, cx);
+    }
+
+    /// 安装 skills.sh 条目：后台解析正文 → 落盘 →（可选）绑定到团队角色。
+    ///
+    /// `bind_role`：从团队插件面板发起时记下角色下标，装完直接绑定。
+    pub(crate) fn install_remote_entry(
+        &mut self,
+        entry: MarketEntry,
+        bind_role: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let skill = entry.skill.clone();
+        let Some(remote) = entry.remote.clone() else {
+            self.install_skill(skill, cx);
+            return;
+        };
+        // skills.sh 条目：列表接口不带正文，安装时再去上游解析 SKILL.md
+        if self.market_installing.is_some() {
+            return;
+        }
+        self.market_installing = Some(skill.id.clone());
+        self.notice = Some(format!("正在解析「{}」的正文…", skill.name));
+        cx.notify();
+        let page = entry.source_url.clone();
+        let (tx, rx) = flume::unbounded::<Result<String, String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::marketplace::fetch_remote_skill_body(
+                &remote.source,
+                &remote.id,
+            ));
+        });
+        cx.spawn(async move |weak, async_cx| {
+            let Ok(result) = rx.recv_async().await else {
+                return;
+            };
+            let _ = weak.update(async_cx, move |this, cx| {
+                this.market_installing = None;
+                match result {
+                    Ok(body) => {
+                        // 上游正文可能带自己的 front-matter：解析后只取正文，
+                        // 名称 / 简介沿用市场条目（含来源与安装量）。
+                        let parsed = crate::skills_ops::parse_md(&body, &skill.id);
+                        let mut s = skill.clone();
+                        s.detail = parsed.detail;
+                        this.install_skill(s.clone(), cx);
+                        if let Some(role_idx) = bind_role {
+                            this.bind_skill_to_role(role_idx, &s.id, &s.name, cx);
+                        }
+                    }
+                    Err(e) => {
+                        let hint = page
+                            .as_deref()
+                            .map(|u| format!("（可在 {u} 查看原文）"))
+                            .unwrap_or_default();
+                        this.action_msg = Some(format!("获取技能正文失败：{e}{hint}"));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     /// 国内镜像开关：MCP 子进程启动时注入 npm / PyPI 镜像。
