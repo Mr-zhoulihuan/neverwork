@@ -229,8 +229,10 @@ impl AppState {
             FormField::FindQuery => self.find.query.clone(),
             FormField::FindReplace => self.find.replace.clone(),
             FormField::TeamName => self
-                .config
-                .active_team()
+                .team_rename_id
+                .as_ref()
+                .and_then(|id| self.config.teams.iter().find(|t| &t.id == id))
+                .or_else(|| self.config.active_team())
                 .map(|t| t.name.clone())
                 .unwrap_or_default(),
             FormField::RoleName => self.edited_role().map(|r| r.name.clone()).unwrap_or_default(),
@@ -297,7 +299,11 @@ impl AppState {
             FormField::TeamName => {
                 let name = value.trim().to_string();
                 if !name.is_empty() {
-                    let ti = self.active_team_index();
+                    let ti = self
+                        .team_rename_id
+                        .as_ref()
+                        .and_then(|id| self.config.teams.iter().position(|t| &t.id == id))
+                        .unwrap_or_else(|| self.active_team_index());
                     if let Some(t) = self.config.teams.get_mut(ti) {
                         t.name = name.clone();
                     }
@@ -307,6 +313,7 @@ impl AppState {
                     };
                     self.notice = Some(msg);
                 }
+                self.team_rename_id = None;
                 cx.notify();
                 return;
             }
@@ -836,11 +843,12 @@ impl AppState {
     pub(crate) fn open_market_detail_for_role(
         &mut self,
         entry: MarketEntry,
+        team_idx: usize,
         role_idx: usize,
         cx: &mut Context<Self>,
     ) {
         self.market_detail = Some(entry);
-        self.market_detail_role = Some(role_idx);
+        self.market_detail_role = Some((team_idx, role_idx));
         self.market_detail_error = None;
         cx.notify();
         self.load_market_detail_body(cx);
@@ -1017,8 +1025,8 @@ impl AppState {
             cfg.sanitized()
         ));
         // 从团队编辑器发起时，装完顺手绑给那个角色
-        if let Some(role_idx) = self.pending_mcp_attach.take() {
-            self.attach_skill_to_role(role_idx, skill, cx);
+        if let Some((team_idx, role_idx)) = self.pending_mcp_attach.take() {
+            self.attach_skill_to_role(team_idx, role_idx, skill, cx);
             return;
         }
         cx.notify();
@@ -1277,11 +1285,11 @@ impl AppState {
 
     /// 安装 skills.sh 条目：后台解析正文 → 落盘 →（可选）绑定到团队角色。
     ///
-    /// `bind_role`：从团队插件面板发起时记下角色下标，装完直接绑定。
+    /// `bind_role`：从团队插件面板发起时记下（团队下标, 角色下标），装完直接绑定。
     pub(crate) fn install_remote_entry(
         &mut self,
         entry: MarketEntry,
-        bind_role: Option<usize>,
+        bind_role: Option<(usize, usize)>,
         cx: &mut Context<Self>,
     ) {
         let skill = entry.skill.clone();
@@ -1293,8 +1301,8 @@ impl AppState {
         if entry.detail_loaded {
             let s = entry.skill.clone();
             self.install_skill(s.clone(), cx);
-            if let Some(role_idx) = bind_role {
-                self.bind_skill_to_role(role_idx, &s.id, &s.name, cx);
+            if let Some((team_idx, role_idx)) = bind_role {
+                self.bind_skill_to_role(team_idx, role_idx, &s.id, &s.name, cx);
             }
             return;
         }
@@ -1334,8 +1342,8 @@ impl AppState {
                         let mut s = skill.clone();
                         s.detail = parsed.detail;
                         this.install_skill(s.clone(), cx);
-                        if let Some(role_idx) = bind_role {
-                            this.bind_skill_to_role(role_idx, &s.id, &s.name, cx);
+                        if let Some((team_idx, role_idx)) = bind_role {
+                            this.bind_skill_to_role(team_idx, role_idx, &s.id, &s.name, cx);
                         }
                     }
                     Err(e) => {

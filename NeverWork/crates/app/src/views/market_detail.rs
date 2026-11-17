@@ -292,13 +292,13 @@ impl AppState {
             .text_xs();
         // 从团队角色面板进来时，主按钮是「绑定到角色」（绑定会先确保安装，
         // MCP 未装则走确认流程，确认后自动绑），不再给卸载入口。
-        let bound_role = self.market_detail_role.and_then(|ri| {
-            let team = self.config.active_team()?;
+        let bound_role = self.market_detail_role.and_then(|(ti, ri)| {
+            let team = self.config.teams.get(ti)?;
             let role = team.roles.get(ri)?;
             let bound = role.skills.iter().any(|x| x == &skill.id);
-            Some((ri, role.name.clone(), bound))
+            Some((ti, ri, role.name.clone(), bound))
         });
-        if let Some((role_idx, role_name, bound)) = bound_role {
+        if let Some((team_idx, role_idx, role_name, bound)) = bound_role {
             install_btn = if bound {
                 install_btn
                     .bg(theme::with_alpha(0x22c55e, 0.12))
@@ -320,7 +320,7 @@ impl AppState {
                     .cursor_pointer()
                     .hover(|d| d.opacity(0.88))
                     .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
-                        this.attach_skill_to_role(role_idx, skill_for_bind.clone(), cx);
+                        this.attach_skill_to_role(team_idx, role_idx, skill_for_bind.clone(), cx);
                     }))
                     .child(SharedString::from(label))
             };

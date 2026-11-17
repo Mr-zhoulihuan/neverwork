@@ -3363,6 +3363,7 @@ dependencies = [
  "embed-resource",
  "flume",
  "gpui",
+ "image",
  "neverwork-agent",
  "neverwork-core",
  "neverwork-ui",

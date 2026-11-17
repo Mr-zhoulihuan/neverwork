@@ -41,6 +41,79 @@ pub enum CenterView {
     Skills,
 }
 
+/// 当前打开的媒体文件：图片 / PDF / Markdown 不能按文本编辑，走只读查看器。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MediaPreview {
+    Image(PathBuf),
+    Pdf(PathBuf),
+    /// Markdown 渲染预览；顶栏可切回源码编辑。
+    Markdown(PathBuf),
+}
+
+impl MediaPreview {
+    pub(crate) fn path(&self) -> &PathBuf {
+        match self {
+            Self::Image(p) | Self::Pdf(p) | Self::Markdown(p) => p,
+        }
+    }
+}
+
+/// 图片扩展名：gpui 的 `img()` 能解码的全部格式（image crate 默认特性 + SVG）。
+pub(crate) fn is_image_extension(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "jpe"
+            | "jfif"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "ico"
+            | "svg"
+            | "tif"
+            | "tiff"
+            | "tga"
+            | "qoi"
+            | "pnm"
+            | "pbm"
+            | "pgm"
+            | "ppm"
+            | "hdr"
+            | "exr"
+            | "dds"
+            | "ff"
+    )
+}
+
+/// 按扩展名判断媒体类型；命中就不该进文本编辑器。
+fn media_preview_of(path: &std::path::Path) -> Option<MediaPreview> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if is_image_extension(&ext) {
+        return Some(MediaPreview::Image(path.to_path_buf()));
+    }
+    match ext.as_str() {
+        "pdf" => Some(MediaPreview::Pdf(path.to_path_buf())),
+        "md" | "markdown" => Some(MediaPreview::Markdown(path.to_path_buf())),
+        _ => None,
+    }
+}
+
+/// 未知扩展名的文件：带二进制特征（含 NUL 字节）且能识别为图片时返回 `Image`。
+/// 其余（文本或无法预览的二进制）返回 `None`，按原文本流程打开。
+fn probe_binary_media(path: &std::path::Path) -> Option<MediaPreview> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 8192];
+    let n = f.read(&mut head).ok()?;
+    if head[..n].contains(&0) && image::guess_format(&head[..n]).is_ok() {
+        Some(MediaPreview::Image(path.to_path_buf()))
+    } else {
+        None
+    }
+}
+
 /// 设置页的分区。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsTab {
@@ -313,6 +386,8 @@ pub struct AppState {
 
     // ===== 编辑 / 输入 =====
     pub open_path: Option<PathBuf>,
+    /// 当前打开的是图片 / PDF：中心区走只读查看器，文本缓冲区保持不变。
+    pub media_preview: Option<MediaPreview>,
     pub editor: TextBuffer,
     pub chat: TextBuffer,
     /// 本轮待发送的附件（粘贴图片 / 上传文件 / 拖拽进来），发送后清空。
@@ -390,18 +465,20 @@ pub struct AppState {
     pub new_session_picker: bool,
     /// 新建会话浮层里团队下拉是否展开。
     pub ns_team_open: bool,
-    /// 团队编辑器里正在挑插件的角色下标；`None` 表示未展开。
-    pub role_skill_picker: Option<usize>,
-    /// 团队编辑器里正在内联编辑的角色下标；`None` 表示未展开。
-    pub role_edit_index: Option<usize>,
-    /// 角色编辑里的模型下拉是否展开（值为角色下标）。
-    pub role_model_picker: Option<usize>,
+    /// 团队编辑器里正在挑插件的角色（团队下标, 角色下标）；`None` 表示未展开。
+    pub role_skill_picker: Option<(usize, usize)>,
+    /// 团队编辑器里正在内联编辑的角色（团队下标, 角色下标）；`None` 表示未展开。
+    pub role_edit_index: Option<(usize, usize)>,
+    /// 角色编辑里的模型下拉是否展开（值为（团队下标, 角色下标））。
+    pub role_model_picker: Option<(usize, usize)>,
     /// 角色提示词的多行缓冲（展开编辑时装入，提交时写回角色）。
     pub role_prompt_buf: TextBuffer,
-    /// 团队页顶部的团队下拉是否展开。
-    pub team_menu_open: bool,
-    /// 删除团队的一次性确认（点一次变成「确认删除？」）。
-    pub team_delete_confirm: bool,
+    /// 折叠起来的团队 id（团队页平铺，默认全部展开）。
+    pub team_collapsed: std::collections::HashSet<String>,
+    /// 正在重命名的团队 id（团队页内联输入行）。
+    pub team_rename_id: Option<String>,
+    /// 待确认删除的团队 id（点一次变成「确认删除？」）。
+    pub team_delete_confirm: Option<String>,
     /// 角色插件搜索词。
     pub role_skill_search: String,
     /// 团队插件面板的筛选页签：0=全部 1=MCP 2=技能 3=已安装。
@@ -409,8 +486,8 @@ pub struct AppState {
     /// 待确认的 MCP 插件安装（技能 id）。
     /// MCP 插件安装 = 注册并启动外部进程，必须用户点头后才接。
     pub pending_mcp_install: Option<String>,
-    /// MCP 确认通过后要绑定到的角色下标（从团队编辑器发起时记录）。
-    pub pending_mcp_attach: Option<usize>,
+    /// MCP 确认通过后要绑定到的角色（团队下标, 角色下标；从团队编辑器发起时记录）。
+    pub pending_mcp_attach: Option<(usize, usize)>,
     /// 技能导入（.md）输入行是否展开。
     pub skill_import_open: bool,
     /// 技能市场当前来源（MCP 页：官方 / 腾讯云；Skill 页：skills.sh）。
@@ -425,9 +502,9 @@ pub struct AppState {
     pub market_detail_loading: bool,
     /// 详情抽屉正文拉取失败的原因。
     pub market_detail_error: Option<String>,
-    /// 详情抽屉从团队角色面板打开时要绑定的角色下标。
+    /// 详情抽屉从团队角色面板打开时要绑定的角色（团队下标, 角色下标）。
     /// `Some` 时底栏主按钮是「绑定到角色」而不是安装 / 卸载。
-    pub market_detail_role: Option<usize>,
+    pub market_detail_role: Option<(usize, usize)>,
     /// 各来源最近一次拉到的条目（内存，不序列化）。
     pub market_entries: std::collections::HashMap<MarketSource, Vec<MarketEntry>>,
     /// 各来源上次成功同步的时间。
@@ -472,6 +549,8 @@ pub struct AppState {
     pub auto_save_gen: std::rc::Rc<std::cell::Cell<u64>>,
     /// 技能搜索防抖代数（每次输入 +1，只有最后一次计时真正发请求）。
     pub skill_search_gen: std::rc::Rc<std::cell::Cell<u64>>,
+    /// 「执行中」心跳代数：每轮生成 +1，旧 ticker 发现代数变了就退出。
+    pub(crate) run_clock_gen: std::rc::Rc<std::cell::Cell<u64>>,
     /// 是否有待保存的自动保存。
     pub auto_save_pending: bool,
 
@@ -966,6 +1045,7 @@ impl AppState {
                 .ok()
                 .filter(|t| !t.trim().is_empty()),
             open_path: None,
+            media_preview: None,
             editor: TextBuffer::multi_line(),
             chat: TextBuffer::single_line(),
             chat_attachments: Vec::new(),
@@ -1010,8 +1090,9 @@ impl AppState {
             role_edit_index: None,
             role_model_picker: None,
             role_prompt_buf: TextBuffer::multi_line(),
-            team_menu_open: false,
-            team_delete_confirm: false,
+            team_collapsed: std::collections::HashSet::new(),
+            team_rename_id: None,
+            team_delete_confirm: None,
             role_skill_search: String::new(),
             role_skill_filter: 0,
             pending_mcp_install: None,
@@ -1052,6 +1133,7 @@ impl AppState {
             chat_w: 1200.0,
             auto_save_gen: std::rc::Rc::new(std::cell::Cell::new(0)),
             skill_search_gen: std::rc::Rc::new(std::cell::Cell::new(0)),
+            run_clock_gen: std::rc::Rc::new(std::cell::Cell::new(0)),
             auto_save_pending: false,
             streaming: false,
             ai_ready,
@@ -1068,14 +1150,13 @@ impl AppState {
         // 启动时按需打开文件（便于验证）。远程工作区不支持本地路径，跳过。
         if me.remote.is_none() {
             if let Ok(path) = std::env::var("NW_OPEN") {
-                let p = PathBuf::from(&path);
-                if let Ok(content) = filesystem::read_file(&p) {
-                    me.editor.reset(content);
-                    me.editor.move_to(0, false);
-                    me.open_path = Some(p);
-                    me.center = CenterView::File;
-                }
+                // 走 open_file：图片/PDF/Markdown 自动切到只读查看器，文本进编辑器。
+                me.open_file(PathBuf::from(&path), cx);
             }
+        }
+        // 验证用：媒体查看器启动后立刻切到源码编辑（Markdown）。
+        if std::env::var("NW_MEDIA_TEXT").map(|v| v == "1").unwrap_or(false) {
+            me.edit_current_as_text(cx);
         }
 
         me.watcher_stop = start_watcher_opt(me.root.clone(), cx);
@@ -1102,6 +1183,14 @@ impl AppState {
                 _ => {}
             }
         }
+        // 验证用：启动即切到右栏指定 tab（files / git / preview）。
+        if let Ok(v) = std::env::var("NW_RIGHT_TAB") {
+            match v.as_str() {
+                "git" => me.right_tab = RightTab::Git,
+                "preview" => me.right_tab = RightTab::Preview,
+                _ => {}
+            }
+        }
         // 验证用：预置当前会话的权限档位（read_only / plan / standard / full）。
         me.apply_env_permission();
         // 验证用：启动即弹出「新建会话」的模式选择浮层。
@@ -1111,7 +1200,7 @@ impl AppState {
         // 验证用：启动即展开团队编辑器里某个角色的插件市场面板。
         if let Ok(v) = std::env::var("NW_PICK_ROLE_SKILL") {
             if let Ok(i) = v.parse::<usize>() {
-                me.role_skill_picker = Some(i);
+                me.role_skill_picker = Some((me.active_team_index(), i));
             }
         }
         // 验证用：预置团队插件面板的筛选页签（0=全部 1=MCP 2=技能 3=已安装）。
@@ -1127,7 +1216,7 @@ impl AppState {
         // 验证用：详情抽屉从团队角色面板打开（参数是角色下标，配合 NW_MARKET_DETAIL 选条目）。
         if let Ok(v) = std::env::var("NW_MARKET_DETAIL_ROLE") {
             if let Ok(i) = v.parse::<usize>() {
-                me.market_detail_role = Some(i);
+                me.market_detail_role = Some((me.active_team_index(), i));
             }
         }
         // 验证用：启动即安装一个技能（文本技能直接落盘；MCP 进入待确认；
@@ -1307,37 +1396,40 @@ impl AppState {
         if std::env::var("NW_WS_INPUT").map(|v| v == "1").unwrap_or(false) {
             me.open_workspace_folder_input(cx);
         }
-        // 验证专用：团队编辑器抬头下拉 / 角色内联编辑 / 角色模型下拉。
+        // 验证专用：团队页（平铺）默认全部展开；用 NW_TEAM_MENU=1 保证没有折叠块。
         if std::env::var("NW_TEAM_MENU").map(|v| v == "1").unwrap_or(false) {
             me.center = CenterView::Team;
-            me.team_menu_open = true;
+            me.team_collapsed.clear();
         }
         if let Ok(v) = std::env::var("NW_ROLE_EDIT") {
             let idx = v.trim().parse::<usize>().unwrap_or(0);
+            let ti = me.active_team_index();
             let n = me.config.active_team().map(|t| t.roles.len()).unwrap_or(0);
             if idx < n {
                 me.center = CenterView::Team;
-                me.toggle_role_edit(idx, cx);
+                me.toggle_role_edit(ti, idx, cx);
             }
         }
         if let Ok(v) = std::env::var("NW_ROLE_MODEL") {
             let idx = v.trim().parse::<usize>().unwrap_or(0);
+            let ti = me.active_team_index();
             let n = me.config.active_team().map(|t| t.roles.len()).unwrap_or(0);
             if idx < n {
                 me.center = CenterView::Team;
-                if me.role_edit_index != Some(idx) {
-                    me.toggle_role_edit(idx, cx);
+                if me.role_edit_index != Some((ti, idx)) {
+                    me.toggle_role_edit(ti, idx, cx);
                 }
-                me.role_model_picker = Some(idx);
+                me.role_model_picker = Some((ti, idx));
             }
         }
         // 验证专用：启动即展开某个角色的插件面板（来源切换 / 刷新市场 / 安装态）。
         if let Ok(v) = std::env::var("NW_ROLE_SKILL") {
             let idx = v.trim().parse::<usize>().unwrap_or(0);
+            let ti = me.active_team_index();
             let n = me.config.active_team().map(|t| t.roles.len()).unwrap_or(0);
             if idx < n {
                 me.center = CenterView::Team;
-                me.toggle_role_skill_picker(idx, cx);
+                me.toggle_role_skill_picker(ti, idx, cx);
             }
         }
         // 验证专用：新建会话浮层直接展开团队列表。
@@ -1365,17 +1457,50 @@ impl AppState {
         }
         // 验收专用：给前几条会话临时打状态，检查胶囊/归档组。
         // 只改内存，不落盘（不调 save_sessions），进程退出即无。
-        if std::env::var("NW_DEMO_STATUS").map(|v| v == "1").unwrap_or(false) {
-            let demo = [
-                neverwork_core::SessionStatus::Todo,
-                neverwork_core::SessionStatus::Done,
-                neverwork_core::SessionStatus::Dropped,
-            ];
-            for (i, st) in demo.iter().enumerate() {
-                if let Some(s) = me.sessions.get_mut(i) {
-                    s.status = *st;
+        match std::env::var("NW_DEMO_STATUS").as_deref() {
+            Ok("1") => {
+                let demo = [
+                    neverwork_core::SessionStatus::Todo,
+                    neverwork_core::SessionStatus::Done,
+                    neverwork_core::SessionStatus::Dropped,
+                ];
+                for (i, st) in demo.iter().enumerate() {
+                    if let Some(s) = me.sessions.get_mut(i) {
+                        s.status = *st;
+                    }
                 }
             }
+            // 会话卡片「执行中」动图 + 耗时：模拟第 0 条会话正在跑，不真发请求。
+            // 补两条做对照：待执行 / 已完成，确认只有执行中的卡片带动图。
+            Ok("running") => {
+                while me.sessions.len() < 3 {
+                    let mut s = me.sessions[0].clone();
+                    let n = me.sessions.len();
+                    s.id = format!("demo-session-{n}");
+                    s.title = format!("演示会话 {}", n + 1);
+                    s.icon = format!("{}", n + 1);
+                    s.messages.clear();
+                    me.sessions.push(s);
+                }
+                if let Some(s) = me.sessions.first_mut() {
+                    s.status = neverwork_core::SessionStatus::Working;
+                    s.stage = neverwork_core::TaskStage::Running;
+                    s.sync_action();
+                }
+                if let Some(s) = me.sessions.get_mut(1) {
+                    s.status = neverwork_core::SessionStatus::Todo;
+                    s.sync_action();
+                }
+                if let Some(s) = me.sessions.get_mut(2) {
+                    s.status = neverwork_core::SessionStatus::Done;
+                    s.stage = neverwork_core::TaskStage::Done;
+                    s.sync_action();
+                }
+                me.streaming = true;
+                me.turn_started = Some(std::time::Instant::now());
+                me.start_run_clock(cx);
+            }
+            _ => {}
         }
         // 启动就把当前工作区记进最近列表（首次运行时列表里至少有一条）。
         // 无工作区时不记——「还没选」不该变成一个最近项。
@@ -1913,6 +2038,7 @@ impl AppState {
         // 监听跟着换根：不停旧的，旧目录的改动还会刷进新文件树。
         self.watcher_stop = start_watcher_opt(self.root.clone(), cx);
         self.open_path = None;
+        self.media_preview = None;
         self.editor.reset("");
         self.dirty = false;
         self.folds.clear();
@@ -2202,6 +2328,7 @@ impl AppState {
         self.expanded.clear();
         self.files.clear();
         self.open_path = None;
+        self.media_preview = None;
         self.editor.reset("");
         self.dirty = false;
         self.folds.clear();
@@ -2650,8 +2777,38 @@ impl AppState {
     }
 
     pub(crate) fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // 1) 明确的图片 / PDF / Markdown：走只读查看器。
+        if let Some(media) = media_preview_of(&path) {
+            self.show_media(media, cx);
+            return;
+        }
+        // 2) 扩展名不认识：二进制文件里可能藏着图片，也可能根本不是文本。
+        if let Some(media) = probe_binary_media(&path) {
+            self.show_media(media, cx);
+            return;
+        }
+        // 3) 其余按文本编辑。
+        self.open_text_file(path, cx);
+    }
+
+    /// 打开只读查看器（图片 / PDF / Markdown）。
+    fn show_media(&mut self, media: MediaPreview, cx: &mut Context<Self>) {
+        self.open_path = Some(media.path().clone());
+        self.media_preview = Some(media);
+        self.remote_open_rel = None;
+        self.center = CenterView::File;
+        self.notice = None;
+        // 新 open_path 指向媒体文件：遗留的自动保存绝不能写到它上面。
+        self.auto_save_pending = false;
+        self.find.open = false;
+        cx.notify();
+    }
+
+    /// 文本编辑器打开（媒体查看器里的「编辑源码」也走这里）。
+    pub(crate) fn open_text_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         match filesystem::read_file(&path) {
             Ok(content) => {
+                self.media_preview = None;
                 self.editor.reset(content);
                 // 打开文件时光标回到开头并按需滚动，避免落在文件末尾看不见。
                 self.editor.move_to(0, false);
@@ -2668,6 +2825,14 @@ impl AppState {
             }
         }
         cx.notify();
+    }
+
+    /// 媒体查看器里切到源码编辑（Markdown 顶栏按钮）。
+    pub(crate) fn edit_current_as_text(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.media_preview.as_ref().map(|m| m.path().clone()) else {
+            return;
+        };
+        self.open_text_file(path, cx);
     }
 
     /// 打开远程文件：读文件走 ssh，必须放后台线程，否则界面会卡住等网络。
@@ -2699,6 +2864,7 @@ impl AppState {
                     }
                     match msg {
                         Ok(content) => {
+                            this.media_preview = None;
                             this.editor.reset(content);
                             this.editor.move_to(0, false);
                             this.scroll_editor_to_cursor();
@@ -2721,7 +2887,22 @@ impl AppState {
         .detach();
     }
 
+    /// 用系统默认应用打开当前媒体文件（PDF 阅读 / 图片大图）。
+    pub(crate) fn open_media_externally(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.media_preview.as_ref().map(|m| m.path().clone()) else {
+            return;
+        };
+        if let Err(e) = open_with_system(&path) {
+            self.notice = Some(format!("无法用默认应用打开：{e}"));
+        }
+        cx.notify();
+    }
+
     pub(crate) fn save_file(&mut self, cx: &mut Context<Self>) {
+        // 媒体查看器里没有可存的文本，且 open_path 指向图片/PDF，绝不能写回。
+        if self.media_preview.is_some() {
+            return;
+        }
         if let Some(rel) = self.remote_open_rel.clone() {
             self.save_remote_file(rel, cx);
             return;
@@ -2987,7 +3168,7 @@ impl AppState {
 
     /// 由渲染侧的定时器调用：若期间没有新改动则保存。
     pub(crate) fn flush_auto_save(&mut self, cx: &mut Context<Self>) {
-        if !self.auto_save_pending || !self.dirty {
+        if !self.auto_save_pending || !self.dirty || self.media_preview.is_some() {
             return;
         }
         self.auto_save_pending = false;
@@ -3638,6 +3819,8 @@ impl AppState {
 
         self.streaming = true;
         self.turn_started = Some(std::time::Instant::now());
+        // 会话卡片上的「执行中」动图与耗时：流式期间定时重绘。
+        self.start_run_clock(cx);
         self.cancel.store(false, Ordering::Relaxed);
         self.chat_scroll_dirty.set(true);
         cx.notify();
@@ -3782,13 +3965,14 @@ impl AppState {
     /// skills.sh 条目正文要等安装时从上游解析，走远程安装并记下绑定。
     pub(crate) fn attach_skill_to_role(
         &mut self,
+        team_idx: usize,
         role_idx: usize,
         skill: neverwork_core::Skill,
         cx: &mut Context<Self>,
     ) {
         if !self.is_skill_installed(&skill.id) {
             if skill.is_mcp() {
-                self.pending_mcp_attach = Some(role_idx);
+                self.pending_mcp_attach = Some((team_idx, role_idx));
                 self.install_skill(skill, cx);
                 return;
             }
@@ -3796,24 +3980,24 @@ impl AppState {
                 .market_entry_for(&skill.id)
                 .filter(|e| e.remote.is_some() && !e.remote_only)
             {
-                self.install_remote_entry(entry, Some(role_idx), cx);
+                self.install_remote_entry(entry, Some((team_idx, role_idx)), cx);
                 return;
             }
             self.install_skill(skill.clone(), cx);
         }
-        self.bind_skill_to_role(role_idx, &skill.id, &skill.name, cx);
+        self.bind_skill_to_role(team_idx, role_idx, &skill.id, &skill.name, cx);
     }
 
     /// 把已安装的技能记到角色的 `Role.skills`（内存，点「保存」才写盘）。
     pub(crate) fn bind_skill_to_role(
         &mut self,
+        team_idx: usize,
         role_idx: usize,
         id: &str,
         name: &str,
         cx: &mut Context<Self>,
     ) {
-        let ti = self.active_team_index();
-        if let Some(team) = self.config.teams.get_mut(ti) {
+        if let Some(team) = self.config.teams.get_mut(team_idx) {
             if let Some(role) = team.roles.get_mut(role_idx) {
                 if !role.skills.iter().any(|x| x == id) {
                     role.skills.push(id.to_string());
@@ -3826,12 +4010,12 @@ impl AppState {
 
     pub(crate) fn detach_skill_from_role(
         &mut self,
+        team_idx: usize,
         role_idx: usize,
         id: &str,
         cx: &mut Context<Self>,
     ) {
-        let ti = self.active_team_index();
-        if let Some(team) = self.config.teams.get_mut(ti) {
+        if let Some(team) = self.config.teams.get_mut(team_idx) {
             if let Some(role) = team.roles.get_mut(role_idx) {
                 role.skills.retain(|x| x != id);
             }
@@ -4756,6 +4940,36 @@ impl AppState {
         cx.notify();
     }
 
+    /// 「执行中」心跳：流式期间每 120ms 重绘一次，让会话卡片上的动图与耗时走起来。
+    ///
+    /// 用代数区分轮次：停止后立刻又发下一条时，旧 ticker 会在下一次 tick 发现
+    /// 代数不匹配而退出，不会叠着跑。
+    fn start_run_clock(&mut self, cx: &mut Context<Self>) {
+        let gen = self.run_clock_gen.get().wrapping_add(1);
+        self.run_clock_gen.set(gen);
+        let gen_cell = self.run_clock_gen.clone();
+        cx.spawn(async move |weak, async_cx| loop {
+            async_cx
+                .background_executor()
+                .timer(std::time::Duration::from_millis(120))
+                .await;
+            if gen_cell.get() != gen {
+                break;
+            }
+            let alive = weak.update(async_cx, |this, cx| {
+                if !this.streaming {
+                    return false;
+                }
+                cx.notify();
+                true
+            });
+            if !matches!(alive, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn stop_streaming(&mut self, cx: &mut Context<Self>) {
         self.cancel.store(true, Ordering::Relaxed);
         // 解开可能挂起的审批，让 Agent 线程立刻退出而不是等到超时。
@@ -4826,12 +5040,14 @@ impl Render for AppState {
         }
         self.layout_w.set(visible_w);
         let hide_sides = self.focus_mode;
-        // 设置页与技能市场是"全页"视图，会话列表和右栏都让出来。
+        // 设置页、技能市场与团队页是"全页"视图：右栏用不上。
         let full_page = matches!(
             self.center,
             CenterView::Settings | CenterView::Skills
         );
-        let hide_right = visible_w < 1080.0 || full_page;
+        // 团队页是整页编排表单：右栏（文件/Git/预览）整块隐藏，连 16px 窄条都不留。
+        let team_page = matches!(self.center, CenterView::Team);
+        let hide_right = visible_w < 1080.0 || full_page || team_page;
         // 编辑器是「单文件」视图：会话列表让给正文，但右栏文件树留着
         // （切文件靠它，一起隐藏了就没法在这页换文件）。
         let hide_list = visible_w < 620.0
@@ -4849,7 +5065,7 @@ impl Render for AppState {
         } else {
             crate::views::sidebar::RAIL_W + crate::views::sidebar::SESSION_W
         };
-        let right_w = if hide_sides {
+        let right_w = if hide_sides || team_page {
             0.0
         } else if hide_right || self.right_collapsed {
             16.0
@@ -4926,22 +5142,25 @@ impl Render for AppState {
             .text_color(theme::fg())
             .child(crate::views::titlebar(self, window.is_maximized(), cx))
             .child({
-                let row = div()
+                let mut row = div()
                     .flex_1()
                     .min_h(px(0.0))
                     .flex()
                     .flex_row()
                     .overflow_hidden();
                 if hide_sides {
-                    row.child(self.center_area(cx))
+                    row = row.child(self.center_area(cx));
                 } else {
-                    let row = row
+                    row = row
                         .child(self.left_sidebar(hide_list, cx))
                         .child(self.center_area(cx));
-                    // 窄窗口不整块隐藏右栏，而是收成窄条：
+                    // 团队页整页编排，不挂右栏；窄窗口不整块隐藏右栏，而是收成窄条：
                     // 否则用户再也点不回来（折叠按钮也一起消失）。
-                    row.child(self.right_panel(hide_right, cx))
+                    if !team_page {
+                        row = row.child(self.right_panel(hide_right, cx));
+                    }
                 }
+                row
             })
             .child(input_bridge(
                 cx,
@@ -5430,7 +5649,27 @@ fn file_label(p: &std::path::Path) -> String {
         .to_string()
 }
 
-fn human_size(bytes: u64) -> String {
+/// 交给系统默认关联程序打开（图片查看器 / PDF 阅读器）。
+fn open_with_system(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        // 第一个空参数是窗口标题占位，否则带引号的路径可能被 start 当成标题。
+        std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
+}
+
+pub(crate) fn human_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
         format!("{}MB", bytes / (1024 * 1024))
     } else {

@@ -656,6 +656,14 @@ impl AppState {
         let title_w = CARD_INNER - 20.0 - 8.0 - badge_w - action_w - tag_w - 6.0 - 18.0;
         let title_text = crate::views::text_fit::fit_text(&session.title, title_w, 14.0);
 
+        // 「执行中」：用动图 + 实时耗时替代静态标签。streaming 是全局的，
+        // 重启后残留的 Working 状态因为拿不到本次运行时刻，退回静态胶囊。
+        let running = session.status == SessionStatus::Working && self.streaming;
+        let elapsed = self
+            .turn_started
+            .map(|t| t.elapsed())
+            .unwrap_or_default();
+
         let (pill_label, pill_fg, pill_bg) = match session.status {
             SessionStatus::Todo => (
                 "待执行".to_string(),
@@ -663,7 +671,9 @@ impl AppState {
                 soft(theme::yellow(), 0.14),
             ),
             SessionStatus::Working => (
-                if session.meta.is_empty() {
+                if running {
+                    fmt_elapsed(elapsed)
+                } else if session.meta.is_empty() {
                     "工作中".to_string()
                 } else {
                     session.meta.clone()
@@ -690,7 +700,14 @@ impl AppState {
         let has_pill = !pill_label.is_empty();
         let pill_w = match session.status {
             SessionStatus::Todo => 44.0,
-            SessionStatus::Working => 48.0,
+            SessionStatus::Working => {
+                if running {
+                    // 三个动图点 + 间距 + 耗时（数字宽度稳定，按字数估）
+                    24.0 + pill_label.chars().count() as f32 * 6.5
+                } else {
+                    48.0
+                }
+            }
             SessionStatus::Done => 44.0,
             SessionStatus::Dropped => 44.0,
             SessionStatus::Idle => 0.0,
@@ -841,17 +858,31 @@ impl AppState {
             );
 
         if has_pill {
-            foot = foot.child(
-                div()
-                    .flex_shrink_0()
-                    .px_1()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(pill_bg)
-                    .text_xs()
-                    .text_color(pill_fg)
-                    .child(SharedString::from(pill_label)),
-            );
+            let mut pill = div()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_1()
+                .py_0p5()
+                .rounded_sm()
+                .bg(pill_bg)
+                .text_xs()
+                .text_color(pill_fg);
+            if running {
+                // 动图：三个点每 200ms 轮流点亮，由 run_clock 心跳驱动重绘。
+                let phase = (elapsed.as_millis() / 200 % 3) as u8;
+                for i in 0..3u8 {
+                    pill = pill.child(
+                        div()
+                            .size(px(4.0))
+                            .rounded_full()
+                            .bg(theme::green())
+                            .opacity(if i == phase { 1.0 } else { 0.28 }),
+                    );
+                }
+            }
+            foot = foot.child(pill.child(SharedString::from(pill_label)));
         }
 
         // 置顶按钮放第二行右侧：第一行留给标题，避免长标题被挤成省略号。
@@ -1052,5 +1083,17 @@ fn soft(color: Rgba, alpha: f32) -> Rgba {
     Rgba {
         a: alpha.clamp(0.0, 1.0),
         ..color
+    }
+}
+
+/// 执行中胶囊的耗时：`12s` / `3m05s` / `1h02m`，保持卡片宽度可预测。
+fn fmt_elapsed(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m{:02}s", s / 60, s % 60)
+    } else {
+        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
     }
 }

@@ -19,7 +19,7 @@ impl AppState {
                 .bg(theme::panel())
                 .border_b_1()
                 .border_color(theme::border())
-                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Agent 团队编辑器"))
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Agent 团队"))
                 .child(if let Some(n) = &self.notice {
                     div()
                         .px_2()
@@ -49,11 +49,9 @@ impl AppState {
                 ),
         );
 
-        let team = self.config.active_team().cloned().unwrap_or_else(neverwork_core::Team::default_team);
+        let mut body = div().id("team-scroll").flex().flex_col().gap_3().px_6().py_5().flex_1().overflow_scroll();
 
-        let mut body = div().id("team-scroll").flex().flex_col().gap_4().px_6().py_5().flex_1().overflow_scroll();
-
-        // ---- 团队名 + 切换下拉 + 管理操作 ----
+        // 抬头：协作说明 + 新建团队（团队平铺在下面，每个都能折叠 / 删除）
         body = body.child(
             div()
                 .flex()
@@ -62,56 +60,10 @@ impl AppState {
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(px(40.0))
-                        .rounded_lg()
-                        .bg(theme::accent())
-                        .text_lg()
-                        .font_weight(FontWeight::BOLD)
-                        .child("◈"),
-                )
-                .child(
-                    div()
-                        .flex()
                         .flex_col()
                         .gap_1()
                         .flex_1()
                         .min_w(px(0.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id("team-switch")
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .px_1()
-                                        .py_0p5()
-                                        .rounded_md()
-                                        .text_sm()
-                                        .font_weight(FontWeight::BOLD)
-                                        .cursor_pointer()
-                                        .hover(|d| d.bg(theme::raised()))
-                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                            this.team_menu_open = !this.team_menu_open;
-                                            this.team_delete_confirm = false;
-                                            this.commit_role_prompt();
-                                            cx.notify();
-                                        }))
-                                        .child(SharedString::from(team.name.clone()))
-                                        .child(div().text_xs().text_color(theme::dim()).child("▾")),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme::dim())
-                                        .child(SharedString::from(format!("{} 个角色", team.roles.len()))),
-                                ),
-                        )
                         .child(div().text_xs().text_color(theme::muted()).child("协作：@ 点名或首角色先行")),
                 )
                 .child(
@@ -130,159 +82,21 @@ impl AppState {
                             this.add_team(window, cx);
                         }))
                         .child("＋ 新建团队"),
-                )
-                .child(
-                    div()
-                        .id("team-rename")
-                        .flex_shrink_0()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .bg(theme::raised())
-                        .text_xs()
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .hover(|d| d.bg(theme::border()))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.rename_team(window, cx);
-                        }))
-                        .child("重命名"),
-                )
-                .child(
-                    div()
-                        .id("team-delete")
-                        .flex_shrink_0()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .text_xs()
-                        .text_color(theme::red())
-                        .cursor_pointer()
-                        .hover(|d| d.bg(theme::border()))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                            this.delete_team(cx);
-                        }))
-                        .child(if self.team_delete_confirm { "确认删除？" } else { "删除" }),
                 ),
         );
 
-        // 重命名输入行（回车 / 失焦提交，立即写盘）
-        if self.active_field == Some(FormField::TeamName) {
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .pl(px(52.0))
-                    .child(crate::views::settings::input_box(
-                        SharedString::from("team-name-input"),
-                        self.field_buf.text().to_string(),
-                        "团队名称",
-                        true,
-                        self.editor_focus.clone(),
-                        self.field_area_bounds.clone(),
-                        cx,
-                        FormField::TeamName,
-                    ))
-                    .child(div().text_xs().text_color(theme::dim()).child("回车保存")),
-            );
-        }
-
-        // 团队切换下拉（内联展开，不遮住下面的角色卡）
-        if self.team_menu_open {
-            let mut menu = div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_2()
-                .rounded_lg()
-                .border_1()
-                .border_color(theme::border())
-                .bg(theme::panel());
-            for (ti, t) in self.config.teams.iter().enumerate() {
-                let on = t.id == self.config.active_team_id;
-                let id = t.id.clone();
-                let name = t.name.clone();
-                let n = t.roles.len();
-                menu = menu.child(
-                    div()
-                        .id(SharedString::from(format!("team-option-{ti}")))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .py_1p5()
-                        .rounded_md()
-                        .when(on, |d| d.bg(theme::accent_soft()))
-                        .cursor_pointer()
-                        .hover(|d| d.bg(theme::raised()))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                            this.select_team(id.clone(), cx);
-                        }))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(if on { theme::accent() } else { theme::fg() })
-                                .child(SharedString::from(name)),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::dim())
-                                .child(SharedString::from(format!("{n} 个角色"))),
-                        ),
-                );
+        // 团队平铺：每个团队一块，角色卡在块内；一个团队都没有时显示空态。
+        if self.config.teams.is_empty() {
+            body = body.child(self.team_empty_state(cx));
+        } else {
+            for (ti, team) in self.config.teams.iter().enumerate() {
+                body = body.child(self.team_block(ti, team, cx));
             }
-            menu = menu.child(
-                div()
-                    .id("team-new")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .py_1p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(theme::border())
-                    .text_xs()
-                    .text_color(theme::accent())
-                    .cursor_pointer()
-                    .hover(|d| d.bg(theme::raised()))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.add_team(window, cx);
-                    }))
-                    .child("＋ 新建团队"),
-            );
-            body = body.child(menu);
         }
-
-        // 角色卡
-        let mut roles = div().flex().flex_col().gap_2();
-        for (idx, role) in team.roles.iter().enumerate() {
-            roles = roles.child(self.role_edit_card(idx, role, cx));
-        }
-        roles = roles.child(
-            div()
-                .id("add-role")
-                .flex()
-                .items_center()
-                .justify_center()
-                .py_3()
-                .rounded_lg()
-                .border_1()
-                .border_color(theme::border())
-                .text_sm()
-                .text_color(theme::dim())
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                    this.add_role(cx);
-                }))
-                .child("＋ 添加角色"),
-        );
-        body = body.child(roles);
         col = col.child(body);
 
         // 底部保存
+        let total_roles: usize = self.config.teams.iter().map(|t| t.roles.len()).sum();
         col = col.child(
             div()
                 .flex()
@@ -294,7 +108,11 @@ impl AppState {
                 .border_color(theme::border())
                 .text_xs()
                 .text_color(theme::dim())
-                .child(SharedString::from(format!("{} 个角色", team.roles.len())))
+                .child(SharedString::from(format!(
+                    "{} 个团队 · {} 个角色",
+                    self.config.teams.len(),
+                    total_roles
+                )))
                 .child(
                     div()
                         .id("save-team")
@@ -315,7 +133,268 @@ impl AppState {
         col
     }
 
-    pub(crate) fn role_edit_card(&self, idx: usize, role: &neverwork_core::Role, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 空态：一个团队都没有（删光后也走到这里）。
+    fn team_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .py_12()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::panel())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(48.0))
+                    .rounded_lg()
+                    .bg(theme::raised())
+                    .text_lg()
+                    .text_color(theme::dim())
+                    .child("◈"),
+            )
+            .child(div().text_sm().text_color(theme::fg()).child("还没有团队"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .child("新建一个团队来编排协作角色"),
+            )
+            .child(
+                div()
+                    .id("team-new-empty")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(theme::accent())
+                    .text_sm()
+                    .text_color(gpui::rgb(0xffffff))
+                    .cursor_pointer()
+                    .hover(|d| d.opacity(0.88))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.add_team(window, cx);
+                    }))
+                    .child("＋ 新建团队"),
+            )
+    }
+
+    /// 一个团队区块：头部（折叠 / 团队名 / 设为当前 / 重命名 / 删除）+ 展开时的角色卡。
+    fn team_block(&self, ti: usize, team: &neverwork_core::Team, cx: &mut Context<Self>) -> impl IntoElement {
+        let collapsed = self.team_collapsed.contains(&team.id);
+        let active = team.id == self.config.active_team_id;
+        let renaming = self.team_rename_id.as_deref() == Some(team.id.as_str())
+            && self.active_field == Some(FormField::TeamName);
+        let confirm = self.team_delete_confirm.as_deref() == Some(team.id.as_str());
+        let id_fold = team.id.clone();
+        let id_pick = team.id.clone();
+        let id_rename = team.id.clone();
+        let id_del = team.id.clone();
+        let n_roles = team.roles.len();
+
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .rounded_lg()
+            .border_1()
+            .border_color(if active { theme::accent_line() } else { theme::border() })
+            .bg(theme::panel());
+
+        // ---- 头行：左侧点折叠，右侧设当前 / 重命名 / 删除 ----
+        let mut head = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .child(
+                div()
+                    .id(SharedString::from(format!("team-fold-{ti}")))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.toggle_team_collapsed(id_fold.clone(), cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(theme::dim())
+                            .child(if collapsed { "▸" } else { "▾" }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(28.0))
+                            .flex_shrink_0()
+                            .rounded_md()
+                            .bg(if active { theme::accent() } else { theme::raised() })
+                            .text_sm()
+                            .text_color(if active { gpui::rgb(0xffffff) } else { theme::dim() })
+                            .child("◈"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme::fg())
+                                            .child(SharedString::from(team.name.clone())),
+                                    )
+                                    .when(active, |d| {
+                                        d.child(
+                                            div()
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_full()
+                                                .bg(theme::with_alpha(0x22c55e, 0.14))
+                                                .text_xs()
+                                                .text_color(theme::green())
+                                                .child("使用中"),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::dim())
+                                    .child(SharedString::from(format!("{n_roles} 个角色"))),
+                            ),
+                    ),
+            );
+
+        if !active {
+            head = head.child(
+                div()
+                    .id(SharedString::from(format!("team-set-active-{ti}")))
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme::border())
+                    .text_xs()
+                    .text_color(theme::accent())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.select_team(id_pick.clone(), cx);
+                    }))
+                    .child("设为当前"),
+            );
+        }
+
+        head = head
+            .child(
+                div()
+                    .id(SharedString::from(format!("team-rename-{ti}")))
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(if renaming { theme::accent() } else { theme::muted() })
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.rename_team(id_rename.clone(), window, cx);
+                    }))
+                    .child(if renaming { "编辑中…" } else { "重命名" }),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("team-delete-{ti}")))
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(theme::red())
+                    .when(confirm, |d| d.bg(theme::tint(theme::red(), 0.14)))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::border()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.delete_team(id_del.clone(), cx);
+                    }))
+                    .child(if confirm { "确认删除？" } else { "删除" }),
+            );
+        card = card.child(head);
+
+        // 重命名输入行（回车 / 失焦提交，立即写盘）
+        if renaming {
+            card = card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .pb_2()
+                    .child(crate::views::settings::input_box(
+                        SharedString::from(format!("team-name-input-{ti}")),
+                        self.field_buf.text().to_string(),
+                        "团队名称",
+                        true,
+                        self.editor_focus.clone(),
+                        self.field_area_bounds.clone(),
+                        cx,
+                        FormField::TeamName,
+                    ))
+                    .child(div().text_xs().text_color(theme::dim()).child("回车保存")),
+            );
+        }
+
+        // ---- 展开：角色卡列表 ----
+        if !collapsed {
+            let mut roles = div().flex().flex_col().gap_2().px_3().pb_3();
+            for (idx, role) in team.roles.iter().enumerate() {
+                roles = roles.child(self.role_edit_card(ti, idx, role, cx));
+            }
+            roles = roles.child(
+                div()
+                    .id(SharedString::from(format!("add-role-{ti}")))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .py_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme::border())
+                    .text_sm()
+                    .text_color(theme::dim())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.add_role(ti, cx);
+                    }))
+                    .child("＋ 添加角色"),
+            );
+            card = card.child(roles);
+        }
+
+        card
+    }
+
+    pub(crate) fn role_edit_card(&self, ti: usize, idx: usize, role: &neverwork_core::Role, cx: &mut Context<Self>) -> impl IntoElement {
         let mut card = div()
             .flex()
             .flex_col()
@@ -381,24 +460,24 @@ impl AppState {
             )
             .child(
                 div()
-                    .id(SharedString::from(format!("edit-role-{idx}")))
+                    .id(SharedString::from(format!("edit-role-{ti}-{idx}")))
                     .flex_shrink_0()
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(if self.role_edit_index == Some(idx) { theme::accent_soft() } else { theme::raised() })
+                    .bg(if self.role_edit_index == Some((ti, idx)) { theme::accent_soft() } else { theme::raised() })
                     .text_xs()
-                    .text_color(if self.role_edit_index == Some(idx) { theme::accent() } else { theme::muted() })
+                    .text_color(if self.role_edit_index == Some((ti, idx)) { theme::accent() } else { theme::muted() })
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::border()))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                        this.toggle_role_edit(idx, cx);
+                        this.toggle_role_edit(ti, idx, cx);
                     }))
-                    .child(if self.role_edit_index == Some(idx) { "收起" } else { "编辑" }),
+                    .child(if self.role_edit_index == Some((ti, idx)) { "收起" } else { "编辑" }),
             )
             .child(
                 div()
-                    .id(SharedString::from(format!("del-role-{idx}")))
+                    .id(SharedString::from(format!("del-role-{ti}-{idx}")))
                     .flex_shrink_0()
                     .px_2()
                     .py_1()
@@ -408,7 +487,7 @@ impl AppState {
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::border()))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                        this.remove_role(idx, cx);
+                        this.remove_role(ti, idx, cx);
                     }))
                     .child("删除"),
             );
@@ -423,12 +502,12 @@ impl AppState {
         }
         for id in &role.skills {
             let name = self.find_skill(id).map(|s| s.name).unwrap_or_else(|| id.clone());
-            plugins = plugins.child(plugin_chip(idx, id, name, cx));
+            plugins = plugins.child(plugin_chip(ti, idx, id, name, cx));
         }
-        let open = self.role_skill_picker == Some(idx);
+        let open = self.role_skill_picker == Some((ti, idx));
         plugins = plugins.child(
             div()
-                .id(SharedString::from(format!("role-plugin-add-{idx}")))
+                .id(SharedString::from(format!("role-plugin-add-{ti}-{idx}")))
                 .px_2()
                 .py_0p5()
                 .rounded_full()
@@ -439,20 +518,20 @@ impl AppState {
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised()))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                    this.toggle_role_skill_picker(idx, cx);
+                    this.toggle_role_skill_picker(ti, idx, cx);
                 }))
                 .child(if open { "收起插件市场" } else { "＋ 插件" }),
         );
         card = card.child(plugins);
 
         // ---- 内联展开的角色编辑 ----
-        if self.role_edit_index == Some(idx) {
-            card = card.child(self.role_edit_panel(idx, role, cx));
+        if self.role_edit_index == Some((ti, idx)) {
+            card = card.child(self.role_edit_panel(ti, idx, role, cx));
         }
 
         // ---- 展开的插件市场面板 ----
         if open {
-            card = card.child(self.role_skill_panel(idx, role, cx));
+            card = card.child(self.role_skill_panel(ti, idx, role, cx));
         }
         card
     }
@@ -465,11 +544,10 @@ impl AppState {
             .unwrap_or(0)
     }
 
-    pub(crate) fn add_role(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn add_role(&mut self, ti: usize, cx: &mut Context<Self>) {
         // 先提交上一个角色的提示词/字段，再改列表（下标会变）。
         self.close_role_edit(cx);
         self.close_role_skill_picker(cx);
-        let ti = self.active_team_index();
         let mut new_idx = None;
         if let Some(team) = self.config.teams.get_mut(ti) {
             let n = team.roles.len();
@@ -483,7 +561,7 @@ impl AppState {
         }
         // 新角色直接展开编辑，省一次点击。
         if let Some(i) = new_idx {
-            self.role_edit_index = Some(i);
+            self.role_edit_index = Some((ti, i));
             let prompt = self.edited_role().map(|r| r.prompt.clone()).unwrap_or_default();
             self.role_prompt_buf.reset(prompt);
             self.role_prompt_buf.move_doc_end(false);
@@ -491,10 +569,9 @@ impl AppState {
         cx.notify();
     }
 
-    pub(crate) fn remove_role(&mut self, idx: usize, cx: &mut Context<Self>) {
+    pub(crate) fn remove_role(&mut self, ti: usize, idx: usize, cx: &mut Context<Self>) {
         self.close_role_edit(cx);
         self.close_role_skill_picker(cx);
-        let ti = self.active_team_index();
         if let Some(team) = self.config.teams.get_mut(ti) {
             if team.roles.len() > 1 && idx < team.roles.len() {
                 team.roles.remove(idx);
@@ -507,13 +584,12 @@ impl AppState {
 
     /// 当前正在内联编辑的角色。
     pub(crate) fn edited_role(&self) -> Option<&neverwork_core::Role> {
-        let idx = self.role_edit_index?;
-        self.config.active_team().and_then(|t| t.roles.get(idx))
+        let (ti, idx) = self.role_edit_index?;
+        self.config.teams.get(ti).and_then(|t| t.roles.get(idx))
     }
 
     pub(crate) fn edited_role_mut(&mut self) -> Option<&mut neverwork_core::Role> {
-        let idx = self.role_edit_index?;
-        let ti = self.active_team_index();
+        let (ti, idx) = self.role_edit_index?;
         self.config.teams.get_mut(ti).and_then(|t| t.roles.get_mut(idx))
     }
 
@@ -542,22 +618,22 @@ impl AppState {
     }
 
     /// 展开 / 收起角色的内联编辑（与插件面板互斥）。
-    pub(crate) fn toggle_role_edit(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if self.role_edit_index == Some(idx) {
+    pub(crate) fn toggle_role_edit(&mut self, ti: usize, idx: usize, cx: &mut Context<Self>) {
+        if self.role_edit_index == Some((ti, idx)) {
             self.close_role_edit(cx);
             return;
         }
         self.close_role_edit(cx);
-        let Some(role) = self.config.active_team().and_then(|t| t.roles.get(idx)) else {
+        let Some(role) = self.config.teams.get(ti).and_then(|t| t.roles.get(idx)) else {
             return;
         };
         let prompt = role.prompt.clone();
-        self.role_edit_index = Some(idx);
+        self.role_edit_index = Some((ti, idx));
         self.role_model_picker = None;
         self.role_prompt_buf.reset(prompt);
         self.role_prompt_buf.move_doc_end(false);
         self.close_role_skill_picker(cx);
-        self.team_delete_confirm = false;
+        self.team_delete_confirm = None;
         cx.notify();
     }
 
@@ -582,7 +658,7 @@ impl AppState {
         self.role_edit_index = None;
         self.role_model_picker = None;
         self.role_prompt_buf.reset("");
-        self.team_delete_confirm = false;
+        self.team_delete_confirm = None;
         cx.notify();
     }
 
@@ -614,14 +690,14 @@ impl AppState {
         }
     }
 
-    pub(crate) fn toggle_role_model_picker(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if self.role_edit_index != Some(idx) {
+    pub(crate) fn toggle_role_model_picker(&mut self, ti: usize, idx: usize, cx: &mut Context<Self>) {
+        if self.role_edit_index != Some((ti, idx)) {
             return;
         }
-        self.role_model_picker = if self.role_model_picker == Some(idx) {
+        self.role_model_picker = if self.role_model_picker == Some((ti, idx)) {
             None
         } else {
-            Some(idx)
+            Some((ti, idx))
         };
         cx.notify();
     }
@@ -629,12 +705,12 @@ impl AppState {
     /// 选中已配置模型；厂商 id 与模型 id 一起写入角色。
     pub(crate) fn select_role_model(
         &mut self,
+        ti: usize,
         idx: usize,
         provider_id: String,
         model: String,
         cx: &mut Context<Self>,
     ) {
-        let ti = self.active_team_index();
         if let Some(role) = self.config.teams.get_mut(ti).and_then(|t| t.roles.get_mut(idx)) {
             role.provider_id = provider_id;
             role.model = model;
@@ -673,21 +749,22 @@ impl AppState {
     }
 
     pub(crate) fn select_team(&mut self, id: String, cx: &mut Context<Self>) {
-        self.team_menu_open = false;
-        self.team_delete_confirm = false;
         if self.config.active_team_id == id {
             cx.notify();
             return;
         }
-        if self.active_field.is_some() {
-            self.commit_field(cx);
-        }
-        self.commit_role_prompt();
-        self.clear_team_edit_state();
         self.config.active_team_id = id;
         match neverwork_core::config::save(&self.config) {
             Ok(()) => {}
             Err(e) => self.notice = Some(format!("切换团队保存失败：{e}")),
+        }
+        cx.notify();
+    }
+
+    /// 折叠 / 展开一个团队块（平铺页）。
+    pub(crate) fn toggle_team_collapsed(&mut self, id: String, cx: &mut Context<Self>) {
+        if !self.team_collapsed.remove(&id) {
+            self.team_collapsed.insert(id);
         }
         cx.notify();
     }
@@ -719,35 +796,36 @@ impl AppState {
             flow: neverwork_core::FlowMode::Pipeline,
             roles: vec![role],
         });
-        self.config.active_team_id = id;
+        self.config.active_team_id = id.clone();
+        self.team_collapsed.remove(&id);
+        self.team_rename_id = Some(id);
         match neverwork_core::config::save(&self.config) {
             Ok(()) => self.notice = Some("已新建团队，接着给它起个名字".into()),
             Err(e) => self.notice = Some(format!("保存失败：{e}")),
         }
-        self.team_menu_open = false;
         self.begin_field(FormField::TeamName, cx);
         window.focus(&self.editor_focus);
         cx.notify();
     }
 
-    pub(crate) fn rename_team(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
-        self.team_menu_open = false;
-        self.team_delete_confirm = false;
+    pub(crate) fn rename_team(&mut self, id: String, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        self.team_delete_confirm = None;
+        self.team_collapsed.remove(&id);
+        self.team_rename_id = Some(id);
         self.begin_field(FormField::TeamName, cx);
         window.focus(&self.editor_focus);
         cx.notify();
     }
 
-    pub(crate) fn delete_team(&mut self, cx: &mut Context<Self>) {
-        self.team_menu_open = false;
-        if self.config.teams.len() <= 1 {
-            self.team_delete_confirm = false;
-            self.notice = Some("至少保留一个团队".into());
+    pub(crate) fn delete_team(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(ti) = self.config.teams.iter().position(|t| t.id == id) else {
+            self.team_delete_confirm = None;
             cx.notify();
             return;
-        }
-        if !self.team_delete_confirm {
-            self.team_delete_confirm = true;
+        };
+        // 第一次点：进入「确认删除？」，再点一次才真的删。
+        if self.team_delete_confirm.as_deref() != Some(id.as_str()) {
+            self.team_delete_confirm = Some(id);
             cx.notify();
             return;
         }
@@ -756,15 +834,18 @@ impl AppState {
         }
         self.commit_role_prompt();
         self.clear_team_edit_state();
-        let ti = self.active_team_index();
         let removed = self.config.teams.remove(ti);
-        self.config.active_team_id = self
-            .config
-            .teams
-            .first()
-            .map(|t| t.id.clone())
-            .unwrap_or_default();
-        self.team_delete_confirm = false;
+        self.team_collapsed.remove(&removed.id);
+        // 删的正是当前团队：顺延到相邻团队；删完就置空（允许一个不剩）。
+        if self.config.active_team_id == removed.id {
+            self.config.active_team_id = self
+                .config
+                .teams
+                .get(ti.min(self.config.teams.len().saturating_sub(1)))
+                .map(|t| t.id.clone())
+                .unwrap_or_default();
+        }
+        self.team_delete_confirm = None;
         match neverwork_core::config::save(&self.config) {
             Ok(()) => self.notice = Some(format!("已删除团队「{}」", removed.name)),
             Err(e) => self.notice = Some(format!("保存失败：{e}")),
@@ -778,11 +859,14 @@ impl AppState {
             self.commit_field(cx);
         }
         self.commit_role_prompt();
-        // 确保 active_team_id 指向存在的团队。
+        // 确保 active_team_id 指向存在的团队；一个团队都没有时清空。
         if !self.config.teams.iter().any(|t| t.id == self.config.active_team_id) {
-            if let Some(first) = self.config.teams.first() {
-                self.config.active_team_id = first.id.clone();
-            }
+            self.config.active_team_id = self
+                .config
+                .teams
+                .first()
+                .map(|t| t.id.clone())
+                .unwrap_or_default();
         }
         match neverwork_core::config::save(&self.config) {
             Ok(()) => self.notice = Some("团队已保存".into()),
@@ -792,8 +876,8 @@ impl AppState {
     }
 
     /// 展开 / 收起某个角色的「插件市场」面板。
-    pub(crate) fn toggle_role_skill_picker(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if self.role_skill_picker == Some(idx) {
+    pub(crate) fn toggle_role_skill_picker(&mut self, ti: usize, idx: usize, cx: &mut Context<Self>) {
+        if self.role_skill_picker == Some((ti, idx)) {
             self.close_role_skill_picker(cx);
             return;
         }
@@ -801,7 +885,7 @@ impl AppState {
         if self.role_edit_index.is_some() {
             self.close_role_edit(cx);
         }
-        self.role_skill_picker = Some(idx);
+        self.role_skill_picker = Some((ti, idx));
         self.role_skill_search.clear();
         self.role_skill_filter = 0;
         self.field_buf.reset("");
@@ -823,7 +907,7 @@ impl AppState {
     }
 
     /// 角色卡内联编辑面板：名称 / 类型 / 首字母 / 模型下拉 / 多行提示词。
-    fn role_edit_panel(&self, idx: usize, role: &neverwork_core::Role, cx: &mut Context<Self>) -> impl IntoElement {
+    fn role_edit_panel(&self, ti: usize, idx: usize, role: &neverwork_core::Role, cx: &mut Context<Self>) -> impl IntoElement {
         // 单行字段：编辑态显示 field_buf（边打边看），否则显示角色现值。
         let field_text = |field: FormField, cur: String| -> String {
             if self.active_field == Some(field) {
@@ -841,7 +925,7 @@ impl AppState {
             .gap_2()
             .child(div().w(label_w).flex_shrink_0().text_xs().text_color(theme::dim()).child("名称"))
             .child(crate::views::settings::input_box(
-                SharedString::from(format!("role-name-input-{idx}")),
+                SharedString::from(format!("role-name-input-{ti}-{idx}")),
                 field_text(FormField::RoleName, role.name.clone()),
                 "角色名称",
                 self.active_field == Some(FormField::RoleName),
@@ -857,7 +941,7 @@ impl AppState {
             .gap_2()
             .child(div().w(label_w).flex_shrink_0().text_xs().text_color(theme::dim()).child("类型"))
             .child(crate::views::settings::input_box(
-                SharedString::from(format!("role-kind-input-{idx}")),
+                SharedString::from(format!("role-kind-input-{ti}-{idx}")),
                 field_text(FormField::RoleKind, role.kind_label.clone()),
                 "如：架构 / 编码 / 审查",
                 self.active_field == Some(FormField::RoleKind),
@@ -869,7 +953,7 @@ impl AppState {
             .child(div().flex_shrink_0().text_xs().text_color(theme::dim()).child("首字母"))
             .child(
                 div().w(px(56.0)).flex_shrink_0().child(crate::views::settings::input_box(
-                    SharedString::from(format!("role-initial-input-{idx}")),
+                    SharedString::from(format!("role-initial-input-{ti}-{idx}")),
                     field_text(FormField::RoleInitial, role.initial.clone()),
                     "A",
                     self.active_field == Some(FormField::RoleInitial),
@@ -905,13 +989,13 @@ impl AppState {
             )
             .child(
                 div()
-                    .id(SharedString::from(format!("role-model-btn-{idx}")))
+                    .id(SharedString::from(format!("role-model-btn-{ti}-{idx}")))
                     .flex_shrink_0()
                     .px_2()
                     .py_0p5()
                     .rounded_full()
                     .border_1()
-                    .border_color(if self.role_model_picker == Some(idx) {
+                    .border_color(if self.role_model_picker == Some((ti, idx)) {
                         theme::accent_line()
                     } else {
                         theme::border()
@@ -921,7 +1005,7 @@ impl AppState {
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::panel()))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                        this.toggle_role_model_picker(idx, cx);
+                        this.toggle_role_model_picker(ti, idx, cx);
                     }))
                     .child("选择 ▾"),
             );
@@ -933,7 +1017,7 @@ impl AppState {
             role.prompt.clone()
         };
         let mut prompt_box = div()
-            .id(SharedString::from(format!("role-prompt-{idx}")))
+            .id(SharedString::from(format!("role-prompt-{ti}-{idx}")))
             .flex()
             .flex_row()
             .items_center()
@@ -1019,8 +1103,8 @@ impl AppState {
             .child(name_row)
             .child(kind_row)
             .child(model_row);
-        if self.role_model_picker == Some(idx) {
-            panel = panel.child(self.role_model_menu(idx, cx));
+        if self.role_model_picker == Some((ti, idx)) {
+            panel = panel.child(self.role_model_menu(ti, idx, cx));
         }
         panel
             .child(
@@ -1044,7 +1128,7 @@ impl AppState {
                     .child(div().flex_1())
                     .child(
                         div()
-                            .id(SharedString::from(format!("role-edit-done-{idx}")))
+                            .id(SharedString::from(format!("role-edit-done-{ti}-{idx}")))
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -1062,10 +1146,11 @@ impl AppState {
     }
 
     /// 角色编辑里的模型下拉：只列设置里启用且就绪的厂商与模型。
-    fn role_model_menu(&self, idx: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    fn role_model_menu(&self, ti: usize, idx: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let (cur_pid, cur_model) = self
             .config
-            .active_team()
+            .teams
+            .get(ti)
             .and_then(|t| t.roles.get(idx))
             .map(|r| (r.provider_id.clone(), r.model.clone()))
             .unwrap_or_default();
@@ -1085,7 +1170,7 @@ impl AppState {
         let on_default = cur_pid.is_empty() && cur_model.is_empty();
         list = list.child(
             div()
-                .id(SharedString::from(format!("role-model-follow-{idx}")))
+                .id(SharedString::from(format!("role-model-follow-{ti}-{idx}")))
                 .flex()
                 .items_center()
                 .gap_2()
@@ -1096,7 +1181,7 @@ impl AppState {
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised()))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                    this.select_role_model(idx, String::new(), String::new(), cx);
+                    this.select_role_model(ti, idx, String::new(), String::new(), cx);
                 }))
                 .child(
                     div()
@@ -1154,7 +1239,7 @@ impl AppState {
                 let model = m.clone();
                 list = list.child(
                     div()
-                        .id(SharedString::from(format!("role-model-{idx}-{provider_id}-{m}")))
+                        .id(SharedString::from(format!("role-model-{ti}-{idx}-{provider_id}-{m}")))
                         .flex()
                         .items_center()
                         .gap_2()
@@ -1165,7 +1250,7 @@ impl AppState {
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                            this.select_role_model(idx, pid.clone(), model.clone(), cx);
+                            this.select_role_model(ti, idx, pid.clone(), model.clone(), cx);
                         }))
                         .child(
                             div()
@@ -1182,14 +1267,14 @@ impl AppState {
         }
 
         div()
-            .id(SharedString::from(format!("role-model-menu-{idx}")))
+            .id(SharedString::from(format!("role-model-menu-{ti}-{idx}")))
             .max_h(px(220.0))
             .overflow_y_scroll()
             .child(list)
     }
 
     /// 角色卡展开的插件市场：搜索框 + 候选行（取自离线技能市场目录）。
-    fn role_skill_panel(&self, idx: usize, role: &neverwork_core::Role, cx: &mut Context<Self>) -> impl IntoElement {
+    fn role_skill_panel(&self, ti: usize, idx: usize, role: &neverwork_core::Role, cx: &mut Context<Self>) -> impl IntoElement {
         let editing = self.active_field == Some(FormField::RoleSkillSearch);
         let display = if editing {
             self.field_buf.text().to_string()
@@ -1200,7 +1285,7 @@ impl AppState {
 
         // 搜索框：样式与技能市场一致，输入目标走 FormField。
         let search = div()
-            .id(SharedString::from(format!("role-skill-search-{idx}")))
+            .id(SharedString::from(format!("role-skill-search-{ti}-{idx}")))
             .flex()
             .items_center()
             .gap_2()
@@ -1256,7 +1341,7 @@ impl AppState {
             .when(!empty, |d| {
                 d.child(
                     div()
-                        .id(SharedString::from(format!("role-skill-search-clear-{idx}")))
+                        .id(SharedString::from(format!("role-skill-search-clear-{ti}-{idx}")))
                         .text_xs()
                         .text_color(theme::dim())
                         .cursor_pointer()
@@ -1319,7 +1404,7 @@ impl AppState {
             let on = self.role_skill_filter == val;
             chips = chips.child(
                 div()
-                    .id(SharedString::from(format!("role-skill-filter-{idx}-{val}")))
+                    .id(SharedString::from(format!("role-skill-filter-{ti}-{idx}-{val}")))
                     .px_2()
                     .py_0p5()
                     .rounded_full()
@@ -1350,7 +1435,7 @@ impl AppState {
                 .unwrap_or(false);
             sources = sources.child(
                 div()
-                    .id(SharedString::from(format!("role-market-src-{idx}-{}", src.key())))
+                    .id(SharedString::from(format!("role-market-src-{ti}-{idx}-{}", src.key())))
                     .px_2()
                     .py_0p5()
                     .rounded_full()
@@ -1384,7 +1469,7 @@ impl AppState {
         let loading = self.market_loading;
         sources = sources.child(div().flex_1()).child(
             div()
-                .id(SharedString::from(format!("role-market-refresh-{idx}")))
+                .id(SharedString::from(format!("role-market-refresh-{ti}-{idx}")))
                 .flex_shrink_0()
                 .px_2()
                 .py_0p5()
@@ -1452,7 +1537,7 @@ impl AppState {
                             .justify_end()
                             .child(
                                 div()
-                                    .id(SharedString::from(format!("role-mcp-cancel-{idx}")))
+                                    .id(SharedString::from(format!("role-mcp-cancel-{ti}-{idx}")))
                                     .px_2()
                                     .py_0p5()
                                     .rounded_md()
@@ -1467,7 +1552,7 @@ impl AppState {
                             )
                             .child(
                                 div()
-                                    .id(SharedString::from(format!("role-mcp-confirm-{idx}")))
+                                    .id(SharedString::from(format!("role-mcp-confirm-{ti}-{idx}")))
                                     .px_2()
                                     .py_0p5()
                                     .rounded_md()
@@ -1498,7 +1583,7 @@ impl AppState {
         }
         for (skill, entry, _) in list {
             let added = role.skills.iter().any(|x| x == &skill.id);
-            rows = rows.child(self.role_plugin_row(idx, skill, entry, added, cx));
+            rows = rows.child(self.role_plugin_row(ti, idx, skill, entry, added, cx));
         }
 
         div()
@@ -1518,7 +1603,7 @@ impl AppState {
                     .child(search)
                     .child(
                         div()
-                            .id(SharedString::from(format!("role-skill-done-{idx}")))
+                            .id(SharedString::from(format!("role-skill-done-{ti}-{idx}")))
                             .px_2()
                             .py_0p5()
                             .rounded_md()
@@ -1537,7 +1622,7 @@ impl AppState {
             .children(error_line)
             .child(
                 div()
-                    .id(SharedString::from(format!("role-skill-list-{idx}")))
+                    .id(SharedString::from(format!("role-skill-list-{ti}-{idx}")))
                     .max_h(px(300.0))
                     .overflow_y_scroll()
                     .child(rows),
@@ -1557,6 +1642,7 @@ impl AppState {
     /// `added` 为真时右侧是「已添加」（不可再点）。
     fn role_plugin_row(
         &self,
+        ti: usize,
         idx: usize,
         skill: neverwork_core::Skill,
         entry: Option<crate::marketplace::MarketEntry>,
@@ -1634,7 +1720,7 @@ impl AppState {
         } else {
             let add = skill.clone();
             div()
-                .id(SharedString::from(format!("role-{idx}-add-{}", skill.id)))
+                .id(SharedString::from(format!("role-{ti}-{idx}-add-{}", skill.id)))
                 .px_2()
                 .py_0p5()
                 .rounded_full()
@@ -1647,7 +1733,7 @@ impl AppState {
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                     // 不让点击冒泡到整行（否则会顺手打开详情抽屉）。
                     cx.stop_propagation();
-                    this.attach_skill_to_role(idx, add.clone(), cx);
+                    this.attach_skill_to_role(ti, idx, add.clone(), cx);
                 }))
                 .child("＋ 添加")
                 .into_any_element()
@@ -1662,7 +1748,7 @@ impl AppState {
         });
 
         div()
-            .id(SharedString::from(format!("role-{idx}-plugin-row-{}", skill.id)))
+            .id(SharedString::from(format!("role-{ti}-{idx}-plugin-row-{}", skill.id)))
             .flex()
             .items_center()
             .gap_2()
@@ -1673,7 +1759,7 @@ impl AppState {
             .cursor_pointer()
             .hover(|d| d.bg(theme::raised()))
             .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                this.open_market_detail_for_role(entry_for_open.clone(), idx, cx);
+                this.open_market_detail_for_role(entry_for_open.clone(), ti, idx, cx);
             }))
             .child(icon)
             .child(
@@ -1749,6 +1835,7 @@ fn role_caret() -> impl IntoElement {
 
 /// 已绑定插件 chip：`✦ 名称 ✕`，点 ✕ 解除绑定。
 pub(crate) fn plugin_chip(
+    ti: usize,
     idx: usize,
     id: &str,
     name: String,
@@ -1756,7 +1843,7 @@ pub(crate) fn plugin_chip(
 ) -> impl IntoElement {
     let remove_id = id.to_string();
     div()
-        .id(SharedString::from(format!("role-{idx}-plugin-{id}")))
+        .id(SharedString::from(format!("role-{ti}-{idx}-plugin-{id}")))
         .flex()
         .items_center()
         .gap_1()
@@ -1771,7 +1858,7 @@ pub(crate) fn plugin_chip(
         .child(SharedString::from(name))
         .child(
             div()
-                .id(SharedString::from(format!("role-{idx}-unplug-{id}")))
+                .id(SharedString::from(format!("role-{ti}-{idx}-unplug-{id}")))
                 .px_1()
                 .rounded_full()
                 .text_xs()
@@ -1779,7 +1866,7 @@ pub(crate) fn plugin_chip(
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                    this.detach_skill_from_role(idx, &remove_id, cx);
+                    this.detach_skill_from_role(ti, idx, &remove_id, cx);
                 }))
                 .child("✕"),
         )

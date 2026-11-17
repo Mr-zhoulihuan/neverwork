@@ -10,7 +10,7 @@ use gpui::{div, px, AnyElement, Context, SharedString};
 
 use neverwork_ui::theme;
 
-use crate::state::{AppState, RightTab};
+use crate::state::{AppState, MediaPreview, RightTab};
 use crate::views::text_fit::fit_text;
 
 /// 文件类型 →（徽标文字, 主题色）。
@@ -41,14 +41,18 @@ fn badge_of(name: &str) -> (&'static str, gpui::Rgba) {
         "cpp" | "cc" | "hpp" | "hxx" => ("C++", theme::indigo()),
         "java" => ("JAVA", theme::red()),
         "kt" => ("KT", theme::purple()),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg" => {
-            ("IMG", theme::pink())
-        }
         "pdf" => ("PDF", theme::red()),
         "txt" | "log" => ("TXT", theme::muted()),
         "sql" => ("SQL", theme::cyan()),
         "xml" => ("XML", theme::orange()),
-        _ => ("·", theme::muted()),
+        _ => {
+            // 图片格式集合与媒体查看器共用一份，新增格式不会两边不同步。
+            if crate::state::is_image_extension(&ext) {
+                ("IMG", theme::pink())
+            } else {
+                ("·", theme::muted())
+            }
+        }
     }
 }
 
@@ -1193,6 +1197,14 @@ impl AppState {
         let mut col = div().flex().flex_col().flex_1().min_h(px(0.0));
 
         let name = self.open_file_name();
+        // 图片 / PDF / Markdown 走媒体分支；文本走行级只读预览。
+        let media = self.media_preview.clone();
+        let header_hint = match &media {
+            Some(MediaPreview::Image(_)) => "图片预览",
+            Some(MediaPreview::Pdf(_)) => "PDF 预览",
+            Some(MediaPreview::Markdown(_)) => "Markdown 预览",
+            None => "只读预览",
+        };
         col = col.child(
             div()
                 .flex()
@@ -1202,7 +1214,7 @@ impl AppState {
                 .px_3()
                 .border_b_1()
                 .border_color(theme::border())
-                .child(div().text_xs().text_color(theme::dim()).child("只读预览"))
+                .child(div().text_xs().text_color(theme::dim()).child(header_hint))
                 .child(div().flex_1())
                 .child(
                     div()
@@ -1222,7 +1234,113 @@ impl AppState {
             .overflow_scroll()
             .text_xs();
 
-        if self.open_path.is_none() && self.remote_open_rel.is_none() {
+        if let Some(media) = &media {
+            match media {
+                MediaPreview::Image(p) => {
+                    let thumb = gpui::img(p.clone())
+                        .w_full()
+                        .max_h(px(360.0))
+                        .object_fit(gpui::ObjectFit::Contain);
+                    let size = std::fs::metadata(p)
+                        .map(|m| crate::state::human_size(m.len()))
+                        .unwrap_or_default();
+                    body = body.child(
+                        div()
+                            .w_full()
+                            .rounded_md()
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(theme::border())
+                            .bg(theme::surface())
+                            .child(thumb),
+                    );
+                    body = body.child(
+                        div()
+                            .pt_1()
+                            .text_color(theme::dim())
+                            .child(SharedString::from(format!("{name} · {size} · 图片"))),
+                    );
+                }
+                MediaPreview::Pdf(_) => {
+                    let size = media
+                        .path()
+                        .metadata()
+                        .map(|m| crate::state::human_size(m.len()))
+                        .unwrap_or_default();
+                    body = body.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .p_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme::border())
+                            .bg(theme::raised())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .w(px(34.0))
+                                            .h(px(42.0))
+                                            .flex_shrink_0()
+                                            .rounded_sm()
+                                            .bg(theme::tint(theme::red(), 0.14))
+                                            .border_1()
+                                            .border_color(theme::tint(theme::red(), 0.45))
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(theme::red())
+                                            .child("PDF"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(theme::fg())
+                                            .child(SharedString::from(name.clone())),
+                                    ),
+                            )
+                            .child(div().text_color(theme::dim()).child(format!(
+                                "{size} · 内置查看暂不支持 PDF 排版渲染"
+                            )))
+                            .child(
+                                div()
+                                    .id("preview-open-external")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(theme::accent_soft())
+                                    .text_color(theme::accent())
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(theme::border()))
+                                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                        this.open_media_externally(cx);
+                                    }))
+                                    .child("↗ 用默认应用打开"),
+                            ),
+                    );
+                }
+                MediaPreview::Markdown(p) => {
+                    // 右栏窄：宽度按面板实际可用宽度扣除内边距。
+                    let text = crate::filesystem::read_file(p).unwrap_or_default();
+                    let avail = (theme::FILES_W - 48.0).max(160.0);
+                    let mut col = div().flex().flex_col().gap_2().w_full().text_color(theme::fg());
+                    if text.trim().is_empty() {
+                        col = col.child(div().text_color(theme::dim()).child("（空文件）"));
+                    } else {
+                        for b in crate::markdown::parse(&text) {
+                            col = col.child(crate::views::chat::markdown_block(b, avail));
+                        }
+                    }
+                    body = body.child(col);
+                }
+            }
+        } else if self.open_path.is_none() && self.remote_open_rel.is_none() {
             body = body.child(
                 div()
                     .p_3()

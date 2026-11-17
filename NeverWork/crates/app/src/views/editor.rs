@@ -19,7 +19,7 @@ use neverwork_ui::theme;
 
 use crate::highlight::{self, Lang};
 use crate::line_cache::EditorLines;
-use crate::state::{AppState, InputTarget};
+use crate::state::{AppState, InputTarget, MediaPreview};
 
 /// 默认行高（会被设置里的字号覆盖）。
 #[allow(dead_code)]
@@ -30,6 +30,10 @@ const SEL_BG: u32 = 0x264f78;
 
 impl AppState {
     pub(crate) fn editor_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 图片 / PDF：二进制内容进不了文本编辑器，整块换成只读查看器。
+        if let Some(media) = self.media_preview.clone() {
+            return self.media_pane(media, cx).into_any_element();
+        }
         let filename = self.open_file_name();
         let lang = highlight::lang_for(&filename);
         let dirty_mark = if self.dirty { " ●" } else { "" };
@@ -255,7 +259,246 @@ impl AppState {
                 })),
         );
 
-        col
+        col.into_any_element()
+    }
+
+    /// 媒体只读查看器（图片 / PDF / Markdown）：替换整块编辑器区域。
+    fn media_pane(&self, media: MediaPreview, cx: &mut Context<Self>) -> impl IntoElement {
+        let path = media.path().clone();
+        let filename = self.open_file_name();
+        let size = std::fs::metadata(&path)
+            .map(|m| crate::state::human_size(m.len()))
+            .unwrap_or_default();
+        let (kind, color) = match &media {
+            MediaPreview::Image(_) => ("图片", theme::pink()),
+            MediaPreview::Pdf(_) => ("PDF", theme::red()),
+            MediaPreview::Markdown(_) => ("Markdown", theme::indigo()),
+        };
+        let is_markdown = matches!(&media, MediaPreview::Markdown(_));
+
+        // ===== 顶部标签栏：与文本编辑器同构，只留查看相关动作 =====
+        let mut header = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(38.0))
+            .px_3()
+            .bg(theme::panel())
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h_full()
+                    .px_3()
+                    .bg(theme::surface())
+                    .border_b_1()
+                    .border_color(theme::accent())
+                    .text_sm()
+                    .text_color(theme::fg())
+                    .child(div().text_xs().text_color(color).child("⬢"))
+                    .child(SharedString::from(filename.clone())),
+            )
+            .child(div().flex_1());
+
+        if is_markdown {
+            // Markdown 默认渲染预览，需要改内容时切回源码编辑器。
+            header = header.child(
+                div()
+                    .id("media-edit-source")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(theme::green())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()))
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                        this.edit_current_as_text(cx);
+                    }))
+                    .child("✎ 编辑源码"),
+            );
+        } else {
+            header = header.child(
+                div()
+                    .id("media-open-external")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(theme::accent())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()))
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                        this.open_media_externally(cx);
+                    }))
+                    .child("↗ 用默认应用打开"),
+            );
+        }
+
+        header = header.child(
+                div()
+                    .id("media-back-to-chat")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()))
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                        this.show_chat(cx);
+                    }))
+                    .child("← 对话"),
+            );
+
+        // ===== 主体 =====
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_hidden()
+            .bg(theme::surface());
+
+        match &media {
+            MediaPreview::Image(p) => {
+                body = body.child(
+                    div()
+                        .size_full()
+                        .p_4()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            gpui::img(p.clone())
+                                .max_w_full()
+                                .max_h_full()
+                                .object_fit(gpui::ObjectFit::Contain),
+                        ),
+                );
+            }
+            MediaPreview::Pdf(_) => {
+                body = body.child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .w(px(72.0))
+                                .h(px(90.0))
+                                .rounded_lg()
+                                .bg(theme::tint(theme::red(), 0.14))
+                                .border_1()
+                                .border_color(theme::tint(theme::red(), 0.45))
+                                .text_lg()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(theme::red())
+                                .child("PDF"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme::fg())
+                                .child(SharedString::from(filename.clone())),
+                        )
+                        .child(
+                            div().text_xs().text_color(theme::dim()).child(
+                                SharedString::from(format!("{size} · 内置查看暂不支持 PDF 排版渲染")),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .id("media-open-external-card")
+                                .px_3()
+                                .py(px(6.0))
+                                .rounded_md()
+                                .bg(theme::accent_soft())
+                                .text_xs()
+                                .text_color(theme::accent())
+                                .cursor_pointer()
+                                .hover(|d| d.bg(theme::border()))
+                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                    this.open_media_externally(cx);
+                                }))
+                                .child("用默认应用打开"),
+                        ),
+                );
+            }
+            MediaPreview::Markdown(_) => {
+                // 复用聊天区的 Markdown 块渲染，宽度按中栏实际可用宽度估算。
+                let text = crate::filesystem::read_file(&path).unwrap_or_default();
+                let avail = (self.chat_w - 40.0).max(240.0);
+                let mut md = div()
+                    .id("md-preview")
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_6()
+                    .flex_1()
+                    .overflow_scroll()
+                    .text_size(px(14.0))
+                    .text_color(theme::fg());
+                if text.trim().is_empty() {
+                    md = md.child(div().text_color(theme::dim()).child("（空文件）"));
+                } else {
+                    for b in crate::markdown::parse(&text) {
+                        md = md.child(crate::views::chat::markdown_block(b, avail));
+                    }
+                }
+                body = body.child(md);
+            }
+        }
+
+        // ===== 底部状态栏 =====
+        let footer = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .h(px(24.0))
+            .px_3()
+            .border_t_1()
+            .border_color(theme::border())
+            .bg(theme::panel())
+            .text_xs()
+            .text_color(theme::dim())
+            .child(SharedString::from(format!(
+                "{kind}查看 · {filename} · {size}"
+            )))
+            .child(SharedString::from(match &media {
+                MediaPreview::Image(_) => "只读 · 缩放随窗口",
+                MediaPreview::Pdf(_) => "PDF 请用默认应用阅读",
+                MediaPreview::Markdown(_) => "只读预览 · ✎ 可编辑源码",
+            }));
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .h_full()
+            .overflow_hidden()
+            .bg(theme::surface())
+            .child(header)
+            .child(body)
+            .child(footer)
     }
 
     /// 查找 / 替换栏：贴在编辑器标签栏下面。
