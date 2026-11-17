@@ -200,7 +200,12 @@ impl AppState {
                 );
             } else {
                 for block in crate::markdown::parse(&preview_detail(&skill.detail)) {
-                    body = body.child(crate::views::chat::markdown_block(block, avail));
+                    body = body.child(crate::views::chat::markdown_block(
+                        block,
+                        avail,
+                        self.root.as_deref(),
+                        cx,
+                    ));
                 }
             }
         }

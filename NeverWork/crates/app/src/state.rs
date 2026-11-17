@@ -10,7 +10,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -55,6 +55,31 @@ impl MediaPreview {
         match self {
             Self::Image(p) | Self::Pdf(p) | Self::Markdown(p) => p,
         }
+    }
+}
+
+/// 图片放大查看器：点开对话 / 产物里的图片时盖在最上层。
+///
+/// 只在内存里，关闭即丢；`zoom = 1.0` 表示「适应窗口」。
+#[derive(Clone, Debug)]
+pub(crate) struct ImageView {
+    pub path: PathBuf,
+    /// 相对「适应窗口」的缩放倍数。
+    pub zoom: f32,
+    /// 放大后的平移偏移（逻辑像素）。
+    pub offset: (f32, f32),
+    /// 拖拽起点与起始偏移（窗口坐标）；松开清空。
+    pub drag: Option<((f32, f32), (f32, f32))>,
+    /// 原图像素尺寸；读不到时给一个保守值，按它适配窗口。
+    pub natural: (f32, f32),
+}
+
+impl ImageView {
+    pub(crate) fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| self.path.to_string_lossy().to_string())
     }
 }
 
@@ -164,6 +189,10 @@ pub enum InputTarget {
     Workspace,
     /// 会话列表搜索框。
     SessionSearch,
+    /// 轨迹列表搜索框。
+    TraceSearch,
+    /// ask_user 卡片里的自定义回答输入框。
+    AskCustom,
     /// 会话重命名输入框（回车提交，Esc 取消）。
     RenameSession,
     /// 团队角色编辑里的多行提示词输入框。
@@ -237,7 +266,17 @@ pub enum RightTab {
     Files,
     /// Git 面板：分支、改动文件、提交历史。
     Git,
+    /// 会话产物：Agent 写入的文件与生成的图片。
+    Artifacts,
     Preview,
+}
+
+/// 右栏初始 / 切会话时的默认状态：收起（把宽度让给对话区）。
+/// `NW_RIGHT_COLLAPSED=0` 强制展开，供验证脚本使用。
+fn right_default_collapsed() -> bool {
+    std::env::var("NW_RIGHT_COLLAPSED")
+        .map(|v| v != "0")
+        .unwrap_or(true)
 }
 
 /// 文件树右键菜单的目标（本地绝对路径或远程相对路径）与弹出坐标。
@@ -384,6 +423,8 @@ pub struct AppState {
     pub open_path: Option<PathBuf>,
     /// 当前打开的是图片 / PDF：中心区走只读查看器，文本缓冲区保持不变。
     pub media_preview: Option<MediaPreview>,
+    /// 图片放大查看器（点图片打开；Esc / 点背景关闭）。
+    pub image_view: Option<ImageView>,
     pub editor: TextBuffer,
     pub chat: TextBuffer,
     /// 本轮待发送的附件（粘贴图片 / 上传文件 / 拖拽进来），发送后清空。
@@ -431,6 +472,14 @@ pub struct AppState {
     pub provider_remove_confirm: Option<usize>,
     /// 对话区模型选择器是否打开（按厂商分组，选中写回当前会话）。
     pub model_picker: bool,
+    /// 是否切到「轨迹」页签（对话区整区替换成轨迹视图；窗口内存态，不随会话保存）。
+    pub trace_open: bool,
+    /// 轨迹里选中的消息下标（`None` = 不显示详情分栏）。
+    pub trace_selected: Option<usize>,
+    /// 轨迹列表的搜索词（只过滤当前视图，不持久化）。
+    pub trace_query: TextBuffer,
+    /// ask_user 卡片的自定义回答输入框（窗口内存态）。
+    pub ask_custom: TextBuffer,
     /// 模型选择器的搜索词。
     pub model_query: String,
     /// 模型选择器里键盘高亮的下标。
@@ -515,6 +564,11 @@ pub struct AppState {
     pub active_role: Option<usize>,
     /// 等待用户批准的写操作。同一时刻最多一个。
     pub pending: Option<PendingApproval>,
+    /// 正在等待用户回答的 `ask_user` 问题（问答卡片只在此状态下显示）。
+    pub pending_ask: Option<PendingAsk>,
+    /// 自动化验收：`NW_ASK_ANSWER` 预置后自动回答 ask_user：
+    /// `1` = 选第一个推荐项；其它值 = 当作自定义回答直接送回。
+    pub auto_ask: Option<String>,
     /// 自动批准写操作（仅供自动化验证，`NW_AUTO_APPROVE=1` 开启）。
     pub auto_approve: bool,
     /// 展开的交接卡片（键 = 消息下标）。
@@ -613,6 +667,20 @@ pub struct PendingApproval {
     pub summary: String,
     /// 把用户决定送回 Agent 线程。
     pub respond: flume::Sender<bool>,
+}
+
+/// 正在等待用户回答的 `ask_user` 问题。
+///
+/// 与 `PendingApproval` 同构：agent 线程阻塞在 channel 上，界面把目标会话
+/// 与消息下标记下来，渲染选项按钮与自定义输入框；回答后继续执行。
+pub struct PendingAsk {
+    pub session_idx: usize,
+    pub msg_idx: usize,
+    pub question: String,
+    pub options: Vec<neverwork_agent::tools::AskOption>,
+    pub allow_custom: bool,
+    /// 把用户的选择/自定义输入送回 Agent 线程。
+    pub respond: flume::Sender<String>,
 }
 
 /// 「一轮模型回复对应一个消息气泡」的簿记。
@@ -768,6 +836,7 @@ fn blank_session(
         permission: neverwork_core::PermissionMode::Standard,
         stage: neverwork_core::TaskStage::Idle,
         resume_prompt: String::new(),
+        artifacts: Vec::new(),
     }
 }
 
@@ -894,6 +963,28 @@ fn safe_file_name(title: &str, id: &str) -> String {
         trimmed
     };
     format!("{name}-{id}")
+}
+
+/// 在 `dir` 下找一个不冲突的文件名：`name`、`name (2)`、`name (3)`……
+/// 导出产物重名时不覆盖旧文件。
+fn unique_dest(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let p = Path::new(name);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let ext = p.extension().and_then(|e| e.to_str());
+    for n in 2..1000u32 {
+        let cand = match ext {
+            Some(e) => dir.join(format!("{stem} ({n}).{e}")),
+            None => dir.join(format!("{stem} ({n})")),
+        };
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    dir.join(name)
 }
 
 /// 会话卡片第二行：把最后一条有内容的消息压成一行。
@@ -1035,6 +1126,7 @@ impl AppState {
                 .filter(|t| !t.trim().is_empty()),
             open_path: None,
             media_preview: None,
+            image_view: None,
             editor: TextBuffer::multi_line(),
             chat: TextBuffer::single_line(),
             chat_attachments: Vec::new(),
@@ -1062,6 +1154,10 @@ impl AppState {
             provider_test_busy: false,
             provider_remove_confirm: None,
             model_picker: false,
+            trace_open: false,
+            trace_selected: None,
+            trace_query: TextBuffer::single_line(),
+            ask_custom: TextBuffer::single_line(),
             model_query: String::new(),
             model_highlight: 0,
             thinking_panel: false,
@@ -1101,13 +1197,13 @@ impl AppState {
             market_installing: None,
             active_role: None,
             pending: None,
+            pending_ask: None,
+            auto_ask: None,
             auto_approve: false,
             expanded_handoff: std::collections::HashSet::new(),
             // 右侧文件/Git 面板默认收起：把宽度让给对话区，
             // 需要时点一下窄条展开（`NW_RIGHT_COLLAPSED=0` 可强制展开用于验证）。
-            right_collapsed: std::env::var("NW_RIGHT_COLLAPSED")
-                .map(|v| v != "0")
-                .unwrap_or(true),
+            right_collapsed: right_default_collapsed(),
             // 会话列表默认展开；`NW_SESSION_COLLAPSED=1` 供验证时以收起态启动。
             session_collapsed: std::env::var("NW_SESSION_COLLAPSED")
                 .map(|v| v == "1")
@@ -1172,16 +1268,32 @@ impl AppState {
                 _ => {}
             }
         }
-        // 验证用：启动即切到右栏指定 tab（files / git / preview）。
+        // 验证用：启动即切到右栏指定 tab（files / git / artifacts / preview）。
         if let Ok(v) = std::env::var("NW_RIGHT_TAB") {
             match v.as_str() {
                 "git" => me.right_tab = RightTab::Git,
+                "artifacts" => me.right_tab = RightTab::Artifacts,
                 "preview" => me.right_tab = RightTab::Preview,
                 _ => {}
             }
         }
         // 验证用：预置当前会话的权限档位（read_only / plan / standard / full）。
         me.apply_env_permission();
+        // 验证用：启动即展开对话轨迹页签（NW_TRACE=1；=0 强制关闭）。
+        if std::env::var("NW_TRACE").map(|v| v != "0").unwrap_or(false) {
+            me.trace_open = true;
+        }
+        // 验证用：预置轨迹里选中的消息下标 / 搜索词。
+        if let Ok(v) = std::env::var("NW_TRACE_SELECT") {
+            if let Ok(i) = v.parse::<usize>() {
+                me.trace_selected = Some(i);
+            }
+        }
+        if let Ok(v) = std::env::var("NW_TRACE_QUERY") {
+            if !v.is_empty() {
+                me.trace_query.reset(&v);
+            }
+        }
         // 验证用：启动即弹出「新建会话」的模式选择浮层。
         if std::env::var("NW_PICK_MODE").map(|v| v == "1").unwrap_or(false) {
             me.new_session_picker = true;
@@ -1329,10 +1441,15 @@ impl AppState {
         if std::env::var("NW_AUTO_APPROVE").map(|v| v == "1").unwrap_or(false) {
             me.auto_approve = true;
         }
-        // 验证用：直接打开右侧某个 Tab（files|git|preview）。
+        // 自动化验证用：`NW_ASK_ANSWER=1` 自动选第一个推荐项；其它值当作自定义回答。
+        me.auto_ask = std::env::var("NW_ASK_ANSWER")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        // 验证用：直接打开右侧某个 Tab（files|git|artifacts|preview）。
         if let Ok(t) = std::env::var("NW_RIGHT_TAB") {
             match t.to_lowercase().as_str() {
                 "git" => me.set_right_tab(RightTab::Git, cx),
+                "artifacts" => me.set_right_tab(RightTab::Artifacts, cx),
                 "preview" => me.set_right_tab(RightTab::Preview, cx),
                 "files" => me.set_right_tab(RightTab::Files, cx),
                 _ => {}
@@ -1646,6 +1763,8 @@ impl AppState {
         self.sessions.push(s);
         self.active_session = self.sessions.len() - 1;
         self.center = CenterView::Chat;
+        // 会话页默认关右栏（编辑器页打开文件时用户可再展开）
+        self.right_collapsed = right_default_collapsed();
         self.palette_open = false;
         self.new_session_picker = false;
         self.ns_team_open = false;
@@ -1694,6 +1813,8 @@ impl AppState {
         if idx < self.sessions.len() {
             self.active_session = idx;
             self.center = CenterView::Chat;
+            // 切会话回到「专注对话」：右栏收起（`NW_RIGHT_COLLAPSED=0` 时保持展开）
+            self.right_collapsed = right_default_collapsed();
             // 附件是按会话落盘的，切会话时不清会误发到新会话
             self.chat_attachments.clear();
             // 上一个会话的流水线高亮不能带到新会话
@@ -1702,6 +1823,9 @@ impl AppState {
             if self.model_picker {
                 self.close_chat_model_picker(cx);
             }
+            // 轨迹选中/搜索词属于上一个会话的消息，换会话后清掉
+            self.trace_selected = None;
+            self.trace_query.reset("");
             // 注意：这里**不** touch。
             // 单纯「点开看一眼」不该把会话顶到最前，否则列表会随着浏览乱跳；
             // 只有真正发消息（send_message）才算活跃。
@@ -2689,6 +2813,163 @@ impl AppState {
         cx.notify();
     }
 
+    /// 登记一个产物（工具写入的文件 / 模型生成的图片）。
+    ///
+    /// 同路径只留一条（重复写入/重复渲染只刷新时间）；`path` 本地会话传
+    /// 绝对路径，远程会话传工作区相对路径（列表里只展示，不打开）。
+    pub(crate) fn register_artifact(&mut self, session_idx: usize, path: &str, thread: usize) {
+        let path = path.trim();
+        if path.is_empty() {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let Some(s) = self.sessions.get_mut(session_idx) else {
+            return;
+        };
+        if let Some(a) = s.artifacts.iter_mut().find(|a| a.path == path) {
+            a.at = now;
+            return;
+        }
+        s.artifacts.push(neverwork_core::Artifact::from_path(path, now, thread));
+        // 产物无限增长没有意义：只留最近 200 条
+        if s.artifacts.len() > 200 {
+            let drop_n = s.artifacts.len() - 200;
+            s.artifacts.drain(0..drop_n);
+        }
+    }
+
+    /// 点开一个产物：图片走放大查看器，其余走统一打开路径（文本→编辑器）。
+    pub(crate) fn open_artifact(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.remote.is_some() {
+            self.notice = Some("远程工作区产物：暂不能直接打开".into());
+            cx.notify();
+            return;
+        }
+        let p = PathBuf::from(path);
+        if !p.exists() {
+            self.notice = Some(format!("产物已不存在：{path}"));
+            cx.notify();
+            return;
+        }
+        // 图片直接进放大查看器：滚轮缩放、拖拽平移
+        if p.extension()
+            .and_then(|e| e.to_str())
+            .map(is_image_extension)
+            .unwrap_or(false)
+        {
+            self.open_image_view(p, cx);
+            return;
+        }
+        self.open_file(p, cx);
+    }
+
+    /// 把产物另存一份到本地可找到的位置（「保存」按钮）。
+    ///
+    /// 目标：工作区下的 `artifacts/`；没有本地工作区时落到
+    /// `<配置目录>/artifacts/exports/`。重名不覆盖，自动追加 ` (2)`。
+    /// 产物本来就在目标目录里则只提示不复制；远程工作区暂不支持。
+    pub(crate) fn export_artifact(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.remote.is_some() {
+            self.notice = Some("远程工作区产物：暂不能导出".into());
+            cx.notify();
+            return;
+        }
+        let src = PathBuf::from(path);
+        if !src.is_file() {
+            self.notice = Some(format!("产物已不存在：{path}"));
+            cx.notify();
+            return;
+        }
+        let dir = match &self.root {
+            Some(root) => root.join("artifacts"),
+            None => neverwork_core::config::config_dir()
+                .join("artifacts")
+                .join("exports"),
+        };
+        // 已经在目标目录里：不重复复制一份自己
+        if let (Ok(d), Ok(s)) = (dir.canonicalize(), src.canonicalize()) {
+            if s.parent() == Some(d.as_path()) {
+                self.notice = Some(format!("已在导出的目录里：{}", s.display()));
+                cx.notify();
+                return;
+            }
+        }
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.notice = Some(format!("导出失败：{e}"));
+            cx.notify();
+            return;
+        }
+        let name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("artifact")
+            .to_string();
+        let dest = unique_dest(&dir, &name);
+        match std::fs::copy(&src, &dest) {
+            Ok(_) => self.notice = Some(format!("已保存到 {}", dest.display())),
+            Err(e) => self.notice = Some(format!("导出失败：{e}")),
+        }
+        cx.notify();
+    }
+
+    /// 打开图片放大查看器（只接受本地存在的文件）。
+    pub(crate) fn open_image_view(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.remote.is_some() {
+            self.notice = Some("远程工作区图片：暂不能预览".into());
+            cx.notify();
+            return;
+        }
+        if !path.exists() {
+            self.notice = Some(format!("图片已不存在：{}", path.to_string_lossy()));
+            cx.notify();
+            return;
+        }
+        // 原图尺寸决定适配比例；读不到就按 960x600 兜底，至少能看
+        let natural = image::image_dimensions(&path)
+            .ok()
+            .map(|(w, h)| (w.max(1) as f32, h.max(1) as f32))
+            .unwrap_or((960.0, 600.0));
+        self.image_view = Some(ImageView {
+            path,
+            zoom: 1.0,
+            offset: (0.0, 0.0),
+            drag: None,
+            natural,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn close_image_view(&mut self, cx: &mut Context<Self>) {
+        if self.image_view.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// 缩放一步（`factor` 是倍数）；缩回「适应窗口」以内时自动复位平移。
+    pub(crate) fn zoom_image_view(&mut self, factor: f32, cx: &mut Context<Self>) {
+        if let Some(v) = &mut self.image_view {
+            v.zoom = (v.zoom * factor).clamp(0.2, 8.0);
+            if v.zoom <= 1.0 {
+                v.offset = (0.0, 0.0);
+                v.drag = None;
+            }
+            cx.notify();
+        }
+    }
+
+    /// 复位到「适应窗口」。
+    pub(crate) fn reset_image_view(&mut self, cx: &mut Context<Self>) {
+        if let Some(v) = &mut self.image_view {
+            v.zoom = 1.0;
+            v.offset = (0.0, 0.0);
+            v.drag = None;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         // 1) 明确的图片 / PDF / Markdown：走只读查看器。
         if let Some(media) = media_preview_of(&path) {
@@ -3027,6 +3308,8 @@ impl AppState {
             InputTarget::Editor => &self.editor,
             InputTarget::Workspace => &self.ws_input,
             InputTarget::SessionSearch => &self.session_search,
+            InputTarget::TraceSearch => &self.trace_query,
+            InputTarget::AskCustom => &self.ask_custom,
             InputTarget::RenameSession => &self.rename_buf,
             InputTarget::RolePrompt => &self.role_prompt_buf,
             InputTarget::Field(_) => &self.field_buf,
@@ -3039,6 +3322,8 @@ impl AppState {
             InputTarget::Editor => &mut self.editor,
             InputTarget::Workspace => &mut self.ws_input,
             InputTarget::SessionSearch => &mut self.session_search,
+            InputTarget::TraceSearch => &mut self.trace_query,
+            InputTarget::AskCustom => &mut self.ask_custom,
             InputTarget::RenameSession => &mut self.rename_buf,
             InputTarget::RolePrompt => &mut self.role_prompt_buf,
             InputTarget::Field(_) => &mut self.field_buf,
@@ -3233,6 +3518,14 @@ impl AppState {
         }
     }
 
+    /// 轨迹搜索框：与会话搜索一致，文本键交给 IME，非文本键走键盘路由。
+    pub(crate) fn on_trace_search_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        self.switch_input_target(InputTarget::TraceSearch);
+        if let Some(action) = keymap::route(&ev.keystroke) {
+            self.apply_action(InputTarget::TraceSearch, action, cx);
+        }
+    }
+
     pub(crate) fn on_rename_session_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         self.switch_input_target(InputTarget::RenameSession);
         if let Some(action) = keymap::route(&ev.keystroke) {
@@ -3398,6 +3691,13 @@ impl AppState {
                     self.input_target = InputTarget::Chat;
                     cx.notify();
                 }
+                // 轨迹搜索与会话搜索一致：实时过滤，回车只收起焦点
+                InputTarget::TraceSearch => {
+                    self.input_target = InputTarget::Chat;
+                    cx.notify();
+                }
+                // ask_user 自定义回答：回车提交
+                InputTarget::AskCustom => self.commit_ask_custom(cx),
                 InputTarget::RenameSession => self.commit_rename_session(cx),
                 // 角色提示词是多行文本：Enter 就是换行，不提交。
                 InputTarget::RolePrompt => {
@@ -3434,7 +3734,10 @@ impl AppState {
                 }
             }
             KeyAction::Escape => {
-                if self.market_detail.is_some() {
+                if self.image_view.is_some() {
+                    // 图片查看器在最上层，Esc 先关它
+                    self.close_image_view(cx);
+                } else if self.market_detail.is_some() {
                     // 详情抽屉在最上层，Esc 先关它
                     self.close_market_detail(cx);
                 } else if self.workspace_popup {
@@ -3443,6 +3746,15 @@ impl AppState {
                     self.close_new_session_picker(cx);
                 } else if self.model_picker {
                     self.close_chat_model_picker(cx);
+                } else if self.trace_open {
+                    // 轨迹页不是浮层：放在弹层之后、停止生成之前。
+                    // 关页签时把选中与搜索词一并复位，下次打开从干净列表开始。
+                    self.trace_open = false;
+                    self.trace_selected = None;
+                    self.trace_query.reset("");
+                    if self.input_target == InputTarget::TraceSearch {
+                        self.input_target = InputTarget::Chat;
+                    }
                 } else if self.ws_prompt_open {
                     self.ws_prompt_open = false;
                     self.palette_open = false;
@@ -3459,6 +3771,9 @@ impl AppState {
                     self.session_search.reset("");
                 } else if self.role_skill_picker.is_some() {
                     self.close_role_skill_picker(cx);
+                } else if self.pending_ask.is_some() {
+                    // 问答卡片不算浮层，但 Esc 应该能跳过：按推荐继续，不卡住链路
+                    self.skip_ask(cx);
                 } else if self.streaming {
                     self.stop_streaming(cx);
                 }
@@ -4286,13 +4601,68 @@ impl AppState {
                             cx.notify();
                         });
                     }
+                    neverwork_agent::AgentEvent::AskUser {
+                        call,
+                        question,
+                        options,
+                        allow_custom,
+                        respond,
+                    } => {
+                        let tmsg = tool_msg.get(&call.id).copied();
+                        let _ = weak.update(async_cx, |this, cx| {
+                            // 自动化验收：NW_ASK_ANSWER=1 选第一个推荐项；
+                            // 其它值当作自定义回答直接送回，不弹卡片。
+                            if let Some(auto) = this.auto_ask.clone() {
+                                let answer = if auto == "1" {
+                                    options.first().map(|o| o.label.clone()).unwrap_or_default()
+                                } else {
+                                    auto
+                                };
+                                let _ = respond.send(answer);
+                            } else {
+                                // 工具步骤标成「待回答」，卡片按钮才能亮起来
+                                if let Some(idx) = tmsg {
+                                    if let Some(m) =
+                                        this.sessions[session_idx].messages.get_mut(idx)
+                                    {
+                                        if let MessageKind::ToolCall { status, .. } = &mut m.kind {
+                                            *status = ToolRunStatus::Awaiting;
+                                        }
+                                    }
+                                }
+                                this.ask_custom.reset("");
+                                this.pending_ask = Some(crate::state::PendingAsk {
+                                    session_idx,
+                                    msg_idx: tmsg.unwrap_or(usize::MAX),
+                                    question,
+                                    options,
+                                    allow_custom,
+                                    respond,
+                                });
+                                // 卡在等人：与审批同义，磁盘上记「等用户」
+                                if let Some(s) = this.sessions.get_mut(session_idx) {
+                                    s.stage = neverwork_core::TaskStage::AwaitingApproval;
+                                    s.sync_action();
+                                }
+                                this.save_sessions();
+                            }
+                            this.chat_scroll_dirty.set(true);
+                            cx.notify();
+                        });
+                    }
                     neverwork_agent::AgentEvent::ToolFinished { result } => {
                         // 用完就清：同一 id 不会再来第二次，留着只会让表无限增长
                         let tmsg = tool_msg.remove(&result.call_id);
                         let _ = weak.update(async_cx, |this, cx| {
+                            // 写工具成功后登记产物：本地会话存绝对路径（可点开），远程保留相对路径。
+                            let mut written: Vec<(String, usize)> = Vec::new();
                             if let Some(idx) = tmsg {
                                 if let Some(m) = this.sessions[session_idx].messages.get_mut(idx) {
                                     if let MessageKind::ToolCall {
+                                        name,
+                                        path,
+                                        arguments,
+                                        thread,
                                         status,
                                         output,
                                         diff,
@@ -4319,8 +4689,22 @@ impl AppState {
                                                 })
                                                 .collect();
                                         }
+                                        if result.ok {
+                                            for rel in written_paths(name, path, arguments) {
+                                                written.push((rel, thread.unwrap_or(0)));
+                                            }
+                                        }
                                     }
                                 }
+                            }
+                            for (rel, thread) in written {
+                                let path = match &this.root {
+                                    Some(root) if this.remote.is_none() => {
+                                        root.join(&rel).to_string_lossy().to_string()
+                                    }
+                                    _ => rel,
+                                };
+                                this.register_artifact(session_idx, &path, thread);
                             }
                             this.pending = None;
                             this.refresh_tree(cx);
@@ -4493,6 +4877,7 @@ impl AppState {
                 this.streaming = false;
                 this.active_role = None;
                 this.pending = None;
+                this.pending_ask = None;
                 // 先把取消标志取出来，后面要可变借用 sessions
                 let cancelled = this.cancel.load(Ordering::Relaxed);
                 // 把本轮耗时写到最后一条回答上，渲染成 OpenCode 那样的页脚。
@@ -4526,6 +4911,26 @@ impl AppState {
                         session.touch();
                     }
                 }
+                // 图片产物：模型用 Markdown 图片 / data URI 给出的图（渲染前先落盘登记）
+                let imgs: Vec<String> = this
+                    .sessions
+                    .get(session_idx)
+                    .map(|s| {
+                        s.messages
+                            .iter()
+                            .filter(|m| matches!(m.kind, MessageKind::Agent { .. }))
+                            .flat_map(|m| crate::markdown::extract_images(&m.body))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for src in imgs {
+                    if let Some(p) = crate::artifacts::resolve_image(&src, this.root.as_deref()) {
+                        this.register_artifact(session_idx, &p.to_string_lossy(), 0);
+                    }
+                }
+                // 产物条贴在对话流末尾：收尾登记后要滚到底，否则新出现的
+                // footer 落在视口下方，看起来像「没渲染」。
+                this.chat_scroll_dirty.set(true);
                 // 本轮结束强制落盘：下次启动打开就是这个瞬间的内容
                 this.save_sessions();
                 // 验证用：本轮答完自动追问下一条（`NW_SEND2`）
@@ -4842,6 +5247,56 @@ impl AppState {
         cx.notify();
     }
 
+    /// 用户在 ask_user 卡片上选了一项或输入了自定义答案：送回 Agent 线程继续。
+    pub(crate) fn answer_ask(&mut self, text: String, cx: &mut Context<Self>) {
+        if let Some(p) = self.pending_ask.take() {
+            let _ = p.respond.send(text);
+            // 回答后立刻回到「执行中」：否则卡片停在「待你选择」，按钮却没了
+            if let Some(m) = self
+                .sessions
+                .get_mut(p.session_idx)
+                .and_then(|s| s.messages.get_mut(p.msg_idx))
+            {
+                if let MessageKind::ToolCall { status, .. } = &mut m.kind {
+                    *status = ToolRunStatus::Running;
+                }
+            }
+            if let Some(s) = self.sessions.get_mut(p.session_idx) {
+                if s.stage == neverwork_core::TaskStage::AwaitingApproval {
+                    s.stage = neverwork_core::TaskStage::Running;
+                    s.sync_action();
+                }
+            }
+            self.ask_custom.reset("");
+            if self.input_target == InputTarget::AskCustom {
+                self.input_target = InputTarget::Chat;
+            }
+            self.save_sessions();
+        }
+        cx.notify();
+    }
+
+    /// 跳过当前 ask_user 问题（Esc / 「跳过」按钮）：模型按推荐选项继续。
+    pub(crate) fn skip_ask(&mut self, cx: &mut Context<Self>) {
+        self.answer_ask("用户跳过了这个问题，请按推荐选项继续。".into(), cx);
+    }
+
+    /// 自定义输入框回车：文本非空才提交。
+    fn commit_ask_custom(&mut self, cx: &mut Context<Self>) {
+        let text = self.ask_custom.text().trim().to_string();
+        if !text.is_empty() {
+            self.answer_ask(text, cx);
+        }
+    }
+
+    /// ask_user 自定义输入框：照轨迹搜索的模式，文本键交给 IME。
+    pub(crate) fn on_ask_custom_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        self.switch_input_target(InputTarget::AskCustom);
+        if let Some(action) = keymap::route(&ev.keystroke) {
+            self.apply_action(InputTarget::AskCustom, action, cx);
+        }
+    }
+
     /// 「执行中」心跳：流式期间每 120ms 重绘一次，让会话卡片上的动图与耗时走起来。
     ///
     /// 用代数区分轮次：停止后立刻又发下一条时，旧 ticker 会在下一次 tick 发现
@@ -5009,6 +5464,8 @@ impl Render for AppState {
                 InputTarget::Workspace => Some(self.ws_focus.clone()),
                 InputTarget::Chat
                 | InputTarget::SessionSearch
+                | InputTarget::TraceSearch
+                | InputTarget::AskCustom
                 | InputTarget::RenameSession => Some(self.focus_handle.clone()),
             };
             if let Some(handle) = want {
@@ -5135,6 +5592,13 @@ impl Render for AppState {
         if self.new_session_picker {
             root = root.child(self.new_session_overlay(cx).into_any_element());
         }
+        // 图片放大查看器：最上层，点背景 / Esc 关闭。
+        if self.image_view.is_some() {
+            root = root.child(
+                crate::views::image_view::image_view_overlay(self, visible_w, visible_h, cx)
+                    .into_any_element(),
+            );
+        }
         root
     }
 }
@@ -5163,6 +5627,8 @@ fn input_bridge(
         InputTarget::Workspace => ws_focus.clone(),
         InputTarget::Chat
         | InputTarget::SessionSearch
+        | InputTarget::TraceSearch
+        | InputTarget::AskCustom
         | InputTarget::RenameSession => chat_focus.clone(),
     };
     gpui::canvas(
@@ -5279,6 +5745,43 @@ fn history_arguments(call: &neverwork_agent::ToolCall) -> String {
     } else {
         let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
         format!(r#"{{"path":"{escaped}"}}"#)
+    }
+}
+
+/// 写工具调用涉及的文件（相对工作区）：`write_file`/`apply_patch` 取 `path`，
+/// `multi_patch` 取 `edits[].path`。
+///
+/// `path` 为空时回退解析参数 JSON（ToolStarted 只在存在 `path` 参数时记录）。
+fn written_paths(name: &str, path: &str, arguments: &str) -> Vec<String> {
+    match name {
+        "write_file" | "apply_patch" => {
+            if !path.is_empty() {
+                return vec![path.to_string()];
+            }
+            let v: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+            v.get("path")
+                .and_then(|p| p.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| vec![s.to_string()])
+                .unwrap_or_default()
+        }
+        "multi_patch" => {
+            let v: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+            v.get("edits")
+                .and_then(|e| e.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|it| {
+                            it.get("path")
+                                .and_then(|p| p.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -6352,7 +6855,7 @@ mod history_tests {
 
 #[cfg(test)]
 mod export_tests {
-    use super::{safe_file_name, session_markdown};
+    use super::{safe_file_name, session_markdown, unique_dest};
     use neverwork_core::Session;
 
     fn session(json: &str) -> Session {
@@ -6373,6 +6876,30 @@ mod export_tests {
     #[test]
     fn safe_file_name_falls_back_when_title_is_all_punctuation() {
         assert_eq!(safe_file_name("///", "s9"), "session-s9");
+    }
+
+    #[test]
+    fn unique_dest_appends_suffix_on_conflict() {
+        let dir = std::env::temp_dir().join(format!(
+            "nw-unique-dest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.png"), b"1").unwrap();
+        let d2 = unique_dest(&dir, "a.png");
+        assert_eq!(d2.file_name().unwrap().to_str().unwrap(), "a (2).png");
+        std::fs::write(&d2, b"2").unwrap();
+        let d3 = unique_dest(&dir, "a.png");
+        assert_eq!(d3.file_name().unwrap().to_str().unwrap(), "a (3).png");
+        // 无扩展名时后缀接在名字后面
+        std::fs::write(dir.join("LICENSE"), b"x").unwrap();
+        let n2 = unique_dest(&dir, "LICENSE");
+        assert_eq!(n2.file_name().unwrap().to_str().unwrap(), "LICENSE (2)");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

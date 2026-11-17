@@ -39,14 +39,20 @@ fn prompt_notes_missing_workspace() {
 
 #[test]
 fn prompt_still_documents_write_tools() {
-    let p = crate::agent_loop::build_system_prompt("自定义人格", &crate::tools::ToolContext::new("E:/go"));
+    let ctx = crate::tools::ToolContext::new("E:/go");
+    let p = crate::agent_loop::build_system_prompt("自定义人格", &ctx);
     // 改代码的能力不能因为强调问答而丢失
     assert!(p.contains("apply_patch"));
     assert!(p.contains("multi_patch"));
     assert!(p.contains("会弹给用户批准"), "写操作仍需说明要批准");
-    // 人格与工作区都要带上
+    // 人格与工作区都要带上。工作区按 `describe_root` 显示，
+    // 不能硬编码 `E:/go`：目录真实存在时会被 canonicalize 改写成绝对路径。
     assert!(p.contains("自定义人格"));
-    assert!(p.contains("E:/go"));
+    assert!(
+        p.contains(&ctx.describe_root()),
+        "提示词里没有带上工作区根: {}",
+        ctx.describe_root()
+    );
 }
 
 #[test]
@@ -71,4 +77,18 @@ fn prompt_marks_remote_workspace() {
     assert!(p.contains("远程工作区"), "远程要明确告知模型");
     assert!(p.contains("dev:/srv/app"), "要带上远端根：{p}");
     assert!(p.contains("search_files"), "远程检索降级提示要给出替代");
+}
+
+// ---- 验证门禁：改完代码必须跑构建/测试 ----
+
+#[test]
+fn prompt_requires_verification_after_edits() {
+    let p = crate::agent_loop::build_system_prompt("", &crate::tools::ToolContext::new("E:/go"));
+    assert!(p.contains("改完代码必须验证"), "缺少「改完必须验证」的要求");
+    assert!(p.contains("cargo test"), "要给出常见工具链的示例命令");
+    assert!(
+        p.contains("验证通过前不要声称「已完成」"),
+        "验证之前不得声称完成"
+    );
+    assert!(p.contains("未验证"), "无法验证时要如实标注");
 }

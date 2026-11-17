@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod assets;
+mod artifacts;
 mod filesystem;
 mod brackets;
 mod find;

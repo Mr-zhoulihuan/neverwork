@@ -371,8 +371,17 @@ pub fn role_color_alt(index: usize) -> Rgba {
 mod tests {
     use super::*;
 
+    /// 主题是全局状态，多个测试并行切换会互相踩（`is_light` 断言随机失败），
+    /// 用一把锁把所有碰全局主题的测试串行化。
+    static THEME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn theme_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        THEME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn mode_switch_changes_colors() {
+        let _guard = theme_test_guard();
         set_theme_mode(ThemeMode::Dark);
         let dark_bg = bg();
         assert!(!is_light());
@@ -387,6 +396,7 @@ mod tests {
 
     #[test]
     fn foreground_inverts_with_theme() {
+        let _guard = theme_test_guard();
         set_theme_mode(ThemeMode::Dark);
         let d = fg();
         set_theme_mode(ThemeMode::Light);
@@ -397,6 +407,7 @@ mod tests {
 
     #[test]
     fn each_palette_has_its_own_colors() {
+        let _guard = theme_test_guard();
         let mut seen = Vec::new();
         for mode in ThemeMode::all().iter().copied() {
             set_theme_mode(mode);
@@ -423,6 +434,7 @@ mod tests {
 
     #[test]
     fn solarized_light_counts_as_light() {
+        let _guard = theme_test_guard();
         set_theme_mode(ThemeMode::SolarizedLight);
         assert!(is_light());
         set_theme_mode(ThemeMode::SolarizedDark);

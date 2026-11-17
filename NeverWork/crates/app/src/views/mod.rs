@@ -6,6 +6,7 @@ pub(crate) mod chat;
 pub(crate) mod editor;
 pub(crate) mod file_menu;
 pub(crate) mod files;
+pub(crate) mod image_view;
 pub(crate) mod market_detail;
 pub(crate) mod model_picker;
 pub(crate) mod new_session;
@@ -17,6 +18,7 @@ pub(crate) mod sidebar;
 pub(crate) mod skills;
 pub(crate) mod text_fit;
 pub(crate) mod team;
+pub(crate) mod trace;
 pub(crate) mod workspace_picker;
 
 use gpui::prelude::*;

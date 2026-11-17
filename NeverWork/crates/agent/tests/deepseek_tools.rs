@@ -91,6 +91,15 @@ fn run(
             trace.denied += 1;
             eprintln!("[已拒绝] {}", call.name);
         }
+        // 交互式提问：测试里自动选第一个推荐项，不阻塞。
+        AgentEvent::AskUser { options, respond, .. } => {
+            let pick = options
+                .first()
+                .map(|o| o.label.clone())
+                .unwrap_or_else(|| "随便".into());
+            eprintln!("[提问] 自动选择：{pick}");
+            let _ = respond.send(pick);
+        }
         AgentEvent::RoundLimit => trace.rounds_limited = true,
         AgentEvent::TimeLimit => trace.rounds_limited = true,
         AgentEvent::CostLimit { .. } => trace.rounds_limited = true,

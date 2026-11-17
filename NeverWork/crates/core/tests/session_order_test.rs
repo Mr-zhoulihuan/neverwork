@@ -32,6 +32,7 @@ fn sp(id: &str, updated_at: u64, tag: SessionTag, pinned: bool) -> Session {
         permission: neverwork_core::PermissionMode::Standard,
         stage: neverwork_core::TaskStage::Idle,
         resume_prompt: String::new(),
+        artifacts: Vec::new(),
     }
 }
 

@@ -435,6 +435,7 @@ impl AppState {
 
         match &media {
             MediaPreview::Image(p) => {
+                let click = p.clone();
                 body = body.child(
                     div()
                         .size_full()
@@ -443,10 +444,18 @@ impl AppState {
                         .items_center()
                         .justify_center()
                         .child(
-                            gpui::img(p.clone())
-                                .max_w_full()
-                                .max_h_full()
-                                .object_fit(gpui::ObjectFit::Contain),
+                            div()
+                                .id("media-image")
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                                    this.open_image_view(click.clone(), cx);
+                                }))
+                                .child(
+                                    gpui::img(p.clone())
+                                        .max_w_full()
+                                        .max_h_full()
+                                        .object_fit(gpui::ObjectFit::Contain),
+                                ),
                         ),
                 );
             }
@@ -522,7 +531,12 @@ impl AppState {
                     md = md.child(div().text_color(theme::dim()).child("（空文件）"));
                 } else {
                     for b in crate::markdown::parse(&text) {
-                        md = md.child(crate::views::chat::markdown_block(b, avail));
+                        md = md.child(crate::views::chat::markdown_block(
+                            b,
+                            avail,
+                            self.root.as_deref(),
+                            cx,
+                        ));
                     }
                 }
                 body = body.child(md);
@@ -545,7 +559,7 @@ impl AppState {
                 "{kind}查看 · {filename} · {size}"
             )))
             .child(SharedString::from(match &media {
-                MediaPreview::Image(_) => "只读 · 缩放随窗口",
+                MediaPreview::Image(_) => "只读 · 点击图片放大",
                 MediaPreview::Pdf(_) => "PDF 请用默认应用阅读",
                 MediaPreview::Markdown(_) => "只读预览 · ✎ 可编辑源码",
             }));

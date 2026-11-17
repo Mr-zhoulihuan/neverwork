@@ -4,7 +4,7 @@
 //! `## 标题`、`**加粗**` 全部以原始符号显示——回答越长越像一坨乱码。
 //!
 //! 这里只做「聊天回答里真正会出现的子集」，不追求完整 Markdown：
-//! 代码围栏、标题、无序/有序列表、引用、分隔线、空行。
+//! 代码围栏、标题、无序/有序列表、引用、分隔线、空行、表格。
 //! 单行内的 `**粗体**` 与 `` `代码` `` 由 [`inline_spans`] 处理。
 
 /// 一个可渲染的内容块。
@@ -24,6 +24,18 @@ pub enum Block {
     Quote(Vec<String>),
     /// 分隔线。
     Rule,
+    /// 表格：表头、列对齐、数据行。数据行可能比表头短（渲染时补空）。
+    Table { headers: Vec<String>, aligns: Vec<Align>, rows: Vec<Vec<String>> },
+    /// 图片（整行 `![alt](src)`，src 可为本地路径或 data URI）。
+    Image { alt: String, src: String },
+}
+
+/// 表格列对齐方式（`---` / `:---` / `:---:` / `---:`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
 }
 
 /// 行内的样式片段。
@@ -79,7 +91,12 @@ pub fn parse(text: &str) -> Vec<Block> {
             while code.last().is_some_and(|l| l.trim().is_empty()) {
                 code.pop();
             }
-            blocks.push(Block::Code { lang, lines: code });
+            // 自动识别数据：CSV/TSV 转表格、JSON 美化。识别不了照常当代码块。
+            if let Some(block) = data_block(&lang, &code) {
+                blocks.push(block);
+            } else {
+                blocks.push(Block::Code { lang, lines: code });
+            }
             continue;
         }
 
@@ -163,6 +180,32 @@ pub fn parse(text: &str) -> Vec<Block> {
             continue;
         }
 
+        // 表格：表头行 + 分隔行（`| --- | :---: |`）必须相邻，缺分隔行就按普通段落。
+        if trimmed.contains('|') && i + 1 < lines.len() && is_table_sep(lines[i + 1]) {
+            let headers = split_row(trimmed);
+            let aligns: Vec<Align> =
+                split_row(lines[i + 1].trim()).iter().map(|c| align_of(c)).collect();
+            i += 2;
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            while i < lines.len() {
+                let t = lines[i].trim();
+                if t.is_empty() || !t.contains('|') {
+                    break;
+                }
+                rows.push(split_row(t));
+                i += 1;
+            }
+            blocks.push(Block::Table { headers, aligns, rows });
+            continue;
+        }
+
+        // 图片：整行 `![alt](src)`（段落中间的图片仍按普通文本，产物提取不受影响）
+        if let Some((alt, src)) = image_line(trimmed) {
+            blocks.push(Block::Image { alt, src });
+            i += 1;
+            continue;
+        }
+
         // 普通段落：连续非空、非块级语法的行合并
         let mut para: Vec<&str> = Vec::new();
         while i < lines.len() {
@@ -174,6 +217,8 @@ pub fn parse(text: &str) -> Vec<Block> {
                 || t.starts_with('>')
                 || bullet_item(t).is_some()
                 || numbered_item(t).is_some()
+                || (t.contains('|') && i + 1 < lines.len() && is_table_sep(lines[i + 1]))
+                || image_line(t).is_some()
             {
                 break;
             }
@@ -362,6 +407,176 @@ fn numbered_item(trimmed: &str) -> Option<(u32, &str)> {
     let rest = after.strip_prefix(". ").or_else(|| after.strip_prefix(") "))?;
     let n: u32 = digits.parse().ok()?;
     Some((n, rest.trim()))
+}
+
+/// 拆一行表格为单元格：按 `|` 分割、去首尾空段、逐格 trim。
+/// 支持 `\|` 转义（单元格文字里的管道符）。
+fn split_row(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let mut cells: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut pipes = 0usize;
+    let mut chars = t.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek() == Some(&'|') {
+            cur.push('|');
+            chars.next();
+            continue;
+        }
+        if ch == '|' {
+            pipes += 1;
+            cells.push(std::mem::take(&mut cur));
+            continue;
+        }
+        cur.push(ch);
+    }
+    if pipes > 0 {
+        cells.push(cur);
+        // 首尾空段来自表格两侧的外管道，去掉
+        if cells.first().is_some_and(|c| c.trim().is_empty()) {
+            cells.remove(0);
+        }
+        if cells.last().is_some_and(|c| c.trim().is_empty()) {
+            cells.pop();
+        }
+    } else {
+        cells.push(cur);
+    }
+    cells.into_iter().map(|c| c.trim().to_string()).collect()
+}
+
+/// 是否是表格分隔行：`| --- | :---: |`，每格至少一个 `-`、可带对齐冒号。
+fn is_table_sep(line: &str) -> bool {
+    let t = line.trim();
+    if !t.contains('-') || !t.contains('|') {
+        return false;
+    }
+    let cells = split_row(t);
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            let c = c.trim();
+            let c = c.strip_prefix(':').unwrap_or(c);
+            let c = c.strip_suffix(':').unwrap_or(c);
+            !c.is_empty() && c.chars().all(|ch| ch == '-')
+        })
+}
+
+fn align_of(cell: &str) -> Align {
+    let c = cell.trim();
+    match (c.starts_with(':'), c.ends_with(':')) {
+        (true, true) => Align::Center,
+        (false, true) => Align::Right,
+        _ => Align::Left,
+    }
+}
+
+/// 整行图片：`![alt](src)`。src 不能带空白（与行内链接同口径）。
+fn image_line(line: &str) -> Option<(String, String)> {
+    let t = line.trim();
+    let rest = t.strip_prefix("![")?;
+    let close = rest.find("](")?;
+    let alt = rest[..close].to_string();
+    let src_part = &rest[close + 2..];
+    let end = src_part.find(')')?;
+    // 右括号必须是行尾（容忍尾随空白），否则是段落中间的行内图片
+    if !src_part[end + 1..].trim().is_empty() {
+        return None;
+    }
+    let src = src_part[..end].trim().trim_matches('"').to_string();
+    if src.is_empty() || src.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some((alt, src))
+}
+
+/// 扫描全文的图片地址（包括段落中间的图片），供产物登记使用。
+pub fn extract_images(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("![") {
+        let after = &rest[start + 2..];
+        let Some(close) = after.find("](") else { break };
+        let src_part = &after[close + 2..];
+        let Some(end) = src_part.find(')') else { break };
+        let src = src_part[..end].trim().trim_matches('"').to_string();
+        if !src.is_empty() && !src.chars().any(char::is_whitespace) && !out.contains(&src) {
+            out.push(src);
+        }
+        rest = &src_part[end + 1..];
+    }
+    out
+}
+
+/// 代码块内容的自动数据识别：
+///
+/// - 标注 `csv` / `tsv` 的代码块 → 表格；
+/// - 标注 `json` 的代码块 → 美化缩进；
+/// - 未标注的代码块：内容像 JSON / 分隔符对齐的 CSV-TSV 才转换，
+///   普通代码与正文一律不动（宁可少转，不能把 `let a = 1, b = 2` 变成表格）。
+fn data_block(lang: &str, lines: &[String]) -> Option<Block> {
+    let l = lang.to_ascii_lowercase();
+    match l.as_str() {
+        "csv" => csv_table(lines, ',', 2),
+        "tsv" => csv_table(lines, '\t', 2),
+        "json" | "jsonc" => json_block(lines),
+        "" => json_block(lines)
+            .or_else(|| csv_table(lines, '\t', 3))
+            .or_else(|| csv_table(lines, ',', 3)),
+        // 其它语言：信任标注，不做猜测
+        _ => None,
+    }
+}
+
+/// JSON 代码块美化。识别失败返回 None（照原样显示）。
+fn json_block(lines: &[String]) -> Option<Block> {
+    let joined = lines.join("\n");
+    let t = joined.trim();
+    // 只认对象/数组字面量：裸数字、裸字符串不当 JSON 处理
+    if t.len() > 64 * 1024 || !(t.starts_with('{') || t.starts_with('[')) {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(t).ok()?;
+    let pretty = serde_json::to_string_pretty(&value).ok()?;
+    Some(Block::Code { lang: "json".into(), lines: pretty.lines().map(str::to_string).collect() })
+}
+
+/// 把分隔符对齐的几行转成表格；第一行是表头。
+///
+/// `min_rows`：最少几行才转换。标注了 `csv` 的两行就够（表头+一条数据），
+/// 未标注的内容要求至少三行，避免把两行普通短句（`a, b`）误判成表格。
+fn csv_table(lines: &[String], sep: char, min_rows: usize) -> Option<Block> {
+    if lines.len() < min_rows || lines.len() > 300 {
+        return None;
+    }
+    let rows: Vec<Vec<String>> = lines
+        .iter()
+        .map(|l| l.split(sep).map(|c| c.trim().trim_matches('"').to_string()).collect())
+        .collect();
+    let cols = rows[0].len();
+    if cols < 2 || rows.iter().any(|r| r.len() != cols) {
+        return None;
+    }
+    // 未标注内容额外把关：格子要短、不能带代码/句读特征
+    let strict = min_rows > 2;
+    if strict {
+        if lines.join("\n").len() > 20_000 {
+            return None;
+        }
+        for row in &rows {
+            for cell in row {
+                if cell.chars().count() > 40
+                    || cell.contains(['{', '}', '[', ']', '(', ')', ';', '=', '<', '>', '`', '。', '；'])
+                {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(Block::Table {
+        headers: rows[0].clone(),
+        aligns: vec![Align::Left; cols],
+        rows: rows[1..].to_vec(),
+    })
 }
 
 
@@ -684,5 +899,131 @@ mod tests {
         assert_eq!(blocks.len(), 4);
         assert!(matches!(blocks[1], Block::Code { .. }));
         assert_eq!(blocks[2], Block::Heading(2, "How capture works".into()));
+    }
+
+    #[test]
+    fn parses_table() {
+        let blocks = parse(
+            "说明：\n\n| 语言 | 并发 | 用途 |\n|---|---|---|\n| Rust | 无 GC | 系统 |\n| Go | goroutine | 服务 |",
+        );
+        assert_eq!(blocks[0], Block::Paragraph("说明：".into()));
+        match &blocks[1] {
+            Block::Table { headers, aligns, rows } => {
+                assert_eq!(headers, &vec!["语言".to_string(), "并发".to_string(), "用途".to_string()]);
+                assert_eq!(aligns, &vec![Align::Left, Align::Left, Align::Left]);
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0], vec!["Rust".to_string(), "无 GC".to_string(), "系统".to_string()]);
+            }
+            other => panic!("应为表格，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn table_aligns_parse() {
+        let blocks = parse("| a | b | c |\n|:--|:-:|--:|\n| 1 | 2 | 3 |");
+        match &blocks[0] {
+            Block::Table { aligns, .. } => {
+                assert_eq!(aligns, &vec![Align::Left, Align::Center, Align::Right])
+            }
+            other => panic!("应为表格，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn table_row_shorter_than_header_is_kept() {
+        // 列数不齐（模型偶发少一格）不能 panic，渲染时补空
+        let blocks = parse("| a | b |\n|---|---|\n| 1 |");
+        match &blocks[0] {
+            Block::Table { rows, .. } => assert_eq!(rows[0], vec!["1".to_string()]),
+            other => panic!("应为表格，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipe_without_separator_is_paragraph() {
+        // 普通含管道的文本不能被误判成表格
+        let blocks = parse("a | b\nc | d");
+        assert!(matches!(blocks[0], Block::Paragraph(_)));
+    }
+
+    #[test]
+    fn escaped_pipe_in_cell() {
+        let blocks = parse("| 命令 | 说明 |\n|---|---|\n| a \\| b | 管道 |");
+        match &blocks[0] {
+            Block::Table { rows, .. } => assert_eq!(rows[0][0], "a | b"),
+            other => panic!("应为表格，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn csv_fence_becomes_table() {
+        let blocks = parse("```csv\n语言,并发,用途\nRust,无 GC,系统\nGo,goroutine,服务\n```");
+        match &blocks[0] {
+            Block::Table { headers, aligns, rows } => {
+                assert_eq!(headers, &vec!["语言".to_string(), "并发".to_string(), "用途".to_string()]);
+                assert_eq!(aligns.len(), 3);
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[1][0], "Go");
+            }
+            other => panic!("csv 代码块应转表格，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unlabeled_aligned_csv_becomes_table() {
+        // 未标注但三行对齐的数据：自动识别成表格
+        let blocks = parse("```\nname,age,city\nalice,30,beijing\nbob,25,shanghai\n```");
+        assert!(matches!(&blocks[0], Block::Table { rows, .. } if rows.len() == 2));
+    }
+
+    #[test]
+    fn normal_code_is_not_mistaken_for_table() {
+        // 带代码特征的块（括号/分号/等号）即使行行有逗号也不能变表格
+        let blocks = parse("```rust\nlet a = 1, b = 2;\nlet c = 3, d = 4;\nlet e = 5, f = 6;\n```");
+        assert!(matches!(&blocks[0], Block::Code { .. }));
+    }
+
+    #[test]
+    fn two_line_plain_text_is_not_table() {
+        // 未标注内容要求至少三行：普通两行短句不能被拆成表格
+        let blocks = parse("```\nhello, world\ngoodbye, moon\n```");
+        assert!(matches!(&blocks[0], Block::Code { .. }));
+    }
+
+    #[test]
+    fn json_fence_is_pretty_printed() {
+        let blocks = parse("```json\n{\"a\":1,\"b\":[2,3]}\n```");
+        match &blocks[0] {
+            Block::Code { lang, lines } => {
+                assert_eq!(lang, "json");
+                // 美化后是逐行缩进的对象
+                assert!(lines.len() > 1, "JSON 应被展开成多行: {lines:?}");
+                assert!(lines[1].contains("\"a\""));
+            }
+            other => panic!("应为代码块，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unlabeled_json_is_pretty_printed() {
+        let blocks = parse("```\n{\"k\": 1}\n```");
+        assert!(matches!(&blocks[0], Block::Code { lang, .. } if lang == "json"));
+    }
+
+    #[test]
+    fn image_line_parses() {
+        let blocks = parse("说明\n![截图](E:/pics/a.png)\n结尾");
+        assert_eq!(
+            blocks[1],
+            Block::Image { alt: "截图".into(), src: "E:/pics/a.png".into() }
+        );
+    }
+
+    #[test]
+    fn inline_image_is_not_a_block() {
+        // 段落中间的图片不拆块（仍按文本渲染，但产物提取能扫到）
+        let blocks = parse("前面 ![图](a.png) 后面");
+        assert!(matches!(&blocks[0], Block::Paragraph(_)));
+        assert_eq!(extract_images("前面 ![图](a.png) 后面"), vec!["a.png".to_string()]);
     }
 }

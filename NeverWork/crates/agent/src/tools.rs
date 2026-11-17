@@ -151,6 +151,11 @@ impl ToolCall {
                     format!("{cmd}（{cwd}）")
                 }
             }
+            "ask_user" => a
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             _ => String::new(),
         }
     }
@@ -696,7 +701,7 @@ fn builtin_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "run_command".into(),
-            description: "在工作区里执行一条非交互式命令（构建、测试、git、装依赖等），返回退出码与合并后的输出。命令会真的运行，需要用户批准。不要用它读文件、列目录或搜索（有专用工具）。默认超时 120 秒，超时会终止进程。".into(),
+            description: "在工作区里执行一条非交互式命令（构建、测试、git、装依赖等），返回退出码与合并后的输出。改完代码应当用它跑构建/测试，把失败修掉再收尾。命令会真的运行，需要用户批准。不要用它读文件、列目录或搜索（有专用工具）。默认超时 120 秒，超时会终止进程。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -734,7 +739,103 @@ fn builtin_specs() -> Vec<ToolSpec> {
             }),
             requires_approval: false,
         },
+        ToolSpec {
+            name: "ask_user".into(),
+            description: "关键决策交给用户：给出 1-4 个推荐选项（推荐项放第一个，description 写一句影响），\
+                用户点选或自定义输入后，选择会作为工具结果返回，按它继续执行。\
+                适合方案取舍、命名/风格偏好、需求细节不确定、破坏性操作前。\
+                能从上下文推断的小事自己决定，不要频繁问。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "description": "一句话问题，说明在决定什么" },
+                    "options": {
+                        "type": "array",
+                        "description": "1-4 个推荐选项，推荐项放第一个",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "选项短标签（≤20 字）" },
+                                "description": { "type": "string", "description": "一句说明：影响或推荐理由，可选" }
+                            },
+                            "required": ["label"]
+                        }
+                    },
+                    "allow_custom": { "type": "boolean", "description": "是否允许用户自定义输入，默认 true" }
+                },
+                "required": ["question", "options"]
+            }),
+            requires_approval: false,
+        },
     ]
+}
+
+/// 交互式提问工具名。它不走 `execute`，由 agent 循环暂停等用户选择。
+pub const ASK_USER_TOOL: &str = "ask_user";
+
+/// `ask_user` 的一个推荐选项。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskOption {
+    /// 选项短标签（按钮上显示）。
+    #[serde(default)]
+    pub label: String,
+    /// 一句说明：影响 / 推荐理由。
+    #[serde(default)]
+    pub description: String,
+}
+
+/// `ask_user` 参数解析结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AskPayload {
+    pub question: String,
+    pub options: Vec<AskOption>,
+    /// 是否允许自定义输入（默认允许）。
+    pub allow_custom: bool,
+}
+
+/// 校验一次 `ask_user` 调用。
+///
+/// 失败回 `BAD_ARGS` 结构化错误且**不中断运行**：模型可以补全参数后重试。
+/// 选项 1-4 个：没有选项就不是「选择」，超过 4 个用户看不过来。
+pub fn validate_ask(call: &ToolCall) -> Result<AskPayload, (&'static str, String)> {
+    const MAX_OPTIONS: usize = 4;
+    let a = call.args();
+    let question = a
+        .get("question")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if question.is_empty() {
+        return Err(("BAD_ARGS", "缺少问题 question".into()));
+    }
+    let mut options: Vec<AskOption> = a
+        .get("options")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    options.retain(|o| !o.label.trim().is_empty());
+    for o in &mut options {
+        o.label = o.label.trim().to_string();
+        o.description = o.description.trim().to_string();
+    }
+    if options.is_empty() {
+        return Err(("BAD_ARGS", "options 至少要有一个推荐选项".into()));
+    }
+    if options.len() > MAX_OPTIONS {
+        return Err((
+            "BAD_ARGS",
+            format!("options 最多 {MAX_OPTIONS} 个，请精简后再问"),
+        ));
+    }
+    let allow_custom = a
+        .get("allow_custom")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    Ok(AskPayload {
+        question,
+        options,
+        allow_custom,
+    })
 }
 
 /// 角色交接工具名。它不走 `execute`，由 agent 循环识别后切换角色。
@@ -1638,6 +1739,7 @@ mod tests {
             "run_command",
             "web_search",
             "web_fetch",
+            "ask_user",
         ] {
             assert!(names.iter().any(|x| x == n), "缺少工具 {n}");
         }
@@ -1651,6 +1753,7 @@ mod tests {
         assert!(!requires_approval("search_code"), "检索只读，不该弹审批");
         assert!(!requires_approval("web_search"), "联网搜索只读，不该弹审批");
         assert!(!requires_approval("web_fetch"), "抓网页只读，不该弹审批");
+        assert!(!requires_approval("ask_user"), "提问只是交互，不该弹审批");
         assert!(requires_approval("write_file"));
         assert!(requires_approval("apply_patch"));
         assert!(requires_approval("multi_patch"));
@@ -1674,6 +1777,10 @@ mod tests {
             }
             assert!(specs.iter().any(|t| t.name == "read_file"), "读工具要在");
             assert!(specs.iter().any(|t| t.name == "web_search"), "联网工具要在");
+            assert!(
+                specs.iter().any(|t| t.name == "ask_user"),
+                "{mode:?} 档应保留 ask_user（只提问不落盘）"
+            );
             assert!(specs.len() < all.len(), "过滤后应该更少");
         }
         assert_eq!(
@@ -1688,6 +1795,36 @@ mod tests {
         let (ctx, _dir) = ctx();
         let err = ctx.resolve("../../etc/passwd").unwrap_err();
         assert!(err.contains("越出工作区") || err.contains("不允许"), "{err}");
+    }
+
+    #[test]
+    fn validate_ask_accepts_options_and_rejects_bad_args() {
+        let ok = call(
+            "ask_user",
+            json!({
+                "question": "用哪个名字？",
+                "options": [{"label": "greet", "description": "更通用"}, {"label": "hello"}]
+            }),
+        );
+        let p = validate_ask(&ok).unwrap();
+        assert_eq!(p.question, "用哪个名字？");
+        assert_eq!(p.options.len(), 2);
+        assert_eq!(p.options[0].description, "更通用");
+        assert!(p.allow_custom, "默认允许自定义输入");
+
+        let missing_q = call("ask_user", json!({}));
+        assert!(validate_ask(&missing_q).is_err(), "没有问题要报 BAD_ARGS");
+        let no_opts = call("ask_user", json!({"question": "q", "options": []}));
+        assert!(validate_ask(&no_opts).is_err(), "没有选项要报 BAD_ARGS");
+        let too_many = call(
+            "ask_user",
+            json!({
+                "question": "q",
+                "options": [{"label": "a"}, {"label": "b"}, {"label": "c"},
+                             {"label": "d"}, {"label": "e"}]
+            }),
+        );
+        assert!(validate_ask(&too_many).is_err(), "超过 4 个选项要报 BAD_ARGS");
     }
 
     #[test]

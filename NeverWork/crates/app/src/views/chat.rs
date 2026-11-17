@@ -43,6 +43,30 @@ fn copy_chip(
         .child("复制")
 }
 
+/// 产物「保存」按钮：把产物另存到工作区的 `artifacts/`（无工作区落到配置目录）。
+///
+/// 必须与产物卡片/行**并排**而不是嵌套：嵌套时点击区重叠，点保存会
+/// 顺带触发「打开产物」。右栏产物面板与对话底部产物条共用这一个按钮。
+pub(crate) fn artifact_save_button(
+    id: impl Into<gpui::ElementId>,
+    path: String,
+    cx: &mut Context<AppState>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .px_1()
+        .rounded_sm()
+        .text_size(px(12.0))
+        .text_color(theme::dim())
+        .cursor_pointer()
+        .hover(|d| d.bg(theme::raised()).text_color(theme::accent()))
+        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+            this.export_artifact(&path, cx);
+        }))
+        .child("⤓")
+}
+
 impl AppState {
     /// 把一段对话内容写进系统剪贴板，并给一条轻提示。
     pub(crate) fn copy_message(&mut self, text: String, what: &str, cx: &mut Context<Self>) {
@@ -72,11 +96,22 @@ impl AppState {
                 .border_b_1()
                 .border_color(theme::border())
                 .child(
+                    // 窄窗口优先保右侧 chips：标题列允许收缩到 0，
+                    // 否则标题的 min-content 宽度会把页签/模式 chip 顶出屏幕。
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(SharedString::from(session.title.clone())))
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(SharedString::from(session.title.clone())),
+                        )
                         // 团队模式才显示角色点；单助手模式不放任何说明文字。
                         // 「能问答也能读文件」这种事说了也没用：用户直接问就行，
                         // 挂在标题下面只会一直占着一行。
@@ -84,6 +119,7 @@ impl AppState {
                 )
                 .child(div().flex_1())
                 .child(self.model_chip(&model_provider, &model_id, cx))
+                .child(self.trace_tabs(cx))
                 .child(
                     // 模式在新建会话时选定，这里只展示、不提供切换。
                     // 要另一种模式就点侧栏「＋」新建一个会话。
@@ -116,6 +152,12 @@ impl AppState {
         // 选择器就地嵌在标题行下面（不做浮层：窄窗口 / 高 DPI 下不易算歪）。
         if self.model_picker {
             col = col.child(self.chat_model_picker(cx));
+        }
+
+        // 轨迹页签：整区替换对话内容（状态条、消息流、输入框都不渲染），
+        // 与参考稿（DeepSeek session log）一致；下面的代码全部跳过。
+        if self.trace_open {
+            return col.child(self.trace_view(cx));
         }
 
         // 顶部状态条：团队会话显示流水线（按当前团队的角色动态生成），
@@ -243,8 +285,11 @@ impl AppState {
                     .child("▍正在生成…"),
             );
         }
+        // 会话产物（Agent 写入的文件 / 生成的图片）贴在对话流末尾
+        thread = thread.child(self.artifacts_footer(cx));
 
-        col = col.child(
+        let mut body = div().flex().flex_col().flex_1().min_h(px(0.0));
+        body = body.child(
             div()
                 .id("chat-scroll")
                 .flex_1()
@@ -258,8 +303,152 @@ impl AppState {
         if self.chat_scroll_dirty.take() {
             self.chat_scroll.scroll_to_bottom();
         }
-        col = col.child(self.composer(cx));
+        body = body.child(self.composer(cx));
+        col = col.child(body);
         col
+    }
+
+    /// 会话产物条：Agent 写过的文件与生成的图片，贴在对话流末尾。
+    ///
+    /// 与右栏「产物」面板同源（`Session.artifacts`）；这里只展示最新几个，
+    /// 完整列表在右栏。没有产物时返回空元素，不占空间。
+    fn artifacts_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let sidx = self.active_session;
+        let list = self
+            .sessions
+            .get(sidx)
+            .map(|s| s.artifacts.as_slice())
+            .unwrap_or(&[]);
+        let mut col = div().flex().flex_col().gap_2().pt_2();
+        if list.is_empty() {
+            return col;
+        }
+        // 最新在前
+        let mut ordered: Vec<&neverwork_core::Artifact> = list.iter().collect();
+        ordered.reverse();
+        col = col.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().h(px(1.0)).flex_1().bg(theme::border()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::dim())
+                        .child(SharedString::from(format!("产物 · {}", list.len()))),
+                )
+                .child(div().h(px(1.0)).flex_1().bg(theme::border())),
+        );
+        let mut row = div().flex().items_center().gap_2().flex_wrap();
+        for (i, a) in ordered.iter().take(8).enumerate() {
+            let path = a.path.clone();
+            let mut chip = div()
+                .id(SharedString::from(format!("artifact-{i}")))
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(34.0))
+                .pl_1()
+                .pr_2()
+                .rounded_md()
+                .border_1()
+                .border_color(theme::border())
+                .bg(theme::raised())
+                .cursor_pointer()
+                .hover(|d| d.bg(theme::panel()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    this.open_artifact(&path, cx);
+                }));
+            // 缩略图只给确实还在盘上的图片，文件被删了退回类型徽标
+            if a.kind == neverwork_core::ArtifactKind::Image
+                && std::path::Path::new(&a.path).exists()
+            {
+                chip = chip.child(
+                    div()
+                        .size(px(26.0))
+                        .flex_shrink_0()
+                        .rounded_sm()
+                        .overflow_hidden()
+                        .child(
+                            img(std::path::PathBuf::from(&a.path))
+                                .size(px(26.0))
+                                .object_fit(gpui::ObjectFit::Cover),
+                        ),
+                );
+            } else {
+                chip = chip.child(super::files::file_badge(&a.name));
+            }
+            chip = chip.child(
+                div()
+                    .max_w(px(150.0))
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .whitespace_nowrap()
+                    .child(SharedString::from(fit_text(&a.name, 140.0, 11.0))),
+            );
+            // chip 与保存按钮并排（不嵌套）：点⤓只保存，不会顺带打开产物
+            let save = artifact_save_button(
+                SharedString::from(format!("artifact-save-{i}")),
+                a.path.clone(),
+                cx,
+            );
+            row = row.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(chip)
+                    .child(save),
+            );
+        }
+        if let Some(rest) = list.len().checked_sub(8).filter(|n| *n > 0) {
+            row = row.child(
+                div()
+                    .text_xs()
+                    .text_color(theme::dim())
+                    .child(SharedString::from(format!("+{rest}"))),
+            );
+        }
+        col.child(row)
+    }
+
+    /// 「对话 | 轨迹」两段页签：轨迹是整区切换（对齐参考稿的 session log），
+    /// 打开时对话滚动区与输入框都不渲染，切回「对话」或 Esc 返回。
+    fn trace_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let seg = |id: &'static str, label: &'static str, active: bool, to_trace: bool| {
+            div()
+                .id(id)
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .text_xs()
+                .text_color(if active { theme::fg() } else { theme::muted() })
+                .bg(if active { theme::raised() } else { theme::panel() })
+                .cursor_pointer()
+                .hover(|d| d.bg(theme::raised()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    if this.trace_open != to_trace {
+                        this.trace_open = to_trace;
+                        if !to_trace {
+                            this.trace_selected = None;
+                        }
+                        cx.notify();
+                    }
+                }))
+                .child(label)
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .p_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::panel())
+            .child(seg("tab-chat", "对话", !self.trace_open, false))
+            .child(seg("tab-trace", "◷ 轨迹", self.trace_open, true))
     }
 
     /// 头部模型 chip：显示本会话的「厂商 · 模型」，点开按厂商分组的模型选择器。
@@ -1600,6 +1789,7 @@ impl AppState {
                         &model,
                         &provider,
                         avail,
+                        self.root.as_deref(),
                         Some((
                             gpui::ElementId::from(SharedString::from(format!(
                                 "copy-agent-{idx}"
@@ -1608,6 +1798,7 @@ impl AppState {
                                 this.copy_message(body.clone(), "回答", cx);
                             })) as ClickCb,
                         )),
+                        cx,
                     )
                     .into_any_element()
                 } else {
@@ -1622,6 +1813,7 @@ impl AppState {
                         &model,
                         &provider,
                         avail,
+                        self.root.as_deref(),
                         Some((
                             gpui::ElementId::from(SharedString::from(format!(
                                 "copy-agent-{idx}"
@@ -1630,6 +1822,7 @@ impl AppState {
                                 this.copy_message(body.clone(), "回答", cx);
                             })) as ClickCb,
                         )),
+                        cx,
                     )
                     .into_any_element()
                 }
@@ -1919,6 +2112,166 @@ impl AppState {
             col = col.child(approve);
         }
 
+        // ask_user 待回答：问题 + 推荐选项 + 自定义输入行。
+        // 与审批卡同位置渲染（统计行下方），否则用户没地方点。
+        if let Some(ask) = self
+            .pending_ask
+            .as_ref()
+            .filter(|p| p.session_idx == sidx)
+        {
+            let ask_focused = self.input_target == InputTarget::AskCustom;
+            let custom = self.ask_custom.text().to_string();
+            let custom_placeholder = custom.is_empty();
+            let mut ask_box = div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .pl(px(14.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::accent())
+                                .child("❓ 需要你决定"),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .id("ask-skip")
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(theme::raised())
+                                .text_color(theme::muted())
+                                .cursor_pointer()
+                                .hover(|d| d.bg(theme::border()))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                    this.skip_ask(cx);
+                                }))
+                                .child("跳过"),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme::fg())
+                        .child(SharedString::from(ask.question.clone())),
+                );
+            // 选项按钮：第一个是推荐项（绿底），其余灰底；description 小字附在下面
+            let mut opts = div().flex().flex_wrap().items_start().gap_1p5();
+            for (i, opt) in ask.options.iter().enumerate() {
+                let label = opt.label.clone();
+                let mut btn = div()
+                    .id(SharedString::from(format!("ask-opt-{i}")))
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .px_2p5()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.answer_ask(label.clone(), cx);
+                    }));
+                btn = if i == 0 {
+                    btn.bg(theme::green())
+                        .text_color(gpui::rgb(0x000000))
+                        .hover(|d| d.opacity(0.88))
+                } else {
+                    btn.bg(theme::raised())
+                        .text_color(theme::fg())
+                        .hover(|d| d.bg(theme::border()))
+                };
+                btn = btn.child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(SharedString::from(opt.label.clone())),
+                );
+                if !opt.description.is_empty() {
+                    btn = btn.child(
+                        div()
+                            .text_size(px(10.0))
+                            .opacity(0.8)
+                            .max_w(px(220.0))
+                            .child(SharedString::from(opt.description.clone())),
+                    );
+                }
+                opts = opts.child(btn);
+            }
+            ask_box = ask_box.child(opts);
+            if ask.allow_custom {
+                let mut input_row = div().flex().items_center().gap_1p5().child(
+                    div()
+                        .id("ask-custom")
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .px_2p5()
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme::raised())
+                        .border_1()
+                        .border_color(if ask_focused {
+                            theme::accent_line()
+                        } else {
+                            theme::border()
+                        })
+                        .cursor(CursorStyle::IBeam)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(12.0))
+                        .text_color(if custom_placeholder {
+                            theme::dim()
+                        } else {
+                            theme::fg()
+                        })
+                        .track_focus(&self.focus_handle)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.switch_input_target(InputTarget::AskCustom);
+                            let end = this.ask_custom.text().len();
+                            this.ask_custom.move_to(end, false);
+                            window.focus(&this.focus_handle);
+                            cx.notify();
+                        }))
+                        .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
+                            this.on_ask_custom_key(ev, cx);
+                        }))
+                        .child(SharedString::from(if custom_placeholder {
+                            "或输入自定义答案…".to_string()
+                        } else {
+                            fit_text(&custom, 380.0, 12.0)
+                        })),
+                );
+                // 有内容才显示「发送」，否则只有输入框（回车同效）
+                if !custom_placeholder {
+                    input_row = input_row.child(
+                        div()
+                            .id("ask-send")
+                            .px_2p5()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme::accent())
+                            .text_color(gpui::rgb(0x000000))
+                            .cursor_pointer()
+                            .hover(|d| d.opacity(0.88))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                let text = this.ask_custom.text().trim().to_string();
+                                if !text.is_empty() {
+                                    this.answer_ask(text, cx);
+                                }
+                            }))
+                            .child(SharedString::from("发送")),
+                    );
+                }
+                ask_box = ask_box.child(input_row);
+            }
+            col = col.child(ask_box);
+        }
+
         // 待确认时给整组一圈提示色，避免混在灰字里看不见
         if pending_here {
             return div()
@@ -1998,6 +2351,7 @@ fn tool_action(name: &str) -> &'static str {
         "web_search" => "联网搜索",
         "web_fetch" => "抓取网页",
         "run_command" => "执行命令",
+        "ask_user" => "提问",
         _ => "其他",
     }
 }
@@ -2094,8 +2448,11 @@ pub(crate) fn agent_bubble(
     model_label: &str,
     provider_label: &str,
     avail: f32,
+    // 本地工作区根：解析 Markdown 图片的相对路径。
+    root: Option<&std::path::Path>,
     // 复制按钮（元素 id + 回调）；`None` 时不渲染。
     copy: Option<(gpui::ElementId, ClickCb)>,
+    cx: &mut Context<AppState>,
 ) -> impl IntoElement {
     let mut col = div()
         .w_full()
@@ -2108,7 +2465,7 @@ pub(crate) fn agent_bubble(
         col = col.child(div().text_color(theme::dim()).child("…"));
     } else {
         for b in crate::markdown::parse(text) {
-            col = col.child(markdown_block(b, avail));
+            col = col.child(markdown_block(b, avail, root, cx));
         }
     }
     if let Some(c) = code {
@@ -2208,7 +2565,9 @@ pub(crate) fn team_bubble(
     model_label: &str,
     provider_label: &str,
     avail: f32,
+    root: Option<&std::path::Path>,
     copy: Option<(gpui::ElementId, ClickCb)>,
+    cx: &mut Context<AppState>,
 ) -> impl IntoElement {
     let color = theme::role_color(color_idx);
     let initial = if initial.trim().is_empty() {
@@ -2249,7 +2608,7 @@ pub(crate) fn team_bubble(
         body = body.child(div().text_color(theme::dim()).child("…"));
     } else {
         for b in crate::markdown::parse(text) {
-            body = body.child(markdown_block(b, inner_w));
+            body = body.child(markdown_block(b, inner_w, root, cx));
         }
     }
     if let Some(c) = code {
@@ -2336,8 +2695,15 @@ fn fmt_tokens(n: u64) -> String {
 
 /// 渲染一个 Markdown 块。
 ///
-/// `pub(crate)`：技能详情抽屉复用同一套渲染器。
-pub(crate) fn markdown_block(block: crate::markdown::Block, avail: f32) -> gpui::AnyElement {
+/// `pub(crate)`：技能详情抽屉与 Markdown 预览复用同一套渲染器。
+/// `root`：本地工作区根，用于解析图片的相对路径（可为 `None`）。
+/// `cx`：图片点击要开放大查看器，截图/生成的图在这里接回调。
+pub(crate) fn markdown_block(
+    block: crate::markdown::Block,
+    avail: f32,
+    root: Option<&std::path::Path>,
+    cx: &mut Context<AppState>,
+) -> gpui::AnyElement {
     use crate::markdown::Block;
     match block {
         Block::Heading(level, text) => {
@@ -2424,7 +2790,198 @@ pub(crate) fn markdown_block(block: crate::markdown::Block, avail: f32) -> gpui:
                 .into_any_element()
         }
         Block::Rule => div().h(px(1.0)).bg(theme::border()).into_any_element(),
+        Block::Table { headers, aligns, rows } => {
+            table_block(&headers, &aligns, &rows, avail).into_any_element()
+        }
+        Block::Image { alt, src } => image_block(&alt, &src, avail, root, cx),
     }
+}
+
+/// Markdown 图片：本地文件 / data URI 直接渲染，点击进放大查看器；
+/// 网络图片与找不到的路径给一行占位（不报错、不吞掉后面的内容）。
+fn image_block(
+    alt: &str,
+    src: &str,
+    avail: f32,
+    root: Option<&std::path::Path>,
+    cx: &mut Context<AppState>,
+) -> gpui::AnyElement {
+    let max_w = avail.min(560.0);
+    let caption = alt.trim();
+    match crate::artifacts::resolve_image(src, root) {
+        Some(path) => {
+            // 元素 id 只用内容哈希：data URI 可能有几十 KB，不能拼进 id
+            let id = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                src.hash(&mut h);
+                format!("chat-image-{:016x}", h.finish())
+            };
+            let click_path = path.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .id(SharedString::from(id))
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme::border())
+                        .overflow_hidden()
+                        .max_w(px(max_w))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                            this.open_image_view(click_path.clone(), cx);
+                        }))
+                        .child(
+                            img(path)
+                                .max_w_full()
+                                .max_h(px(400.0))
+                                .object_fit(gpui::ObjectFit::Contain),
+                        ),
+                )
+                .when(!caption.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::dim())
+                            .whitespace_nowrap()
+                            .child(SharedString::from(fit_text(caption, max_w, 11.0))),
+                    )
+                })
+                .into_any_element()
+        }
+        None => div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::surface())
+            .text_xs()
+            .text_color(theme::dim())
+            .child("▧")
+            .child(SharedString::from(fit_text(
+                if caption.is_empty() { src } else { caption },
+                (max_w - 40.0).max(80.0),
+                11.0,
+            )))
+            .into_any_element(),
+    }
+}
+
+/// Markdown 表格：表头底色 + 行列分隔线 + 隔行斑马纹。
+///
+/// 列宽按「该列最长内容」估算，总宽超出可用宽度时等比压缩（每列保底
+/// 88px）；单元格内文字复用行内样式与折行，长内容在格内换行。
+fn table_block(
+    headers: &[String],
+    aligns: &[crate::markdown::Align],
+    rows: &[Vec<String>],
+    avail: f32,
+) -> gpui::AnyElement {
+    use crate::markdown::Align;
+    use crate::views::text_fit::char_width_mono;
+
+    let cols = headers
+        .len()
+        .max(rows.iter().map(|r| r.len()).max().unwrap_or(0))
+        .max(1);
+    // 单元格左右内边距 px_2 = 8*2，与下面的 px_2() 保持一致
+    const PAD_X: f32 = 16.0;
+    // 保底宽要能放下「Python」这类 6 个 ASCII 或 3 个汉字，
+    // 否则压缩后短列会被拆词（实测 Rust→Rus/t、Python→Pytho/n）。
+    const MIN_COL: f32 = 88.0;
+
+    let text_at = |list: &[String], c: usize| -> String { list.get(c).cloned().unwrap_or_default() };
+
+    // 自然宽度：内容估算 + 内边距；估算只用可见字符宽度，加粗影响忽略
+    let mut natural = vec![0.0f32; cols];
+    for (c, w) in natural.iter_mut().enumerate() {
+        let mut max_w = 0.0f32;
+        let mut measure = |text: &str| {
+            let t: f32 = text.chars().map(|ch| char_width_mono(ch, BODY_PX)).sum();
+            max_w = max_w.max(t);
+        };
+        measure(&text_at(headers, c));
+        for r in rows {
+            measure(&text_at(r, c));
+        }
+        // 估算值加 12% 余量：等宽字体实际 advance 略高于 0.6em 估算，
+        // 压到刚好等于内容宽时会出现莫名其妙的拆行
+        *w = (max_w * 1.12 + PAD_X).max(MIN_COL);
+    }
+    let natural_total: f32 = natural.iter().sum();
+    let budget = avail.max(240.0);
+    let widths: Vec<f32> = if natural_total > budget {
+        // 等比压缩；压到保底宽仍放不下时接受横向溢出（外层已 overflow_hidden）
+        let scale = budget / natural_total;
+        natural.iter().map(|w| (w * scale).max(MIN_COL)).collect()
+    } else {
+        natural
+    };
+    let total_w: f32 = widths.iter().sum();
+
+    let cell = |text: &str, w: f32, c: usize| {
+        let inner = (w - PAD_X).max(24.0);
+        div()
+            .w(px(w))
+            .px_2()
+            .py_1()
+            .when(c > 0, |d| d.border_l_1().border_color(theme::border()))
+            .child(inline_row_layout(
+                text,
+                inner,
+                BODY_PX,
+                24.0,
+                aligns.get(c).copied().unwrap_or(Align::Left),
+            ))
+    };
+
+    let mut head = div()
+        .flex()
+        .flex_row()
+        .bg(theme::raised())
+        .border_b_1()
+        .border_color(theme::border())
+        .font_weight(FontWeight::BOLD);
+    for c in 0..cols {
+        let w = widths[c];
+        head = head.child(cell(&text_at(headers, c), w, c));
+    }
+
+    let mut body = div().flex().flex_col();
+    for (ri, r) in rows.iter().enumerate() {
+        let mut row = div().flex().flex_row();
+        if ri % 2 == 1 {
+            row = row.bg(theme::surface());
+        }
+        if ri + 1 < rows.len() {
+            row = row.border_b_1().border_color(theme::border());
+        }
+        for c in 0..cols {
+            let w = widths[c];
+            row = row.child(cell(&text_at(r, c), w, c));
+        }
+        body = body.child(row);
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .max_w(px(total_w))
+        .rounded_md()
+        .border_1()
+        .border_color(theme::border())
+        .overflow_hidden()
+        .child(head)
+        .child(body)
+        .into_any_element()
 }
 
 /// 行内样式（`**粗体**` / `` `代码` ``）渲染。
@@ -2433,11 +2990,23 @@ pub(crate) fn markdown_block(block: crate::markdown::Block, avail: f32) -> gpui:
 /// 气泡宽度按内容撑开，flex 拿不到确定宽度，长片段会顶出气泡边界；
 /// 即使给上限，flex 也只在片段之间断行，长段落会挤成「首行只剩一个词」。
 fn inline_row(text: &str, avail: f32, font_px: f32) -> gpui::AnyElement {
+    inline_row_layout(text, avail, font_px, 200.0, crate::markdown::Align::Left)
+}
+
+/// 同 [`inline_row`]，额外控制最小折行宽度与横向对齐。
+/// 表格单元格用：窄列不能被 `max(200)` 的保底宽度顶出格子。
+fn inline_row_layout(
+    text: &str,
+    avail: f32,
+    font_px: f32,
+    min_avail: f32,
+    align: crate::markdown::Align,
+) -> gpui::AnyElement {
     use crate::markdown::InlineKind;
     // 折行宽度由调用方按中栏真实可用宽度传入。之前写死 `CHAT_MAX_W - 8`：
     // 右栏收起时比可用宽度窄一截（每行右侧留一大块空白），展开时又比可用
     // 宽度宽，文字被二次折行后裁掉右边。
-    let avail = avail.max(200.0);
+    let avail = avail.max(min_avail);
     let spans = crate::markdown::inline_spans(text);
     // 字号取调用方的实际渲染字号：估窄了行会超宽被裁，估宽了又会提前折行。
     let lines = crate::markdown::wrap_spans(&spans, avail, font_px);
@@ -2451,6 +3020,12 @@ fn inline_row(text: &str, avail: f32, font_px: f32) -> gpui::AnyElement {
         // 成一列并与后面的元素重叠。`w_full` 把父宽坐实，`max_w` 只做上限。
         .w_full()
         .max_w(px(avail));
+    // 单元格文本对齐：行已按 avail 预折好，改列对齐即可
+    col = match align {
+        crate::markdown::Align::Left => col,
+        crate::markdown::Align::Center => col.items_center(),
+        crate::markdown::Align::Right => col.items_end(),
+    };
     for line in lines {
         // 行内不换行、不压缩：本行已经按 `avail` 预折好，若再让 flex 去
         // 压缩每个 span，各 span 会各自内部折行，行高与列宽全乱、互相重叠。

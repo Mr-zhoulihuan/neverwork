@@ -139,6 +139,7 @@ impl AppState {
                 .border_color(theme::border())
                 .child(self.tab_button("文件", RightTab::Files, cx))
                 .child(self.tab_button("改动", RightTab::Git, cx))
+                .child(self.tab_button("产物", RightTab::Artifacts, cx))
                 .child(self.tab_button("预览", RightTab::Preview, cx))
                 .child(div().flex_1())
                 .child(
@@ -163,6 +164,7 @@ impl AppState {
         col = col.child(match self.right_tab {
             RightTab::Files => self.files_panel(cx).into_any_element(),
             RightTab::Git => self.git_panel(cx).into_any_element(),
+            RightTab::Artifacts => self.artifacts_panel(cx).into_any_element(),
             RightTab::Preview => self.preview_panel(cx).into_any_element(),
         });
 
@@ -211,6 +213,130 @@ impl AppState {
                 this.set_right_tab(tab, cx);
             }))
             .child(SharedString::from(label))
+    }
+
+    /// 右栏「产物」：当前会话 Agent 写入的文件与生成的图片。
+    ///
+    /// 与对话流末尾的产物条同源（`Session.artifacts`）；这里给完整列表，
+    /// 点一行就打开：图片走只读查看器，其余走编辑器。
+    fn artifacts_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use neverwork_core::ArtifactKind;
+
+        let list = self
+            .sessions
+            .get(self.active_session)
+            .map(|s| s.artifacts.as_slice())
+            .unwrap_or(&[]);
+        let mut col = div().flex().flex_col().flex_1().min_h(px(0.0));
+        col = col.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .h(px(34.0))
+                .px_3()
+                .border_b_1()
+                .border_color(theme::border())
+                .text_xs()
+                .text_color(theme::dim())
+                .child("本会话产物")
+                .child(SharedString::from(format!("{} 项", list.len()))),
+        );
+        if list.is_empty() {
+            return col.child(
+                div()
+                    .p_3()
+                    .text_xs()
+                    .line_height(px(20.0))
+                    .text_color(theme::dim())
+                    .child("暂无产物。Agent 写入的文件、生成的图片会自动收集到这里。"),
+            );
+        }
+        let mut rows = div()
+            .id("artifacts-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .flex_1()
+            .overflow_scroll();
+        let mut ordered: Vec<&neverwork_core::Artifact> = list.iter().collect();
+        ordered.reverse();
+        for (i, a) in ordered.iter().enumerate() {
+            let path = a.path.clone();
+            let exists = std::path::Path::new(&a.path).exists();
+            let mut row = div()
+                .id(SharedString::from(format!("art-row-{i}")))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|d| d.bg(theme::raised()))
+                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                    this.open_artifact(&path, cx);
+                }));
+            if a.kind == ArtifactKind::Image && exists {
+                row = row.child(
+                    div()
+                        .size(px(30.0))
+                        .flex_shrink_0()
+                        .rounded_sm()
+                        .overflow_hidden()
+                        .child(
+                            gpui::img(std::path::PathBuf::from(&a.path))
+                                .size(px(30.0))
+                                .object_fit(gpui::ObjectFit::Cover),
+                        ),
+                );
+            } else {
+                row = row.child(file_badge(&a.name));
+            }
+            let sub = if self.remote.is_some() {
+                "远程工作区产物，暂不能打开".to_string()
+            } else if !exists {
+                "文件已不存在".to_string()
+            } else {
+                String::new()
+            };
+            let mut info = div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .whitespace_nowrap()
+                        .child(SharedString::from(fit_text(&a.name, 180.0, 11.0))),
+                );
+            if !sub.is_empty() {
+                info = info.child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme::dim())
+                        .child(SharedString::from(sub)),
+                );
+            }
+            // 行与「保存」按钮并排（不嵌套）：点⤓只导出，不打开文件
+            let save = crate::views::chat::artifact_save_button(
+                SharedString::from(format!("art-row-save-{i}")),
+                a.path.clone(),
+                cx,
+            );
+            rows = rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(row.child(info).flex_1())
+                    .child(save),
+            );
+        }
+        col.child(rows)
     }
 
     fn files_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -812,6 +938,7 @@ impl AppState {
         if let Some(media) = &media {
             match media {
                 MediaPreview::Image(p) => {
+                    let click = p.clone();
                     let thumb = gpui::img(p.clone())
                         .w_full()
                         .max_h(px(360.0))
@@ -821,12 +948,17 @@ impl AppState {
                         .unwrap_or_default();
                     body = body.child(
                         div()
+                            .id("preview-image")
                             .w_full()
                             .rounded_md()
                             .overflow_hidden()
                             .border_1()
                             .border_color(theme::border())
                             .bg(theme::surface())
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
+                                this.open_image_view(click.clone(), cx);
+                            }))
                             .child(thumb),
                     );
                     body = body.child(
@@ -909,7 +1041,12 @@ impl AppState {
                         col = col.child(div().text_color(theme::dim()).child("（空文件）"));
                     } else {
                         for b in crate::markdown::parse(&text) {
-                            col = col.child(crate::views::chat::markdown_block(b, avail));
+                            col = col.child(crate::views::chat::markdown_block(
+                                b,
+                                avail,
+                                self.root.as_deref(),
+                                cx,
+                            ));
                         }
                     }
                     body = body.child(col);

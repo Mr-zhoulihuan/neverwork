@@ -260,6 +260,7 @@ mod tests {
             permission: crate::model::PermissionMode::Standard,
             stage,
             resume_prompt: String::new(),
+            artifacts: Vec::new(),
         }
     }
 

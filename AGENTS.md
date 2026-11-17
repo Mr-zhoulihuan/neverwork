@@ -13,7 +13,7 @@ cargo build -p neverwork        # 只编应用（增量约 6s）
 powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 → dist\NeverWork-0.1.0-setup.exe（dist/ 已 gitignore，需 NSIS；exe 图标由 build.rs 内嵌，图标源 crates\app\assets\neverwork.ico）
 ```
 
-运行期变量：`NW_ROOT`、`NW_REMOTE`（`user@host:/path`）、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_RIGHT_COLLAPSED`/`NW_SESSION_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_PROVIDER_VIEW`（`add`|下标）/`NW_COMPOSER`（`thinking`|`menu`|`permission`）/`NW_PERMISSION`（`read_only`|`plan`|`standard`|`full`）/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_SKILLS_TAB`/`NW_SKILL_QUERY`/`NW_INSTALL_SKILL`/`NW_SESSION_QUERY`/`NW_SESSION_MENU`/`NW_ARCHIVE_OPEN`/`NW_WORKSPACE_POPUP`/`NW_DEMO_STATUS`/`NW_SWITCH_WS`/`NW_ALLOW_MULTI`（=1 绕过单实例互斥量并行多开）；`NW_ASKPASS_MODE`/`NW_ASKPASS_SECRET` 由 ssh 回调应用自身时使用，不要手动设置；密码往返测试用 `NW_ASKPASS_EXE` 指向 `target/debug/neverwork.exe`。
+运行期变量：`NW_ROOT`、`NW_REMOTE`（`user@host:/path`）、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_RIGHT_COLLAPSED`/`NW_RIGHT_TAB`（`files`|`git`|`artifacts`|`preview`）/`NW_SESSION_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_PROVIDER_VIEW`（`add`|下标）/`NW_COMPOSER`（`thinking`|`menu`|`permission`）/`NW_PERMISSION`（`read_only`|`plan`|`standard`|`full`）/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_SKILLS_TAB`/`NW_SKILL_QUERY`/`NW_INSTALL_SKILL`/`NW_SESSION_QUERY`/`NW_SESSION_MENU`/`NW_ARCHIVE_OPEN`/`NW_WORKSPACE_POPUP`/`NW_DEMO_STATUS`/`NW_SWITCH_WS`/`NW_TRACE`（=1 启动即开轨迹页；=0 关）/`NW_TRACE_SELECT`（选中下标）/`NW_TRACE_QUERY`（搜索词）/`NW_ALLOW_MULTI`（=1 绕过单实例互斥量并行多开）；`NW_ASKPASS_MODE`/`NW_ASKPASS_SECRET` 由 ssh 回调应用自身时使用，不要手动设置；密码往返测试用 `NW_ASKPASS_EXE` 指向 `target/debug/neverwork.exe`。
 
 工作区回落：`NW_ROOT` → `settings.last_workspace` → `~/.neverwork/workspace`。**不要**回落到当前目录/向上找 `Cargo.toml`——会把 IDE 自己的仓库当工作区。`last_workspace` 是 `ssh://` 时走远程工作区（本地 `root` 为 `None`）。
 
@@ -25,7 +25,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 
 - 配置在 `~/.neverwork/`：`config.json`（团队）、`settings.json`（偏好，**含 Key 明文**，别提交别外传），均原子写。测试用 `NW_CONFIG_DIR`。
 - **主题必须走 `theme::set_theme_mode()`**，不要在视图里写死颜色——`ui/theme.rs` 的 `PALETTES` 有 9 套完整色板（深色/浅色/跟随系统/Nord/Dracula/One Dark/Solarized 浅深/Gruvbox），写死 `rgb(0x…)` 只会适配其中一套；新增颜色要同步加到每套色板。
 - **API Key 一律脱敏**：导出/同步走 `config::export_all(..., ExportOptions::default())`；界面只显示 `masked_key()`；不要给 `ProviderEntry` 加回 `derive(Debug)`（手写版会打码）。新增 Settings 序列化到文件/日志的路径先确认 Key 不跟着走。
-- `design/`、`pic/` 是设计截图。
+- `design/`、`pic/` 是设计截图（**原有设计图不要动**）。**开发过程产生的测试数据一律放 `E:\AI\ide\pic\`（文件名加 `.tmp_` 前缀，包括验证脚本、验收截图、测试配置目录、临时工作区），开发完成立刻删掉**；代码目录 `NeverWork/` 下不放任何临时文件。
 - 计划冲突以 `gpui-ide-plan-v2.md`（最新）与 README 为准。
 
 ## 输入与交互（改前必读）
@@ -68,6 +68,8 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 
 - **会话权限档位 `PermissionMode`**（`Session.permission`，随会话保存，默认 `standard`）：`read_only`/`plan` 由 `tools::specs_for` 剔除所有 `requires_approval` 工具（含 MCP），agent 循环执行前再拦一次（`PERMISSION_DENIED`，不弹审批）；`plan` 另外靠系统提示要求先出实施计划。`full` 免审批直接执行，但**只免审批**——不得绕过 `ToolContext::resolve`、`.git` 禁写、命令超时/截断。UI 入口是对话框底栏 `permission-chip`，切 `full` 必须二次确认。
 - 团队角色的 `model` 是**展示标签**（`Claude Opus`），不能当模型 id 或据此切厂商——只有全小写真实 id 才算。
 - **运行上限三项（tokens/rounds/seconds）默认 0=不限**，从 settings 读；不要加回常量上限（读中型项目必被掐断）。防失控靠 `MAX_REPEAT=3`（同工具同参数）与手动停止。
+- **验证门禁（`agent_loop` 收尾前）**：本次运行成功改过**代码或构建清单**（`write_file`/`apply_patch`/`multi_patch` 的路径命中 `is_code_path`：.rs/.ts/.py/.go 等源码后缀与 Cargo.toml/package.json/go.mod 等清单）却没有任何成功的构建/测试命令（`run_command` 返回 ok 且命令命中 `is_verify_command` 关键词表：cargo/npm/go/pytest/maven…）时，注入「验证提醒」让模型继续验证，最多拦 `MAX_VERIFY_BLOCKS`=2 次；拦满强制收尾并追加「⚠️ 本次改动未验证」附注（时间/轮数/成本上限收尾同样附注）。**纯文档/数据改动（README.md、settings.json、图片等）不拦**；工作区无构建入口（`can_verify_workspace` 向下探两层找清单，远程工作区恒 false）也不拦——「要不要验证」由机制判定，不交给模型（它会顺手跳过）；别把 README 类改动重新算进 `wrote_code`。用户明确要求不跑命令/拒绝命令属例外，要求模型如实写「未验证」而不是编造。系统提示「工作方式」第 6 条同样区分代码与文档；改验证相关行为先看 `code_path_distinguishes_code_from_docs`/`verify_availability_follows_manifests`/`verify_gate_blocks_only_unverified_writes` 单测。
+- **`ask_user` 交互选择**（关键决策交给用户）：工具定义在 `tools.rs`（question 必填、options 1-4 个、allow_custom 默认 true，`requires_approval=false`，只读/计划档保留）；`agent_loop` 在 repeat 检测后拦截：`validate_ask` → `AgentEvent::AskUser` → flume 阻塞等待（200ms 轮询 cancel、300s 超时按「跳过」）→ 回答以 `ToolResult::ok("用户回答：…")` 回灌后继续。app 侧 `PendingAsk` + `InputTarget::AskCustom`（枚举/`buffer()`/`active_buffer()`/焦点两处共五处同步），卡片在 `chat.rs::tool_steps_group` 与审批卡同位置渲染（第一个选项绿底=推荐，自定义输入行 + 跳过），按钮走 `answer_ask`/`skip_ask`/`commit_ask_custom`。自动化验收用 `NW_ASK_ANSWER=1`（选第一项）或其它文本（自定义回答）；别把 ask_user 改成 `requires_approval=true`，它只是交互不是写操作。
 
 ## 对话区与查找（改前先读）
 
@@ -79,6 +81,11 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 
 - 输入框不再做自动联想（本地历史补全与模型补全都已移除）：不要在 `after_edit`/`on_chat_key` 里挂补全请求，聊天框的 Tab 不做任何事。
 - **思考档位入口默认隐藏**：不常驻输入框底栏，从「＋」菜单（`⚙ 思考 · 档位`）进入滑杆面板；不要再加回右下 chip。面板互斥（开一个关另一个）与拖动实现见上一条。
 - 查找替换在 `app/src/find.rs`（纯逻辑）+ `views/editor.rs::find_bar`（UI），按字节区间匹配，中文安全。
+- **回答正文走 `markdown.rs` 子集**：标题/列表/代码围栏/引用/分隔线/**表格** + 行内粗体/斜体/代码/链接（`views/chat.rs::markdown_block`）。表格列宽按 `char_width_mono×1.12` 估算、每列保底 88px——**别去掉余量与保底**，否则 `Rust`/`Python` 会被拆成两行（实测踩过）；单元格文本走 `inline_row_layout`（可指定最小折行宽度与列对齐）。
+- **数据块自动渲染**（`markdown.rs::data_block`）：`csv`/`tsv` 围栏 → 表格（≥2 行、列数一致）；`json` 围栏 → serde 美化（≤64KB）；**未标注**围栏只在严格特征下才猜（JSON 以 `{`/`[` 开头；CSV/TSV ≥3 行且格子 ≤40 字符、无代码符号与中文句号），其它语言不猜——防止把普通代码误渲染成表格。**图片行**：整行 `![alt](src)` → `Block::Image`，`artifacts::resolve_image` 支持绝对路径 / 工作区相对路径 / `data:image/...;base64`（解码落 `<config_dir>/artifacts/`，内容哈希幂等）；http(s) 不抓取，给占位。改这两处先跑 `markdown.rs` 里的 9 个相关单测。
+- **产物（Artifact）**：`core` 的 `Artifact{name,path,kind,at,thread}` 挂在 `Session.artifacts`（`#[serde(default)]`，旧会话兼容）。收集双通道——写工具成功（`state.rs::written_paths` 解 `write_file`/`apply_patch` 的 path 与 `multi_patch` 的 `edits[].path`）与每轮收尾扫描 Agent 正文图片（`markdown::extract_images` + `resolve_image`）。UI：对话流末尾「产物 · N」条（最新 8 个，点 `open_artifact`，远程/丢失文件给 notice）+ 右栏第四 tab「产物」（完整列表）。收尾登记后必须 `chat_scroll_dirty.set(true)`，否则新 footer 落在视口外（别删）。右栏默认收起（`right_default_collapsed()`，切/建会话同样回到收起），`NW_RIGHT_COLLAPSED=0` 验证时强制展开、`NW_RIGHT_TAB=artifacts` 直达产物面板。协议层原生图片输出（Gemini inlineData 等）未接，模型出图靠 Markdown 图片 / data URI 承载。
+- **产物导出**：右栏产物行、对话底部 chip、图片查看器都带 ⤓（`state.rs::export_artifact` + `chat.rs::artifact_save_button`）：复制到 `<工作区>/artifacts/`（无工作区 → 配置目录 `artifacts/exports/`），重名追加 ` (2)`；保存按钮必须与卡片/行**并排**而非嵌套（嵌套时点击区重叠，点保存会连带打开产物）。图片查看器整层从 `theme::TITLEBAR_H` 下方开始，否则顶栏按钮会命中系统最小化热区。
+- **对话轨迹页**（`views/trace.rs`）：标题行「对话 | 轨迹」两段页签（不是浮层），打开后整区替换对话内容（状态条/消息流/输入框都不渲染）；列表是 USER/ASSISTANT/TOOL/HANDOFF 彩色标签 + Turn 标记，点条目出右侧 430px 详情分栏（Summary/Payload/Result/Timing；Payload 取 `ToolCall.arguments` 并 serde 美化、Result 取 `output`、Timing 取 Agent 的 elapsed/tokens）。数据全部来自 `Session.messages`——没有 system prompt / CONTEXT / 时间戳，**不要画假甘特图或补不存在的记录**。Esc 或切「对话」关闭并清选中与搜索词。搜索框走 `InputTarget::TraceSearch`：新增输入框要同步 `buffer()`/`buffer_mut()`/`active_buffer()`/`active_buffer_mut()` 与焦点 `want`/`handle` 四处。
 
 ## 代码现状
 

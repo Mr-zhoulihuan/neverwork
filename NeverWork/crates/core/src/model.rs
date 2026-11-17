@@ -398,6 +398,101 @@ pub enum AttachmentKind {
     Text,
 }
 
+/// Agent 生成的一个产物（写入的文件、生成的图片）。
+///
+/// 对话输出底部的「产物」条与右栏「产物」面板共用这份数据：
+/// 只记路径与类型，缩略图/内容在渲染时再读。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    /// 展示名（文件名）。
+    pub name: String,
+    /// 本地绝对路径；远程会话暂为工作区相对路径。
+    pub path: String,
+    /// 产物类型。
+    #[serde(default)]
+    pub kind: ArtifactKind,
+    /// 生成时间（Unix 秒）。列表按它倒序。
+    #[serde(default)]
+    pub at: u64,
+    /// 生成它的角色序号（工具消息的 thread），0 = 未知。
+    #[serde(default)]
+    pub thread: usize,
+}
+
+impl Artifact {
+    /// 从路径构造：名字取最后一段，类型按扩展名判断。
+    pub fn from_path(path: &str, at: u64, thread: usize) -> Self {
+        let name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path)
+            .to_string();
+        Self {
+            name,
+            path: path.to_string(),
+            kind: ArtifactKind::of_path(path),
+            at,
+            thread,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    /// 文本 / 代码 / 数据文件。
+    #[default]
+    File,
+    /// 图片。
+    Image,
+}
+
+impl ArtifactKind {
+    /// 按扩展名判断产物类型；图片集合与媒体查看器一致
+    ///（gpui 的 `img()` 能解码的全部格式 + SVG）。
+    pub fn of_path(path: &str) -> Self {
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if is_image_extension(&ext) {
+            ArtifactKind::Image
+        } else {
+            ArtifactKind::File
+        }
+    }
+}
+
+/// 图片扩展名（小写、不含点）：`img()` 能解码的全部格式。
+pub fn is_image_extension(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "jpe"
+            | "jfif"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "ico"
+            | "svg"
+            | "tif"
+            | "tiff"
+            | "tga"
+            | "qoi"
+            | "pnm"
+            | "pbm"
+            | "pgm"
+            | "ppm"
+            | "hdr"
+            | "exr"
+            | "dds"
+            | "ff"
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub kind: MessageKind,
@@ -868,6 +963,11 @@ pub struct Session {
     /// 中断那一轮的原始指令；续跑时告诉模型「原来要做的是这件事」。
     #[serde(default)]
     pub resume_prompt: String,
+
+    // ===== 产物（旧会话为空） =====
+    /// Agent 写入的文件与生成的图片。对话底部与右栏「产物」面板共用。
+    #[serde(default)]
+    pub artifacts: Vec<Artifact>,
 }
 
 impl Session {
@@ -1289,6 +1389,7 @@ mod session_list_tests {
             permission: PermissionMode::Standard,
             stage: TaskStage::Idle,
             resume_prompt: String::new(),
+            artifacts: Vec::new(),
         }
     }
 

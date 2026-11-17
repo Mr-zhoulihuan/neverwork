@@ -18,6 +18,8 @@ gpui.workspace = true
 neverwork-core = { path = "../core" }
 neverwork-ui = { path = "../ui" }
 neverwork-agent = { path = "../agent" }
+# data URI 图片（模型把图直接画进正文）解码缓存用。
+base64 = "0.22"
 flume = "0.11"
 # 与 gpui 共用同一版本/特性：用于「未知扩展名文件是不是图片」的内容探测。
 image = "0.25"
