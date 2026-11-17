@@ -189,14 +189,19 @@ fn system_is_light() -> bool {
     #[cfg(windows)]
     {
         // HKEY_CURRENT_USER\...\Themes\Personalize\AppsUseLightTheme
-        let out = std::process::Command::new("reg")
-            .args([
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-                "/v",
-                "AppsUseLightTheme",
-            ])
-            .output();
+        let mut cmd = std::process::Command::new("reg");
+        cmd.args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            "/v",
+            "AppsUseLightTheme",
+        ]);
+        {
+            use std::os::windows::process::CommandExt;
+            // 无窗口应用里子进程默认会弹控制台；CREATE_NO_WINDOW 压住它。
+            cmd.creation_flags(0x0800_0000);
+        }
+        let out = cmd.output();
         if let Ok(o) = out {
             let text = String::from_utf8_lossy(&o.stdout);
             // 输出形如 `    AppsUseLightTheme    REG_DWORD    0x1`

@@ -1453,9 +1453,15 @@ impl AppState {
             return;
         };
 
-        let out = std::process::Command::new("git")
-            .args(["-C", &repo.to_string_lossy(), "rev-list", "--count", "HEAD..origin/main"])
-            .output();
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["-C", &repo.to_string_lossy(), "rev-list", "--count", "HEAD..origin/main"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // 无窗口应用里子进程默认会弹控制台；CREATE_NO_WINDOW 压住它。
+            cmd.creation_flags(0x0800_0000);
+        }
+        let out = cmd.output();
 
         let status = match out {
             Ok(o) if o.status.success() => {
@@ -1498,9 +1504,15 @@ impl AppState {
             cx.notify();
             return;
         };
-        let out = std::process::Command::new("git")
-            .args(["-C", &repo.to_string_lossy(), "pull", "--ff-only"])
-            .output();
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["-C", &repo.to_string_lossy(), "pull", "--ff-only"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // 无窗口应用里子进程默认会弹控制台；CREATE_NO_WINDOW 压住它。
+            cmd.creation_flags(0x0800_0000);
+        }
+        let out = cmd.output();
         let msg = match out {
             Ok(o) if o.status.success() => {
                 let text = String::from_utf8_lossy(&o.stdout);

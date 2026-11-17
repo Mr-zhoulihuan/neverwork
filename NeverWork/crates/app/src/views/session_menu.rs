@@ -267,7 +267,9 @@ impl AppState {
 }
 
 /// 一行菜单项：左侧语义图标 + 文案；`active` 用底色标出当前状态。
-fn menu_row(
+///
+/// 文件树菜单 / 编辑器标签菜单也复用这三个绘制函数，保持所有菜单同形。
+pub(crate) fn menu_row(
     id: String,
     label: String,
     label_fg: Rgba,
@@ -308,7 +310,7 @@ fn menu_row(
 }
 
 /// 单字符语义图标（置顶/分类/重命名/导出/删除/状态行用）。
-fn menu_glyph(glyph: &'static str, color: Rgba) -> AnyElement {
+pub(crate) fn menu_glyph(glyph: &'static str, color: Rgba) -> AnyElement {
     div()
         .text_size(px(15.0))
         .text_color(color)
@@ -330,6 +332,6 @@ fn menu_check(color: Rgba) -> AnyElement {
         .into_any_element()
 }
 
-fn menu_divider() -> impl IntoElement {
+pub(crate) fn menu_divider() -> impl IntoElement {
     div().h(px(1.0)).mx_1().my_1().bg(theme::border())
 }

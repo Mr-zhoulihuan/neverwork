@@ -81,13 +81,7 @@ impl AppState {
         match self.input_target {
             InputTarget::Chat => &mut self.chat,
             InputTarget::Editor => &mut self.editor,
-            InputTarget::Workspace => {
-                if self.ws_pw_focus {
-                    &mut self.ws_pw_input
-                } else {
-                    &mut self.ws_input
-                }
-            }
+            InputTarget::Workspace => &mut self.ws_input,
             InputTarget::SessionSearch => &mut self.session_search,
             InputTarget::RenameSession => &mut self.rename_buf,
             InputTarget::RolePrompt => &mut self.role_prompt_buf,
@@ -100,13 +94,7 @@ impl AppState {
         match self.input_target {
             InputTarget::Chat => &self.chat,
             InputTarget::Editor => &self.editor,
-            InputTarget::Workspace => {
-                if self.ws_pw_focus {
-                    &self.ws_pw_input
-                } else {
-                    &self.ws_input
-                }
-            }
+            InputTarget::Workspace => &self.ws_input,
             InputTarget::SessionSearch => &self.session_search,
             InputTarget::RenameSession => &self.rename_buf,
             InputTarget::RolePrompt => &self.role_prompt_buf,

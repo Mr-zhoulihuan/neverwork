@@ -80,16 +80,22 @@ impl GitOp {
 
 /// 跑一条 git，返回 (是否成功, stdout+stderr)。
 fn run_raw(dir: &Path, args: &[&str]) -> (bool, String) {
-    let out = Command::new("git")
-        .arg("-C")
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
         .env("GIT_PAGER", "cat")
         .env("GIT_TERMINAL_PROMPT", "0")
         // 不弹编辑器（否则提交/分支操作会挂住后台线程）
         .env("GIT_EDITOR", "true")
-        .env("GIT_MERGE_AUTOEDIT", "no")
-        .output();
+        .env("GIT_MERGE_AUTOEDIT", "no");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 无窗口应用里子进程默认会弹控制台；CREATE_NO_WINDOW 压住它。
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output();
 
     match out {
         Ok(o) => {

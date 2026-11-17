@@ -73,7 +73,7 @@ impl AppState {
                     .py_4()
                     .text_xs()
                     .text_color(theme::dim())
-                    .child("还没有最近工作区，点下方「打开文件夹」或「连接远程 SSH」开始"),
+                    .child("还没有最近工作区，点下方「打开文件夹」开始"),
             );
         }
         for i in order {
@@ -304,163 +304,7 @@ impl AppState {
         }
         card = card.child(list);
 
-        // ---- 连接远程 SSH：内联输入（回车 / 「连接」都生效）----
-        if self.ws_remote_open {
-            let value = self.ws_input.text().to_string();
-            let pw = self.ws_pw_input.text().to_string();
-            let pw_focus = self.ws_pw_focus;
-            let err = self.ws_remote_err.clone();
-            let placeholder = if value.is_empty() {
-                "user@host:/abs/path（密钥优先）".to_string()
-            } else {
-                crate::views::text_fit::fit_text(&value, 320.0, 14.0)
-            };
-            // 密码框：失焦时只显示圆点，不把明文挂在屏幕上；空串显示占位提示。
-            let pw_display = if pw.is_empty() {
-                "密码（可选，留空用 ssh 密钥）".to_string()
-            } else if pw_focus {
-                crate::views::text_fit::fit_text(&pw, 320.0, 14.0)
-            } else {
-                "•".repeat(pw.chars().count().min(32))
-            };
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .px_3()
-                    .py_2()
-                    .border_t_1()
-                    .border_color(theme::border())
-                    // 键盘只挂在这个容器上：连接串与密码共用 ws_focus，
-                    // 两个 on_key_down 会同时收到同一次回车。
-                    .track_focus(&self.ws_focus)
-                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
-                        this.on_workspace_key(ev, cx);
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_xs()
-                                    .text_color(theme::yellow())
-                                    .child("⇅"),
-                            )
-                            .child(
-                                div()
-                                    .id("ws-remote-input")
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_sm()
-                                    .text_color(if value.is_empty() {
-                                        theme::dim()
-                                    } else {
-                                        theme::fg()
-                                    })
-                                    .cursor(gpui::CursorStyle::IBeam)
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        cx.stop_propagation();
-                                        this.ws_pw_focus = false;
-                                        this.switch_input_target(InputTarget::Workspace);
-                                        window.focus(&this.ws_focus);
-                                        cx.notify();
-                                    }))
-                                    .child(SharedString::from(placeholder)),
-                            )
-                            .child(
-                                div()
-                                    .id("ws-remote-connect")
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(theme::accent())
-                                    .text_xs()
-                                    .text_color(theme::bg())
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                        cx.stop_propagation();
-                                        this.connect_remote_from_input(cx);
-                                    }))
-                                    .child("连接"),
-                            )
-                            .child(
-                                div()
-                                    .id("ws-remote-cancel")
-                                    .px_1()
-                                    .rounded_sm()
-                                    .text_xs()
-                                    .text_color(theme::dim())
-                                    .cursor_pointer()
-                                    .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                        cx.stop_propagation();
-                                        this.close_remote_workspace_input(cx);
-                                    }))
-                                    .child("✕"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .w(px(14.0))
-                                    .flex_shrink_0()
-                                    .text_xs()
-                                    .text_color(theme::dim())
-                                    .child("∗"),
-                            )
-                            .child(
-                                div()
-                                    .id("ws-remote-pw")
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_sm()
-                                    .text_color(if pw.is_empty() {
-                                        theme::dim()
-                                    } else {
-                                        theme::fg()
-                                    })
-                                    .cursor(gpui::CursorStyle::IBeam)
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        cx.stop_propagation();
-                                        this.ws_pw_focus = true;
-                                        this.switch_input_target(InputTarget::Workspace);
-                                        window.focus(&this.ws_focus);
-                                        cx.notify();
-                                    }))
-                                    .child(SharedString::from(pw_display)),
-                            ),
-                    )
-                    .when_some(err, |d, e| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::red())
-                                .child(SharedString::from(crate::views::text_fit::fit_text(
-                                    &e, 470.0, 12.0,
-                                ))),
-                        )
-                    })
-                    .child(
-                        div().text_xs().text_color(theme::dim()).child(
-                            "密码只保存在内存（不写配置、不进命令行）；回车即连接",
-                        ),
-                    ),
-            );
-        }
-
-        // ---- 底部：打开新文件夹 / 手动路径 / 连接远程 + 提示 ----
+        // ---- 底部：打开新文件夹 / 手动路径 + 提示 ----
         // 三个按钮 + 提示一行放不下（卡宽 520），按钮与提示分两行。
         card = card.child(
             div()
@@ -512,34 +356,13 @@ impl AppState {
                                     this.open_workspace_folder_input(cx);
                                 }))
                                 .child("⌨ 手动输入路径…"),
-                        )
-                        .child(
-                            div()
-                                .id("ws-remote")
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(theme::with_alpha(0xf59e0b, 0.35))
-                                .text_xs()
-                                .text_color(theme::yellow())
-                                .cursor_pointer()
-                                .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
-                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                    cx.stop_propagation();
-                                    this.open_remote_workspace_input(cx);
-                                }))
-                                .child("⇅ 连接远程 SSH…"),
                         ),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme::dim())
-                        .child("✕ 只从列表移除，不删磁盘目录；远程只用密钥 / ssh-agent"),
+                        .child("✕ 只从列表移除，不删磁盘目录"),
                 ),
         );
 

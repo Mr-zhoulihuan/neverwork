@@ -25,6 +25,112 @@ mod state;
 mod text_buffer;
 mod views;
 
+/// 单实例：命名互斥量 + 把已有实例的窗口带到前台。
+///
+/// 第二个实例不再开窗口（配置/会话文件、SSH 监听都不该跑两份），
+/// 而是找到第一个进程的主窗口激活后自己退出。互斥量名用 `Local\` 前缀，
+/// 每个登录会话一份，多用户互不影响。
+#[cfg(windows)]
+mod single_instance {
+    use std::ffi::{c_void, OsStr};
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateMutexW(attr: *mut c_void, owner: i32, name: *const u16) -> *mut c_void;
+        fn GetLastError() -> u32;
+        fn CloseHandle(h: *mut c_void) -> i32;
+        fn EnumWindows(cb: extern "system" fn(*mut c_void, isize) -> i32, lparam: isize) -> i32;
+        fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+        fn IsWindowVisible(hwnd: *mut c_void) -> i32;
+        fn ShowWindow(hwnd: *mut c_void, cmd: i32) -> i32;
+        fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
+        fn GetCurrentProcessId() -> u32;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn QueryFullProcessImageNameW(
+            proc: *mut c_void,
+            flags: u32,
+            buf: *mut u16,
+            size: *mut u32,
+        ) -> i32;
+    }
+
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const SW_RESTORE: i32 = 9;
+
+    struct FindCtx {
+        self_pid: u32,
+        found: *mut c_void,
+    }
+
+    /// 枚举顶层可见窗口，按进程 exe 名（neverwork.exe）认自己人。
+    /// 不靠窗口标题：无边框自绘窗口的标题不可靠，进程名才稳。
+    extern "system" fn enum_cb(hwnd: *mut c_void, lparam: isize) -> i32 {
+        unsafe {
+            let ctx = &mut *(lparam as *mut FindCtx);
+            if IsWindowVisible(hwnd) == 0 {
+                return 1;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == 0 || pid == ctx.self_pid {
+                return 1;
+            }
+            let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if proc.is_null() {
+                return 1;
+            }
+            let mut buf = [0u16; 512];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(proc, 0, buf.as_mut_ptr(), &mut len);
+            CloseHandle(proc);
+            if ok == 0 {
+                return 1;
+            }
+            let name = String::from_utf16_lossy(&buf[..len as usize]).to_ascii_lowercase();
+            if name.ends_with("neverwork.exe") {
+                ctx.found = hwnd;
+                return 0; // 找到就停
+            }
+            1
+        }
+    }
+
+    /// `true` = 首个实例，继续启动；`false` = 已有实例（已尽量激活其窗口），本进程退出。
+    pub fn acquire_or_activate() -> bool {
+        let name: Vec<u16> = OsStr::new("Local\\NeverWork-SingleInstance-v1")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            // handle 故意不关：进程活着互斥量就在，退出时系统自动回收。
+            let h = CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr());
+            if h.is_null() || GetLastError() != ERROR_ALREADY_EXISTS {
+                return true;
+            }
+            let mut ctx = FindCtx {
+                self_pid: GetCurrentProcessId(),
+                found: std::ptr::null_mut(),
+            };
+            EnumWindows(enum_cb, &mut ctx as *mut FindCtx as isize);
+            if !ctx.found.is_null() {
+                ShowWindow(ctx.found, SW_RESTORE);
+                SetForegroundWindow(ctx.found);
+            }
+            false
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod single_instance {
+    /// 非 Windows 暂不限制多开（主目标平台是 Windows）。
+    pub fn acquire_or_activate() -> bool {
+        true
+    }
+}
+
 use gpui::prelude::*;
 use gpui::{px, size, App, AppContext, Application, Bounds, Context, Render, Window, WindowBounds, WindowOptions, point};
 
@@ -107,6 +213,14 @@ fn main() {
         if let Ok(secret) = std::env::var("NW_ASKPASS_SECRET") {
             println!("{secret}");
         }
+        return;
+    }
+
+    // 单实例：已有实例在跑就激活它的窗口并退出。必须在 askpass 分支之后
+    // （ssh 密码回调会反复启动本进程）。`NW_ALLOW_MULTI=1` 仅供自动化验证并行多开。
+    if std::env::var("NW_ALLOW_MULTI").as_deref() != Ok("1")
+        && !single_instance::acquire_or_activate()
+    {
         return;
     }
 

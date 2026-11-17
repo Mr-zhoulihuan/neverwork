@@ -138,7 +138,6 @@ impl AppState {
                 .border_b_1()
                 .border_color(theme::border())
                 .child(self.tab_button("文件", RightTab::Files, cx))
-                .child(self.tab_button("Git", RightTab::Git, cx))
                 .child(self.tab_button("预览", RightTab::Preview, cx))
                 .child(div().flex_1())
                 .child(
@@ -178,7 +177,11 @@ impl AppState {
                 .border_color(theme::border())
                 .text_xs()
                 .text_color(theme::dim())
-                .child("⎇ 本地")
+                .child(if self.remote.is_some() {
+                    "⇅ 远程"
+                } else {
+                    "▤ 本地"
+                })
                 .child(SharedString::from(format!("{} 项", self.files.len()))),
         );
 
@@ -362,14 +365,33 @@ impl AppState {
                 }
             } else if remote {
                 let rel = f.path.clone();
+                let rel_menu = f.path.clone();
                 row.on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
                     this.open_remote_file(rel.clone(), cx);
                 }))
+                // 右键：添加到会话 / 复制路径（远程文件没有本地副本，添加项置灰）
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, ev: &gpui::MouseDownEvent, _w, cx| {
+                        cx.stop_propagation();
+                        let at = (ev.position.x.into(), ev.position.y.into());
+                        this.open_file_menu(None, Some(rel_menu.clone()), false, at, cx);
+                    }),
+                )
             } else {
                 let path = abs.clone();
+                let abs_menu = abs.clone();
                 row.on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
                     this.open_file(path.clone(), cx);
                 }))
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, ev: &gpui::MouseDownEvent, _w, cx| {
+                        cx.stop_propagation();
+                        let at = (ev.position.x.into(), ev.position.y.into());
+                        this.open_file_menu(Some(abs_menu.clone()), None, false, at, cx);
+                    }),
+                )
             };
             tree = tree.child(row);
         }

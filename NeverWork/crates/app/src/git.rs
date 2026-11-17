@@ -148,15 +148,20 @@ pub fn repo_root(dir: &Path) -> Option<PathBuf> {
 
 /// 跑一条 git 命令，成功返回 stdout。
 fn run(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
         // 关掉分页与颜色，否则输出里会夹 ANSI 码
         .env("GIT_PAGER", "cat")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .ok()?;
+        .env("GIT_TERMINAL_PROMPT", "0");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 无窗口应用里子进程默认会弹控制台；CREATE_NO_WINDOW 压住它。
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }

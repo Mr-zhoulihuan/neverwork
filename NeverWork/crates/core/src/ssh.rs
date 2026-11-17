@@ -547,6 +547,12 @@ pub fn run_ssh(
         Stdio::null()
     });
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 无窗口应用里子进程默认会弹控制台；CREATE_NO_WINDOW 压住它。
+        cmd.creation_flags(0x0800_0000);
+    }
 
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {

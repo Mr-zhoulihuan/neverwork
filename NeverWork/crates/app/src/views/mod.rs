@@ -4,6 +4,7 @@
 
 pub(crate) mod chat;
 pub(crate) mod editor;
+pub(crate) mod file_menu;
 pub(crate) mod files;
 pub(crate) mod market_detail;
 pub(crate) mod model_picker;

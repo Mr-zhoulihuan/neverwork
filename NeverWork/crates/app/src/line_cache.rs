@@ -62,9 +62,14 @@ impl LineCache {
         let mut spans = Vec::new();
         let mut acc = 0usize;
         starts.push(0);
+        // 跨行状态（块注释 / 三引号 / 反引号字符串）逐行传下去：
+        // 否则注释或字符串的第二行起会失去颜色。
+        let mut state = highlight::LineState::default();
         for line in text.split('\n') {
             texts.push(Rc::from(line));
-            spans.push(Rc::new(highlight::highlight_line(line, lang)));
+            spans.push(Rc::new(highlight::highlight_line_stateful(
+                line, lang, &mut state,
+            )));
             acc += line.len() + 1;
             starts.push(acc);
         }
@@ -130,5 +135,16 @@ mod tests {
         let mut cache = LineCache::new();
         let lines = cache.sync("", Lang::Rust);
         assert_eq!(lines.line_count(), 1);
+    }
+
+    #[test]
+    fn multiline_comment_keeps_state_across_lines() {
+        let mut cache = LineCache::new();
+        let lines = cache.sync("/* a\nb */ let x = 1;", Lang::Rust);
+        let second = &lines.spans[1];
+        assert_eq!(second[0].tok, crate::highlight::Tok::Comment);
+        assert!(second
+            .iter()
+            .any(|s| s.tok == crate::highlight::Tok::Keyword && s.text == "let"));
     }
 }

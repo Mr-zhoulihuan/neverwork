@@ -240,6 +240,18 @@ pub enum RightTab {
     Preview,
 }
 
+/// 文件树右键菜单的目标（本地绝对路径或远程相对路径）与弹出坐标。
+#[derive(Clone)]
+pub struct FileMenuTarget {
+    /// 本地文件绝对路径；远程条目为 `None`。
+    pub abs: Option<PathBuf>,
+    /// 远程文件相对路径；本地条目为 `None`。
+    pub rel: Option<String>,
+    pub is_dir: bool,
+    /// 鼠标位置（逻辑像素），clamp 在渲染侧做。
+    pub at: (f32, f32),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
     Chat,
@@ -247,7 +259,6 @@ pub enum Command {
     Save,
     RefreshTree,
     NewSession,
-    Changes,
     Preview,
     SwitchWorkspace,
     FocusMode,
@@ -271,7 +282,6 @@ impl Command {
             (Command::Save, "保存当前文件", "Ctrl+S"),
             (Command::RefreshTree, "刷新文件树", ""),
             (Command::NewSession, "新建会话", ""),
-            (Command::Changes, "查看 Git 改动", ""),
             (Command::Preview, "预览当前文件", ""),
             (Command::SwitchWorkspace, "切换工作区…", ""),
             (Command::FocusMode, "专注模式（隐藏侧栏）", ""),
@@ -355,18 +365,14 @@ pub struct AppState {
     pub rename_buf: TextBuffer,
     /// 工作区管理器浮层是否打开。
     pub workspace_popup: bool,
+    /// 文件树右键菜单（目标 + 弹出坐标）。
+    pub file_menu: Option<FileMenuTarget>,
+    /// 编辑器标签右键菜单的弹出坐标。
+    pub tab_menu_at: Option<(f32, f32)>,
     /// 正在重命名的工作区下标（`settings.workspaces` 的下标）。
     pub ws_rename: Option<usize>,
-    /// 工作区管理器里的「连接远程 SSH」输入行是否展开。
-    pub ws_remote_open: bool,
-    /// 远程连接/探测失败原因（就地显示在管理器里，不关输入行）。
-    pub ws_remote_err: Option<String>,
     /// 远程密码：只在内存里（每条 ssh 命令经 `SSH_ASKPASS` 传），不写配置、不进日志。
     pub remote_pw: Option<String>,
-    /// 远程输入行的密码缓冲区（连接成功后转进 `remote_pw` 并清空）。
-    pub ws_pw_input: TextBuffer,
-    /// 远程输入行焦点是否在密码框（复用 `InputTarget::Workspace`）。
-    pub ws_pw_focus: bool,
 
     // ===== 视图 =====
     pub center: CenterView,
@@ -1025,12 +1031,10 @@ impl AppState {
             rename_session: None,
             rename_buf: TextBuffer::single_line(),
             workspace_popup: false,
+            file_menu: None,
+            tab_menu_at: None,
             ws_rename: None,
-            ws_remote_open: false,
-            ws_remote_err: None,
             remote_pw: None,
-            ws_pw_input: TextBuffer::single_line(),
-            ws_pw_focus: false,
             center: initial_view(),
             settings_tab: initial_settings_tab(),
             right_tab: RightTab::Files,
@@ -2065,17 +2069,14 @@ impl AppState {
         self.remote_gen += 1;
         self.remote_conn_gen += 1;
         self.remote_open_gen += 1;
-        self.ws_remote_open = false;
-        self.ws_remote_err = None;
         // 密码不留到本地工作区：那是另一台机器的凭据
         self.remote_pw = None;
-        self.ws_pw_input.reset("");
-        self.ws_pw_focus = false;
         // 关闭路径行后把输入目标交回正文：目标留着 Workspace，
         // 焦点会一直挂在只在该行渲染时才存在的句柄上，打字/回车全部失灵。
         self.restore_input_target();
         self.notice = Some(format!("已切换到 {root_str}"));
-        self.refresh_git(cx);
+        self.reset_git_state();
+        cx.notify();
     }
 
     // ===== 远程工作区 =====
@@ -2124,7 +2125,6 @@ impl AppState {
                             if let Some(w) = &mut this.workspace {
                                 w.online = true;
                             }
-                            this.ws_remote_err = None;
                             this.refresh_remote_tree(cx);
                         }
                         Err(e) => {
@@ -2210,7 +2210,7 @@ impl AppState {
     /// 连一个远程工作区：先探测（目录存在 / 认证可用），成功才真正切过去。
     ///
     /// `password` 只在内存里流转，不写配置；留空时走密钥 / ssh-agent。
-    /// 失败后输入行会就地展开：上面是连接串，下面是密码，改完直接重试。
+    /// 入口只剩「最近工作区」里的远程条目（接口已在管理器里移除）。
     pub(crate) fn connect_remote(
         &mut self,
         target: neverwork_core::SshTarget,
@@ -2218,11 +2218,10 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         if self.streaming {
-            self.ws_remote_err = Some("正在生成，先停止再切换工作区".into());
+            self.notice = Some("正在生成，先停止再切换工作区".into());
             cx.notify();
             return;
         }
-        self.ws_remote_err = None;
         self.notice = Some(format!("正在连接 {}…", target.display()));
         self.remote_conn_gen += 1;
         let conn_gen = self.remote_conn_gen;
@@ -2245,18 +2244,7 @@ impl AppState {
                     match msg {
                         Ok(()) => this.enter_remote_workspace(target, password, cx),
                         Err(e) => {
-                            this.ws_remote_err = Some(e.clone());
                             this.notice = Some(format!("连接远程失败：{e}"));
-                            // 从最近列表点的远程项：就地展开输入行，带着连接串/密码方便改
-                            if this.workspace_popup {
-                                this.ws_remote_open = true;
-                                this.ws_input.reset(&target.display());
-                                if let Some(pw) = &password {
-                                    this.ws_pw_input.reset(pw);
-                                }
-                                this.ws_pw_focus = password.is_some();
-                                this.input_target = InputTarget::Workspace;
-                            }
                             cx.notify();
                         }
                     }
@@ -2264,48 +2252,6 @@ impl AppState {
             }
         })
         .detach();
-        cx.notify();
-    }
-
-    /// 工作区管理器里「连接远程 SSH…」输入行：回车 / 按钮都到这里。
-    pub(crate) fn connect_remote_from_input(&mut self, cx: &mut Context<Self>) {
-        let input = self.ws_input.text().trim().to_string();
-        if input.is_empty() {
-            self.ws_remote_err = Some("请输入 user@host:/path".into());
-            cx.notify();
-            return;
-        }
-        let pw = self.ws_pw_input.text().trim().to_string();
-        let pw = (!pw.is_empty()).then_some(pw);
-        match neverwork_core::SshTarget::parse(&input) {
-            Ok(t) => self.connect_remote(t, pw, cx),
-            Err(e) => {
-                self.ws_remote_err = Some(e);
-                cx.notify();
-            }
-        }
-    }
-
-    /// 展开「连接远程 SSH」输入行。
-    pub(crate) fn open_remote_workspace_input(&mut self, cx: &mut Context<Self>) {
-        self.ws_remote_open = true;
-        self.ws_remote_err = None;
-        self.ws_rename = None;
-        self.ws_input.reset("");
-        self.ws_pw_input.reset("");
-        self.ws_pw_focus = false;
-        self.input_target = InputTarget::Workspace;
-        cx.notify();
-    }
-
-    /// 收起远程输入行（不再重试，错误一起清掉）。
-    pub(crate) fn close_remote_workspace_input(&mut self, cx: &mut Context<Self>) {
-        self.ws_remote_open = false;
-        self.ws_remote_err = None;
-        self.ws_input.reset("");
-        self.ws_pw_input.reset("");
-        self.ws_pw_focus = false;
-        self.restore_input_target();
         cx.notify();
     }
 
@@ -2340,8 +2286,6 @@ impl AppState {
         self.remote = Some(target.clone());
         // 密码只活在内存：后续树/读写/Agent 工具每次 ssh 都带上它
         self.remote_pw = password.filter(|p| !p.is_empty());
-        self.ws_pw_input.reset("");
-        self.ws_pw_focus = false;
         self.workspace = Some(remote_workspace(&target));
         self.center = CenterView::Chat;
         self.adopt_session_store(neverwork_core::sessions::load_with_recovery_key(&url).0);
@@ -2356,35 +2300,26 @@ impl AppState {
         self.workspace_popup = false;
         self.ws_rename = None;
         self.ws_prompt_open = false;
-        self.ws_remote_open = false;
-        self.ws_remote_err = None;
         self.ws_input.reset("");
         self.palette_open = false;
         self.restore_input_target();
         self.notice = Some(format!("已连接到 {url}"));
-        self.refresh_git(cx);
+        self.reset_git_state();
+        cx.notify();
         self.refresh_remote_tree(cx);
     }
 
     pub(crate) fn open_workspace_prompt(&mut self, cx: &mut Context<Self>) {
         self.workspace_popup = true;
         self.ws_rename = None;
-        self.ws_remote_open = false;
-        self.ws_remote_err = None;
         self.ws_input.reset("");
-        self.ws_pw_input.reset("");
-        self.ws_pw_focus = false;
         cx.notify();
     }
 
     pub(crate) fn close_workspace_prompt(&mut self, cx: &mut Context<Self>) {
         self.workspace_popup = false;
         self.ws_rename = None;
-        self.ws_remote_open = false;
-        self.ws_remote_err = None;
         self.ws_input.reset("");
-        self.ws_pw_input.reset("");
-        self.ws_pw_focus = false;
         self.restore_input_target();
         cx.notify();
     }
@@ -2396,7 +2331,6 @@ impl AppState {
         self.workspace_popup = false;
         self.ws_rename = None;
         self.ws_input.reset("");
-        self.ws_pw_focus = false;
         self.input_target = InputTarget::Workspace;
         cx.notify();
     }
@@ -2409,10 +2343,9 @@ impl AppState {
         if self.input_target != InputTarget::Workspace {
             return;
         }
-        if self.ws_prompt_open || self.ws_rename.is_some() || self.ws_remote_open {
+        if self.ws_prompt_open || self.ws_rename.is_some() {
             return;
         }
-        self.ws_pw_focus = false;
         self.input_target = if self.center == CenterView::File
             && (self.open_path.is_some() || self.remote_open_rel.is_some())
         {
@@ -2476,7 +2409,6 @@ impl AppState {
                     self.connect_remote(t, pw, cx)
                 }
                 Err(e) => {
-                    self.ws_remote_err = Some(e.clone());
                     self.notice = Some(format!("远程连接串无效：{e}"));
                     cx.notify();
                 }
@@ -2509,7 +2441,6 @@ impl AppState {
         };
         self.ws_rename = Some(i);
         self.ws_input.reset(&w.name);
-        self.ws_pw_focus = false;
         self.input_target = InputTarget::Workspace;
         cx.notify();
     }
@@ -2549,6 +2480,117 @@ impl AppState {
     }
 
     // ===== 文件 =====
+
+    /// 文件树右键：记录目标与坐标（clamp 在渲染侧做）。
+    pub(crate) fn open_file_menu(
+        &mut self,
+        abs: Option<PathBuf>,
+        rel: Option<String>,
+        is_dir: bool,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        self.file_menu = Some(FileMenuTarget {
+            abs,
+            rel,
+            is_dir,
+            at,
+        });
+        self.tab_menu_at = None;
+        cx.notify();
+    }
+
+    pub(crate) fn close_file_menu(&mut self, cx: &mut Context<Self>) {
+        self.file_menu = None;
+        cx.notify();
+    }
+
+    /// 文件树菜单「＋ 添加到会话」：复制进附件夹，发送时随消息带上。
+    pub(crate) fn add_to_chat_from_menu(&mut self, target: FileMenuTarget, cx: &mut Context<Self>) {
+        self.file_menu = None;
+        if target.is_dir {
+            cx.notify();
+            return;
+        }
+        match target.abs {
+            Some(abs) => {
+                self.attach_paths(vec![abs], cx);
+                // attach_paths 只在跳过文件时写 notice；这里补一条成功反馈。
+                if self.notice.is_none() {
+                    self.notice = Some("已添加到会话".into());
+                }
+            }
+            None => {
+                self.notice = Some("远程文件暂不支持添加到会话（可先下载到本地）".into());
+            }
+        }
+        cx.notify();
+    }
+
+    /// 文件树菜单「⧉ 复制路径」：本地复制绝对路径，远程复制连接串 + 相对路径。
+    pub(crate) fn copy_path_from_menu(&mut self, target: FileMenuTarget, cx: &mut Context<Self>) {
+        self.file_menu = None;
+        let text = match (&target.abs, &target.rel) {
+            (Some(abs), _) => abs.to_string_lossy().to_string(),
+            (None, Some(rel)) => match &self.remote {
+                Some(t) => format!("{}/{}", t.url().trim_end_matches('/'), rel.trim_start_matches('/')),
+                None => rel.clone(),
+            },
+            _ => return,
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.notice = Some("已复制路径".into());
+        cx.notify();
+    }
+
+    /// 编辑器标签右键：弹出「关闭 / 关闭全部」。
+    pub(crate) fn open_tab_menu(&mut self, at: (f32, f32), cx: &mut Context<Self>) {
+        self.tab_menu_at = Some(at);
+        self.file_menu = None;
+        cx.notify();
+    }
+
+    pub(crate) fn close_tab_menu(&mut self, cx: &mut Context<Self>) {
+        self.tab_menu_at = None;
+        cx.notify();
+    }
+
+    /// 关闭当前文件：有未保存改动先落盘（失败则不关，避免丢内容），再清空编辑器。
+    ///
+    /// 目前是单文件模型，「关闭全部」与「关闭」等价；两个入口先保留语义，
+    /// 以后上多标签只需改这里清哪个/清多少。
+    pub(crate) fn close_current_file(&mut self, cx: &mut Context<Self>) {
+        self.tab_menu_at = None;
+        self.file_menu = None;
+        if self.dirty && self.media_preview.is_none() {
+            self.save_file(cx);
+            // 同步保存失败（notice 已写明原因）：不关，留着让用户处理。
+            // 远程保存是异步的，刚落盘回来 dirty 还没复位，下一轮再点即可。
+            if self.dirty {
+                cx.notify();
+                return;
+            }
+        }
+        self.media_preview = None;
+        self.open_path = None;
+        self.remote_open_rel = None;
+        self.editor.reset("");
+        self.dirty = false;
+        self.folds.clear();
+        self.find = crate::find::FindState::default();
+        self.active_field = None;
+        self.auto_save_pending = false;
+        self.notice = None;
+        self.on_editor_opened();
+        self.center = CenterView::Chat;
+        self.input_target = InputTarget::Chat;
+        cx.notify();
+    }
+
+    /// 关闭全部打开的文件（单文件模型下与 `close_current_file` 等价）。
+    pub(crate) fn close_all_files(&mut self, cx: &mut Context<Self>) {
+        self.close_current_file(cx);
+    }
 
     pub fn open_file_name(&self) -> String {
         if let Some(rel) = &self.remote_open_rel {
@@ -2640,6 +2682,24 @@ impl AppState {
         self.git_selected = None;
         self.git_commit_msg.reset("");
         self.refresh_git(cx);
+    }
+
+    /// 清空 Git 面板状态（不跑任何 git 子进程）。
+    ///
+    /// 右栏 Git 面板已从界面移除。切换工作区时如果照旧调用 `refresh_git`，
+    /// 会同步起 6+ 条 git 子进程（rev-parse / rev-list / status / log），
+    /// 大仓库下界面卡住几秒；无控制台的构建里子进程还会闪黑框。
+    /// 这里只做内存复位，切换路径上不再碰 git。
+    fn reset_git_state(&mut self) {
+        self.git = crate::git::RepoStatus::default();
+        self.git_is_repo = false;
+        self.git_repos.clear();
+        self.git_active = None;
+        self.git_selected = None;
+        self.git_confirm = None;
+        self.git_show_branches = false;
+        self.git_commit_msg.reset("");
+        self.git_branch_input.reset("");
     }
 
     /// 刷新 Git 状态。
@@ -3020,7 +3080,7 @@ impl AppState {
         if raw.is_empty() {
             return;
         }
-        // 手输路径行也收 `ssh://` 连接串，与工作区管理器的「连接远程」一致。
+        // 手输路径行收 `ssh://` 或 `user@host:/path` 连接串（无密码，走密钥/agent）。
         if neverwork_core::is_remote_url(&raw) {
             match neverwork_core::SshTarget::parse(&raw) {
                 Ok(t) => {
@@ -3063,7 +3123,6 @@ impl AppState {
             Command::Save => self.save_file(cx),
             Command::RefreshTree => self.refresh_tree(cx),
             Command::NewSession => self.open_new_session_picker(cx),
-            Command::Changes => self.set_right_tab(RightTab::Git, cx),
             Command::Preview => self.set_right_tab(RightTab::Preview, cx),
             Command::SwitchWorkspace => self.open_workspace_prompt(cx),
             Command::FocusMode => {
@@ -3113,13 +3172,7 @@ impl AppState {
         match target {
             InputTarget::Chat => &self.chat,
             InputTarget::Editor => &self.editor,
-            InputTarget::Workspace => {
-                if self.ws_pw_focus {
-                    &self.ws_pw_input
-                } else {
-                    &self.ws_input
-                }
-            }
+            InputTarget::Workspace => &self.ws_input,
             InputTarget::SessionSearch => &self.session_search,
             InputTarget::RenameSession => &self.rename_buf,
             InputTarget::RolePrompt => &self.role_prompt_buf,
@@ -3131,13 +3184,7 @@ impl AppState {
         match target {
             InputTarget::Chat => &mut self.chat,
             InputTarget::Editor => &mut self.editor,
-            InputTarget::Workspace => {
-                if self.ws_pw_focus {
-                    &mut self.ws_pw_input
-                } else {
-                    &mut self.ws_input
-                }
-            }
+            InputTarget::Workspace => &mut self.ws_input,
             InputTarget::SessionSearch => &mut self.session_search,
             InputTarget::RenameSession => &mut self.rename_buf,
             InputTarget::RolePrompt => &mut self.role_prompt_buf,
@@ -3487,9 +3534,7 @@ impl AppState {
                 }
                 // 工作区输入同时用于「切换到新路径」与「重命名工作区」两种场景
                 InputTarget::Workspace => {
-                    if self.ws_remote_open {
-                        self.connect_remote_from_input(cx);
-                    } else if self.ws_rename.is_some() {
+                    if self.ws_rename.is_some() {
                         self.commit_rename_workspace(cx);
                     } else {
                         self.apply_workspace_input(cx);
@@ -5095,7 +5140,6 @@ impl Render for AppState {
         // 否则焦点每帧被拉向无节点句柄，键盘输入全部丢失。
         if self.input_target == InputTarget::Workspace
             && !self.ws_prompt_open
-            && !self.ws_remote_open
             && self.ws_rename.is_none()
         {
             self.restore_input_target();
@@ -5186,6 +5230,38 @@ impl Render for AppState {
                 (y - MENU_H).max(8.0)
             };
             root = root.child(self.session_menu_overlay(idx, mx, my, cx).into_any_element());
+        }
+        // 文件树右键菜单 / 编辑器标签右键菜单：与会话菜单同形态，坐标 clamp 进可见区域。
+        if let Some(target) = self.file_menu.clone() {
+            const MENU_W: f32 = crate::views::file_menu::FILE_MENU_W;
+            const MENU_H: f32 = 132.0;
+            let (x, y) = target.at;
+            let mx = if x + MENU_W + 8.0 <= visible_w {
+                x
+            } else {
+                (x - MENU_W).max(8.0)
+            };
+            let my = if y + MENU_H + 8.0 <= visible_h {
+                y
+            } else {
+                (y - MENU_H).max(8.0)
+            };
+            root = root.child(self.file_menu_overlay(&target, mx, my, cx).into_any_element());
+        }
+        if let Some((x, y)) = self.tab_menu_at {
+            const MENU_W: f32 = crate::views::file_menu::FILE_MENU_W;
+            const MENU_H: f32 = 132.0;
+            let mx = if x + MENU_W + 8.0 <= visible_w {
+                x
+            } else {
+                (x - MENU_W).max(8.0)
+            };
+            let my = if y + MENU_H + 8.0 <= visible_h {
+                y
+            } else {
+                (y - MENU_H).max(8.0)
+            };
+            root = root.child(self.tab_menu_overlay(mx, my, cx).into_any_element());
         }
         if self.palette_open {
             root = root.child(self.palette_overlay(cx).into_any_element());
@@ -5654,11 +5730,14 @@ fn open_with_system(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         // 第一个空参数是窗口标题占位，否则带引号的路径可能被 start 当成标题。
-        std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(path)
-            .spawn()
-            .map(|_| ())
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "start", ""]).arg(path);
+        {
+            use std::os::windows::process::CommandExt;
+            // 无窗口应用里子进程默认会弹控制台；CREATE_NO_WINDOW 压住它。
+            cmd.creation_flags(0x0800_0000);
+        }
+        cmd.spawn().map(|_| ())
     }
     #[cfg(not(target_os = "windows"))]
     {

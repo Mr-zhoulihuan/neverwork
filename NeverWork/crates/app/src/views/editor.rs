@@ -61,6 +61,7 @@ impl AppState {
                 .border_color(theme::border())
                 .child(
                     div()
+                        .id("editor-tab")
                         .flex()
                         .items_center()
                         .gap_2()
@@ -71,8 +72,38 @@ impl AppState {
                         .border_color(theme::accent())
                         .text_sm()
                         .text_color(theme::fg())
+                        // 右键标签：关闭 / 关闭全部
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, ev: &MouseDownEvent, _w, cx| {
+                                cx.stop_propagation();
+                                let at = (ev.position.x.into(), ev.position.y.into());
+                                this.open_tab_menu(at, cx);
+                            }),
+                        )
                         .child(div().text_xs().text_color(theme::orange()).child("⬢"))
-                        .child(SharedString::from(format!("{filename}{dirty_mark}"))),
+                        .child(SharedString::from(format!("{filename}{dirty_mark}")))
+                        // 关闭当前文件：有未保存改动会先落盘，失败则不关
+                        .child(
+                            div()
+                                .id("close-file")
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(18.0))
+                                .rounded_sm()
+                                .text_xs()
+                                .text_color(theme::dim())
+                                .cursor_pointer()
+                                .hover(|d| {
+                                    d.bg(theme::with_alpha(0xef4444, 0.18))
+                                        .text_color(theme::red())
+                                })
+                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                    this.close_current_file(cx);
+                                }))
+                                .child("✕"),
+                        ),
                 )
                 .child(div().flex_1())
                 .child(
@@ -288,6 +319,7 @@ impl AppState {
             .border_color(theme::border())
             .child(
                 div()
+                    .id("media-tab")
                     .flex()
                     .items_center()
                     .gap_2()
@@ -298,8 +330,37 @@ impl AppState {
                     .border_color(theme::accent())
                     .text_sm()
                     .text_color(theme::fg())
+                    // 右键标签：关闭 / 关闭全部
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, ev: &MouseDownEvent, _w, cx| {
+                            cx.stop_propagation();
+                            let at = (ev.position.x.into(), ev.position.y.into());
+                            this.open_tab_menu(at, cx);
+                        }),
+                    )
                     .child(div().text_xs().text_color(color).child("⬢"))
-                    .child(SharedString::from(filename.clone())),
+                    .child(SharedString::from(filename.clone()))
+                    .child(
+                        div()
+                            .id("media-close")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(18.0))
+                            .rounded_sm()
+                            .text_xs()
+                            .text_color(theme::dim())
+                            .cursor_pointer()
+                            .hover(|d| {
+                                d.bg(theme::with_alpha(0xef4444, 0.18))
+                                    .text_color(theme::red())
+                            })
+                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _w, cx| {
+                                this.close_current_file(cx);
+                            }))
+                            .child("✕"),
+                    ),
             )
             .child(div().flex_1());
 
@@ -1009,11 +1070,20 @@ fn char_cell(
 pub(crate) fn lang_name(lang: Lang) -> &'static str {
     match lang {
         Lang::Rust => "Rust",
+        Lang::Go => "Go",
         Lang::Ts => "TypeScript",
         Lang::Python => "Python",
         Lang::Json => "JSON",
         Lang::Toml => "TOML",
+        Lang::Yaml => "YAML",
         Lang::Markdown => "Markdown",
+        Lang::Html => "HTML",
+        Lang::Css => "CSS",
+        Lang::Sql => "SQL",
+        Lang::Shell => "Shell",
+        Lang::CLike => "C/C++/Java",
+        Lang::Ruby => "Ruby",
+        Lang::Lua => "Lua",
         Lang::Other => "Plain",
     }
 }
