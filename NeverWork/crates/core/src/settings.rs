@@ -251,7 +251,9 @@ impl ProviderPreset {
             ProviderPreset::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
             ProviderPreset::DeepSeek => &["deepseek-flash", "deepseek-v4-pro"],
             ProviderPreset::Qwen => &["qwen-max", "qwen-plus", "qwen-turbo", "qwen2.5-coder-32b-instruct"],
-            ProviderPreset::Glm => &["glm-4-plus", "glm-4", "glm-4-flash", "glm-4v"],
+            // 智谱把 glm-4 / glm-4-plus 一代陆续下线了，测试连通性默认还打旧模型名
+            // 会直接 400「模型不存在」。这里只列当前在线的文本模型。
+            ProviderPreset::Glm => &["glm-4.7", "glm-4.6", "glm-4.5", "glm-4.5-air", "glm-4.5-flash"],
             ProviderPreset::Moonshot => &["moonshot-v1-128k", "moonshot-v1-32k", "kimi-k2-0711-preview"],
             ProviderPreset::Doubao => &["doubao-pro-32k", "doubao-lite-32k", "doubao-seed-1-6"],
             ProviderPreset::Baichuan => &["Baichuan4", "Baichuan3-Turbo"],

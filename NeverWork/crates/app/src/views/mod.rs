@@ -19,6 +19,7 @@ pub(crate) mod skills;
 pub(crate) mod text_fit;
 pub(crate) mod team;
 pub(crate) mod trace;
+pub(crate) mod usage;
 pub(crate) mod workspace_picker;
 
 use gpui::prelude::*;
@@ -115,7 +116,14 @@ pub(crate) fn titlebar(
 /// 图标用图形画而不是字符：`□`/`❐` 这类字形会被字体回退成大小相近
 /// 的方块，最大化前后几乎看不出区别。
 fn window_controls(maximized: bool) -> impl IntoElement {
-    fn button(id: &'static str, icon: impl IntoElement) -> impl IntoElement {
+    // 悬停反馈：这三颗按钮的点击由系统热区接管（见 `titlebar_hitboxes`），
+    // 但它们自己的 hitbox 仍在命中栈里，`hover()` 能正常生效。
+    // 没有这条时鼠标移过去毫无变化，看起来像按钮坏了。
+    fn button(
+        id: &'static str,
+        icon: impl IntoElement,
+        close: bool,
+    ) -> impl IntoElement {
         div()
             .id(id)
             .flex()
@@ -123,13 +131,18 @@ fn window_controls(maximized: bool) -> impl IntoElement {
             .justify_center()
             .w(px(44.0))
             .h_full()
+            .text_color(theme::fg())
+            .when(close, |d| {
+                d.hover(|d| d.bg(theme::red()).text_color(gpui::rgb(0xffffff)))
+            })
+            .when(!close, |d| d.hover(|d| d.bg(theme::raised())))
             .child(icon)
     }
     div()
         .flex()
         .items_center()
         .h_full()
-        .child(button("win-min", icon_minimize()))
+        .child(button("win-min", icon_minimize(), false))
         .child(button(
             "win-max",
             if maximized {
@@ -137,8 +150,9 @@ fn window_controls(maximized: bool) -> impl IntoElement {
             } else {
                 icon_maximize().into_any_element()
             },
+            false,
         ))
-        .child(button("win-close", icon_close()))
+        .child(button("win-close", icon_close(), true))
 }
 
 /// 最小化：一条 10px 横线。
@@ -155,8 +169,11 @@ fn icon_maximize() -> impl IntoElement {
         .border_color(theme::fg())
 }
 
-/// 还原：两个错位小方框（后层左下、前层右上），前层用标题栏底色
-/// 盖住后层被遮挡的那一角。
+/// 还原：两个错位小方框（后层左下、前层右上）。
+///
+/// 不用「前层填底色盖住后层」的画法：底色要跟按钮背景一致，而按钮背景
+/// 会随 hover 变化（panel → raised），焊死的色块会在悬停时露出一个小方块。
+/// 两个方框都只画描边，重叠处是一个小格子，最稳定。
 fn icon_restore() -> impl IntoElement {
     div()
         .relative()
@@ -167,8 +184,8 @@ fn icon_restore() -> impl IntoElement {
                 .absolute()
                 .left(px(0.0))
                 .bottom(px(0.0))
-                .w(px(8.0))
-                .h(px(8.0))
+                .w(px(7.0))
+                .h(px(7.0))
                 .border_1()
                 .border_color(theme::fg()),
         )
@@ -177,20 +194,17 @@ fn icon_restore() -> impl IntoElement {
                 .absolute()
                 .right(px(0.0))
                 .top(px(0.0))
-                .w(px(8.0))
-                .h(px(8.0))
+                .w(px(7.0))
+                .h(px(7.0))
                 .border_1()
-                .border_color(theme::fg())
-                .bg(theme::panel()),
+                .border_color(theme::fg()),
         )
 }
 
-/// 关闭：15px 的 ✕ 字符（字体对它的渲染没问题）。
+/// 关闭：15px 的 ✕ 字符（字体对它的渲染没问题）。颜色继承按钮的
+/// `text_color`，悬停变成红底白字时不用另画。
 fn icon_close() -> impl IntoElement {
-    div()
-        .text_size(px(15.0))
-        .text_color(theme::fg())
-        .child("✕")
+    div().text_size(px(15.0)).child("✕")
 }
 
 /// Windows 无边框窗口的命中热区层（绝对定位铺满标题栏，只注册热区不绘制）。

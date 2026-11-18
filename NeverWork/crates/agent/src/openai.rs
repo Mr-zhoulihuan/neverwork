@@ -238,7 +238,16 @@ impl OpenAiProvider {
         };
 
         let send = |body: &WireRequest| {
-            ureq::post(&url)
+            // `http_status_as_error(false)`：4xx/5xx 不直接变成只有状态码的
+            // `Err(StatusCode)`，否则「HTTP 400」究竟是因为模型名过期、Key 不对
+            // 还是参数不兼容，用户完全看不到（智谱换模型名时就是这个体验）。
+            let mut builder = ureq::Agent::config_builder().http_status_as_error(false);
+            if let Some(p) = ureq::Proxy::try_from_env() {
+                builder = builder.proxy(Some(p));
+            }
+            let agent = builder.build().new_agent();
+            agent
+                .post(&url)
                 .header("Authorization", &format!("Bearer {}", self.config.api_key))
                 .header("Content-Type", "application/json")
                 .send_json(body)
@@ -248,16 +257,26 @@ impl OpenAiProvider {
         // 不要为了可选项把整轮对话搞挂：先去掉思考参数重试，再去掉 stream_options。
         let resp = loop {
             match send(&body) {
-                Ok(r) => break r,
-                Err(ureq::Error::StatusCode(400)) if body.reasoning_effort.is_some() => {
+                Ok(r) if r.status().is_success() => break r,
+                Ok(r) if r.status().as_u16() == 400 && body.reasoning_effort.is_some() => {
                     body.reasoning_effort = None;
                 }
-                Err(ureq::Error::StatusCode(400)) if body.stream_options.is_some() => {
+                Ok(r) if r.status().as_u16() == 400 && body.stream_options.is_some() => {
                     body.stream_options = None;
                 }
-                Err(ureq::Error::StatusCode(code)) => {
-                    // 尽力把服务端的错误正文带出来，否则用户只会看到 HTTP 401 不知道原因
-                    on_event(StreamEvent::Error(format!("HTTP {code}")));
+                Ok(r) => {
+                    // 把服务端的错误正文带出来：只报 HTTP 状态码用户没法判断原因。
+                    let code = r.status().as_u16();
+                    let mut body = r.into_body();
+                    let raw = body
+                        .with_config()
+                        .limit(4 * 1024)
+                        .read_to_string()
+                        .unwrap_or_default();
+                    on_event(StreamEvent::Error(format!(
+                        "HTTP {code}{}",
+                        server_error_detail(&raw)
+                    )));
                     return Ok(());
                 }
                 Err(e) => {
@@ -415,6 +434,34 @@ impl LlmProvider for OpenAiProvider {
     }
 }
 
+/// 把服务端 4xx/5xx 的响应正文压成一行，附在错误信息后面。
+///
+/// 各家网关的错误形状不同（OpenAI 是 `error.message`，智谱也在这个位置），
+/// 拿不到 JSON 就回退原文；超过 300 字符截断，别把整页 HTML 拼进错误弹窗。
+fn server_error_detail(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let msg = serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .or_else(|| v.get("message").and_then(|m| m.as_str()))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| raw.to_string());
+    let one_line = msg.replace(['\n', '\r'], " ");
+    let clipped: String = one_line.trim().chars().take(300).collect();
+    if clipped.is_empty() {
+        String::new()
+    } else {
+        format!("：{clipped}")
+    }
+}
+
 /// 从一帧 SSE 数据里取真实用量。
 ///
 /// OpenAI 把 usage 放在流的最后一个 chunk，而那个 chunk 的 `choices` 是空数组：
@@ -511,6 +558,31 @@ mod usage_tests {
             "全 0 的用量当作没报，避免把预算记成 0"
         );
         assert_eq!(parse_usage_frame("[DONE]"), None);
+    }
+}
+
+#[cfg(test)]
+mod error_detail_tests {
+    use super::server_error_detail;
+
+    #[test]
+    fn json_error_message_is_extracted() {
+        let raw = r#"{"error":{"code":"1211","message":"模型不存在"}}"#;
+        assert_eq!(server_error_detail(raw), "：模型不存在");
+    }
+
+    #[test]
+    fn plain_text_and_empty_are_handled() {
+        assert_eq!(server_error_detail("  "), "");
+        assert_eq!(server_error_detail("bad key"), "：bad key");
+    }
+
+    #[test]
+    fn long_body_is_clipped_one_line() {
+        let raw = format!("{{\"message\":\"a\\nb{}\"}}", "x".repeat(500));
+        let out = server_error_detail(&raw);
+        assert!(out.chars().count() <= 302, "应截断: {}", out.chars().count());
+        assert!(!out.contains('\n'), "应压成一行");
     }
 }
 

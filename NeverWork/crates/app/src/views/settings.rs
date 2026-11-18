@@ -595,6 +595,7 @@ impl AppState {
                             path_display,
                             "C:\\path\\to\\neverwork-2026….json",
                             editing,
+                            self.field_buf.cursor(),
                             self.editor_focus.clone(),
                             self.field_area_bounds.clone(),
                             cx,
@@ -998,12 +999,18 @@ fn stat_line(k: &str, v: String) -> impl IntoElement {
 }
 
 /// 可点击编辑的输入框。点击后进入 `FormField` 编辑态，回车提交。
+///
+/// 编辑态的光标画在真实的插入点（`field_buf.cursor()`）上，而不是输入框
+/// 最右边：之前光标是与文字并列的独立子元素，文字又占了 `flex_1`，光标永远
+/// 贴在框右边，看起来像「光标没有靠到文字」。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn input_box(
     id: SharedString,
     value: String,
     placeholder: &'static str,
     editing: bool,
+    // 编辑态时光标的字节偏移（`TextBuffer::cursor()`）；非编辑态忽略。
+    cursor: usize,
     focus: FocusHandle,
     bounds_slot: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     cx: &mut Context<AppState>,
@@ -1017,7 +1024,7 @@ pub(crate) fn input_box(
     };
     let color = if empty { theme::dim() } else { theme::fg() };
 
-    div()
+    let mut row = div()
         .id(id)
         .flex()
         .flex_row()
@@ -1054,8 +1061,28 @@ pub(crate) fn input_box(
                 return;
             }
             this.on_field_key(ev, cx);
-        }))
-        .child(
+        }));
+
+    if editing {
+        // 光标前后分段渲染：头部按预算从后往前装（装不下补「…」），尾部最多
+        // 拿 40% 预算，光标就落在真正的插入点上，跟文字同一行。
+        let (head, tail) = caret_split(&display, cursor, 420.0, 12.0);
+        row = row.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(theme::fg())
+                .child(SharedString::from(head))
+                .child(div().text_color(theme::accent()).child("▏"))
+                .child(SharedString::from(tail)),
+        );
+    } else {
+        row = row.child(
             div()
                 .flex_1()
                 .min_w(px(0.0))
@@ -1063,22 +1090,125 @@ pub(crate) fn input_box(
                 .whitespace_nowrap()
                 .text_color(color)
                 .child(SharedString::from(fit_text(&display, 300.0, 12.0))),
-        )
-        .when(editing, |d| {
-            d.child(div().text_color(theme::accent()).child("▏")).child(
-                // 记录输入框在窗口中的真实位置，「点外面自动提交」靠它判定。
-                gpui::canvas(
-                    |_b, _w, _cx| {},
-                    move |bounds, _st, _w, _cx| {
-                        bounds_slot.set(Some(bounds));
-                    },
-                )
-                .absolute()
-                .top(px(0.0))
-                .left(px(0.0))
-                .size(px(1.0)),
+        );
+    }
+    row.when(editing, |d| {
+        d.child(
+            // 记录输入框在窗口中的真实位置，「点外面自动提交」靠它判定。
+            gpui::canvas(
+                |_b, _w, _cx| {},
+                move |bounds, _st, _w, _cx| {
+                    bounds_slot.set(Some(bounds));
+                },
             )
-        })
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
+            .size(px(1.0)),
+        )
+    })
+}
+
+/// 把编辑中的文字拆成「光标前 / 光标后」，按像素预算分别截断。
+///
+/// `cursor` 是字节偏移，落在字符中间时向前对齐到边界（`TextBuffer` 不会
+/// 产生这种值，但取位参数来自外部时防线还是要有）。
+fn caret_split(value: &str, cursor: usize, max_px: f32, font_px: f32) -> (String, String) {
+    let mut at = cursor.min(value.len());
+    while at > 0 && !value.is_char_boundary(at) {
+        at -= 1;
+    }
+    let before = &value[..at];
+    let after = &value[at..];
+
+    let usable = (max_px - font_px * 0.5).max(24.0);
+
+    // 尾部预算：光标在开头（占位符 / 按 Home 回到行首）时整段都是「光标后」，
+    // 给满预算；否则只给 40%，保证光标前后都看得见。
+    let mut tail_budget = if before.is_empty() {
+        usable
+    } else {
+        usable * 0.4
+    };
+    let mut tail = String::new();
+    for ch in after.chars() {
+        let w = crate::views::text_fit::char_width(ch, font_px);
+        if w > tail_budget {
+            break;
+        }
+        tail.push(ch);
+        tail_budget -= w;
+    }
+    let tail_cut = tail.chars().count() < after.chars().count();
+
+    let mut tail_out = tail;
+    if tail_cut {
+        tail_out.push('…');
+    }
+    if before.is_empty() {
+        return (String::new(), tail_out);
+    }
+    // 头部预算 = 总宽 - 尾部实际宽（省略号已含在 tail_out 里）。
+    let tail_w: f32 = tail_out
+        .chars()
+        .map(|c| crate::views::text_fit::char_width(c, font_px))
+        .sum();
+    let mut head_budget = usable - tail_w;
+    let mut head_rev: Vec<char> = Vec::new();
+    let mut head_cut = false;
+    for ch in before.chars().rev() {
+        let w = crate::views::text_fit::char_width(ch, font_px);
+        if w > head_budget {
+            head_cut = true;
+            break;
+        }
+        head_rev.push(ch);
+        head_budget -= w;
+    }
+    let mut head: String = head_rev.into_iter().rev().collect();
+    if head_cut {
+        head.insert(0, '…');
+    }
+    (head, tail_out)
+}
+
+#[cfg(test)]
+mod caret_split_tests {
+    use super::caret_split;
+
+    #[test]
+    fn caret_at_start_keeps_text_after_and_marks_cut() {
+        // 光标在开头（占位符场景）：头部为空，尾部长了也要带省略号。
+        let (head, tail) = caret_split("粘贴 API Key（回车或点击别处即保存）", 0, 120.0, 12.0);
+        assert!(head.is_empty());
+        assert!(tail.starts_with('粘'));
+        assert!(tail.ends_with('…'), "截断的尾部要有省略号：{tail}");
+    }
+
+    #[test]
+    fn caret_in_middle_splits_exactly_at_cursor() {
+        let (head, tail) = caret_split("abcdef", 3, 400.0, 12.0);
+        assert_eq!(head, "abc");
+        assert_eq!(tail, "def");
+    }
+
+    #[test]
+    fn head_keeps_tail_of_text_when_too_long() {
+        // 头部装不下时从后往前留字，并在最前补省略号。
+        let text = "0123456789012345678901234567890123456789";
+        let (head, tail) = caret_split(text, text.len(), 100.0, 12.0);
+        assert!(head.starts_with('…'), "头部被截时要补省略号：{head}");
+        assert!(head.ends_with('9'));
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn cursor_inside_multibyte_char_aligns_back() {
+        // 「中」占 3 字节，传 1 必须退回 0，不能 panic。
+        let (head, tail) = caret_split("中文", 1, 400.0, 12.0);
+        assert!(head.is_empty());
+        assert_eq!(tail, "中文");
+    }
 }
 
 /// 相对时间：刚刚 / N 分钟前 / N 小时前 / 日期。

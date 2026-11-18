@@ -229,6 +229,7 @@ impl AppState {
             q,
             "搜索名称、标识或地址",
             editing,
+            self.field_buf.cursor(),
             self.editor_focus.clone(),
             self.field_area_bounds.clone(),
             cx,
@@ -532,6 +533,7 @@ impl AppState {
                 name_display,
                 "厂商显示名",
                 editing_name,
+                self.field_buf.cursor(),
                 self.editor_focus.clone(),
                 self.field_area_bounds.clone(),
                 cx,
@@ -559,6 +561,7 @@ impl AppState {
                     key_display,
                     "粘贴 API Key（回车或点击别处即保存）",
                     editing_key,
+                    self.field_buf.cursor(),
                     self.editor_focus.clone(),
                     self.field_area_bounds.clone(),
                     cx,
@@ -581,6 +584,7 @@ impl AppState {
                 url_display,
                 "https://…/v1",
                 editing_url,
+                self.field_buf.cursor(),
                 self.editor_focus.clone(),
                 self.field_area_bounds.clone(),
                 cx,
@@ -661,6 +665,7 @@ impl AppState {
                     self.provider_model_filter.clone(),
                     "筛选模型",
                     editing_filter,
+                    self.field_buf.cursor(),
                     self.editor_focus.clone(),
                     self.field_area_bounds.clone(),
                     cx,
@@ -672,6 +677,7 @@ impl AppState {
                 new_display,
                 "输入模型 id，回车添加",
                 editing_new,
+                self.field_buf.cursor(),
                 self.editor_focus.clone(),
                 self.field_area_bounds.clone(),
                 cx,
@@ -901,8 +907,8 @@ fn preset_host(p: ProviderPreset) -> String {
 }
 
 /// 未就绪的具体原因（详情页顶部提示条）：一次把缺的都说清，
-/// 不要只给一个状态点让用户自己猜。
-fn not_ready_reason(p: &ProviderEntry) -> Option<String> {
+/// 不要只给一个状态点让用户自己猜。也用来回答「为什么测试不了」。
+pub(crate) fn not_ready_reason(p: &ProviderEntry) -> Option<String> {
     let mut missing: Vec<&str> = Vec::new();
     if p.effective_model().trim().is_empty() {
         missing.push("没有可用模型（点「拉取模型」或手动添加）");

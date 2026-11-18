@@ -159,7 +159,12 @@ impl AppState {
             return;
         };
         if !p.ready() {
-            self.action_msg = Some("先填好 API Key 再测试".into());
+            // 就绪条件不只是 Key：也可能是没模型 / 缺基址。一律写「先填 Key」
+            // 会让用户对着已填好的 Key 发懵（智谱那类默认模型被下线的厂商常常
+            // 是「模型没了」而不是 Key 没填）。
+            let why = crate::views::providers::not_ready_reason(p)
+                .unwrap_or_else(|| "配置不完整".to_string());
+            self.action_msg = Some(format!("还不能测试：{why}"));
             cx.notify();
             return;
         }

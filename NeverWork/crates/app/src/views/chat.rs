@@ -414,8 +414,9 @@ impl AppState {
         col.child(row)
     }
 
-    /// 「对话 | 轨迹」两段页签：轨迹是整区切换（对齐参考稿的 session log），
-    /// 打开时对话滚动区与输入框都不渲染，切回「对话」或 Esc 返回。
+    /// 「对话 | 轨迹」两段页签 + 右侧「用量」入口：轨迹是整区切换（对齐参考稿的
+    /// session log），打开时对话滚动区与输入框都不渲染，切回「对话」或 Esc 返回。
+    /// 用量不是页签而是居中弹框（余额 + token 统计），按钮只负责开/关。
     fn trace_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let seg = |id: &'static str, label: &'static str, active: bool, to_trace: bool| {
             div()
@@ -450,6 +451,28 @@ impl AppState {
             .bg(theme::panel())
             .child(seg("tab-chat", "对话", !self.trace_open, false))
             .child(seg("tab-trace", "◷ 轨迹", self.trace_open, true))
+            // 竖向分隔：左边是两个互斥页签，右边是弹框入口，语义不同。
+            .child(div().w(px(1.0)).h(px(16.0)).bg(theme::border()))
+            .child(
+                div()
+                    .id("tab-usage")
+                    .px_3()
+                    .py_1p5()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(if self.usage_open { theme::fg() } else { theme::muted() })
+                    .bg(if self.usage_open { theme::raised() } else { theme::panel() })
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::raised()))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        if this.usage_open {
+                            this.close_usage(cx);
+                        } else {
+                            this.open_usage(cx);
+                        }
+                    }))
+                    .child("⇅ 用量"),
+            )
     }
 
     /// 头部模型 chip：显示本会话的「厂商 · 模型」，点开按厂商分组的模型选择器。

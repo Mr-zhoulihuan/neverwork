@@ -478,6 +478,14 @@ pub struct AppState {
     pub trace_selected: Option<usize>,
     /// 轨迹列表的搜索词（只过滤当前视图，不持久化）。
     pub trace_query: TextBuffer,
+    /// 「用量」弹框是否打开（窗口内存态，不随会话保存）。
+    pub usage_open: bool,
+    /// 余额查询结果（`None` = 还没查 / 查询中）。
+    pub usage_balance: Option<crate::usage_ops::BalanceOutcome>,
+    /// 余额查询进行中（按钮显示「查询中…」并防重入）。
+    pub usage_balance_busy: bool,
+    /// 上次查询针对的厂商 id：切了厂商后旧结果不再展示。
+    pub usage_balance_pid: String,
     /// ask_user 卡片的自定义回答输入框（窗口内存态）。
     pub ask_custom: TextBuffer,
     /// 模型选择器的搜索词。
@@ -1168,6 +1176,10 @@ impl AppState {
             trace_open: false,
             trace_selected: None,
             trace_query: TextBuffer::single_line(),
+            usage_open: false,
+            usage_balance: None,
+            usage_balance_busy: false,
+            usage_balance_pid: String::new(),
             ask_custom: TextBuffer::single_line(),
             model_query: String::new(),
             model_highlight: 0,
@@ -1305,6 +1317,10 @@ impl AppState {
             if !v.is_empty() {
                 me.trace_query.reset(&v);
             }
+        }
+        // 验证用：启动即打开「用量」弹框（NW_USAGE=1）。
+        if std::env::var("NW_USAGE").map(|v| v == "1").unwrap_or(false) {
+            me.open_usage(cx);
         }
         // 验证用：启动即弹出「新建会话」的模式选择浮层。
         if std::env::var("NW_PICK_MODE").map(|v| v == "1").unwrap_or(false) {
@@ -3815,6 +3831,9 @@ impl AppState {
                     self.close_new_session_picker(cx);
                 } else if self.model_picker {
                     self.close_chat_model_picker(cx);
+                } else if self.usage_open {
+                    // 用量弹框：盖在轨迹/对话之上，Esc 先关它。
+                    self.close_usage(cx);
                 } else if self.trace_open {
                     // 轨迹页不是浮层：放在弹层之后、停止生成之前。
                     // 关页签时把选中与搜索词一并复位，下次打开从干净列表开始。
@@ -5771,6 +5790,10 @@ impl Render for AppState {
         // 新建会话：先选运行模式（单助手 / 团队），选定后不可切换。
         if self.new_session_picker {
             root = root.child(self.new_session_overlay(cx).into_any_element());
+        }
+        // 用量弹框：当前会话模型用量 + 厂商余额，Esc / ✕ 关闭。
+        if self.usage_open {
+            root = root.child(self.usage_overlay(cx).into_any_element());
         }
         // 图片放大查看器：最上层，点背景 / Esc 关闭。
         if self.image_view.is_some() {

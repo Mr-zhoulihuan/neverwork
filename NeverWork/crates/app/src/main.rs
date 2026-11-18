@@ -23,6 +23,7 @@ mod skills_catalog;
 mod skills_ops;
 mod state;
 mod text_buffer;
+mod usage_ops;
 mod views;
 
 /// 单实例：命名互斥量 + 把已有实例的窗口带到前台。
