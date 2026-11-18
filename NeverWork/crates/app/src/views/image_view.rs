@@ -59,7 +59,7 @@ pub(crate) fn image_view_overlay(
             div()
                 .min_w(px(44.0))
                 .text_center()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::fg())
                 .child(SharedString::from(format!("{percent}%"))),
         )
@@ -92,18 +92,18 @@ pub(crate) fn image_view_overlay(
         .gap_3()
         .child(
             div()
-                .text_sm()
+                .text_size(px(theme::text_ui()))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::fg())
                 .child(SharedString::from(fit_text(
                     &name,
                     (visible_w * 0.45).max(160.0),
-                    14.0,
+                    theme::text_ui(),
                 ))),
         )
         .child(
             div()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::muted())
                 .child(SharedString::from(format!("{nat_w:.0}×{nat_h:.0}"))),
         )
@@ -118,7 +118,7 @@ pub(crate) fn image_view_overlay(
         .top(px(top))
         .w(px(disp_w))
         .h(px(disp_h))
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .border_1()
         .border_color(theme::border())
         .bg(theme::surface())
@@ -173,7 +173,7 @@ pub(crate) fn image_view_overlay(
         .flex()
         .items_center()
         .justify_center()
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .text_color(theme::muted())
         .child("滚轮缩放 · 拖拽平移 · 双击复位 · Esc / 点背景关闭");
 
@@ -232,9 +232,9 @@ fn ctl_button(
         .justify_center()
         .h(px(26.0))
         .px_2()
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .bg(theme::raised())
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .text_color(theme::fg())
         .cursor_pointer()
         .hover(|d| d.bg(theme::border()))

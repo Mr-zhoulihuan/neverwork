@@ -119,3 +119,32 @@ fn import_of_full_export_overrides_local() {
     config::merge_keeping_local_keys(&mut imported, &local);
     assert_eq!(imported.providers[0].api_key, "sk-new", "带密钥的导出应覆盖本地");
 }
+
+#[test]
+fn load_settings_migrates_retired_theme_preserving_keys() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = std::env::temp_dir().join(format!("neverwork-test-theme-{}", std::process::id()));
+    std::env::set_var("NW_CONFIG_DIR", &tmp);
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // 旧主题 + 带 Key 的厂商：迁移只能动 theme，Key 必须原样。
+    let json = r#"{"theme":"nord","providers":[{"id":"glm","preset":"glm","name":"智谱 GLM","base_url":"https://open.bigmodel.cn/api/paas/v4","api_key":"sk-keep-me","models":["glm-4-plus","glm-4","glm-4-flash","glm-4v"],"model":"glm-4","enabled":true}]}"#;
+    std::fs::write(tmp.join("settings.json"), json).unwrap();
+
+    let loaded = config::load_settings();
+    assert_eq!(
+        loaded.theme,
+        neverwork_core::ThemeMode::Graphite,
+        "旧主题要迁到 Graphite"
+    );
+    let glm = loaded.providers.iter().find(|p| p.id == "glm").unwrap();
+    assert_eq!(glm.api_key, "sk-keep-me", "迁移不能丢 Key");
+
+    // 迁移必须落盘，且不能再写回旧主题名。
+    let text = std::fs::read_to_string(tmp.join("settings.json")).unwrap();
+    assert!(text.contains("\"graphite\""), "迁移结果要落盘：{text}");
+    assert!(!text.contains("\"nord\""), "落盘后不该再有旧主题名");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

@@ -43,7 +43,7 @@ impl AppState {
             Some(path) => div()
                 .size(px(40.0))
                 .flex_shrink_0()
-                .rounded_lg()
+                .rounded(px(theme::radius_lg()))
                 .overflow_hidden()
                 .child(img(path).size(px(40.0)).object_fit(gpui::ObjectFit::Cover))
                 .into_any_element(),
@@ -53,9 +53,9 @@ impl AppState {
                 .justify_center()
                 .size(px(40.0))
                 .flex_shrink_0()
-                .rounded_lg()
+                .rounded(px(theme::radius_lg()))
                 .bg(theme::with_alpha(hue, 0.16))
-                .text_sm()
+                .text_size(px(theme::text_ui()))
                 .text_color(gpui::rgb(hue))
                 .child(SharedString::from(skill.glyph.clone()))
                 .into_any_element(),
@@ -98,7 +98,7 @@ impl AppState {
                                 div()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
-                                    .text_xs()
+                                    .text_size(px(theme::text_caption()))
                                     .text_color(theme::dim())
                                     .child(SharedString::from(skill.author.clone())),
                             ),
@@ -111,8 +111,8 @@ impl AppState {
                             .justify_center()
                             .size(px(26.0))
                             .flex_shrink_0()
-                            .rounded_md()
-                            .text_sm()
+                            .rounded(px(theme::radius_md()))
+                            .text_size(px(theme::text_ui()))
                             .text_color(theme::muted())
                             .cursor_pointer()
                             .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -174,7 +174,7 @@ impl AppState {
         if loading {
             body = body.child(
                 div()
-                    .text_sm()
+                    .text_size(px(theme::text_ui()))
                     .text_color(theme::muted())
                     .child("⟳ 正在拉取上游说明…"),
             );
@@ -186,7 +186,7 @@ impl AppState {
             {
                 body = body.child(
                     div()
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::red())
                         .child(SharedString::from(format!("说明拉取失败：{err}"))),
                 );
@@ -194,7 +194,7 @@ impl AppState {
             if skill.detail.trim().is_empty() {
                 body = body.child(
                     div()
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::dim())
                         .child("上游没有提供详细说明"),
                 );
@@ -216,13 +216,13 @@ impl AppState {
                     .flex_col()
                     .gap_2()
                     .p_3()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::accent_soft())
                     .border_1()
                     .border_color(theme::accent_line())
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::fg())
                             .child(SharedString::from(format!(
                                 "将注册外部进程：{mcp_cmd}（工具调用逐次审批）"
@@ -239,8 +239,8 @@ impl AppState {
                                     .id("detail-mcp-cancel")
                                     .px_2()
                                     .py_0p5()
-                                    .rounded_md()
-                                    .text_xs()
+                                    .rounded(px(theme::radius_md()))
+                                    .text_size(px(theme::text_caption()))
                                     .text_color(theme::muted())
                                     .cursor_pointer()
                                     .hover(|d| d.bg(theme::raised()))
@@ -256,10 +256,10 @@ impl AppState {
                                     .id("detail-mcp-confirm")
                                     .px_2()
                                     .py_0p5()
-                                    .rounded_md()
+                                    .rounded(px(theme::radius_md()))
                                     .bg(theme::accent())
-                                    .text_xs()
-                                    .text_color(gpui::rgb(0xffffff))
+                                    .text_size(px(theme::text_caption()))
+                                    .text_color(theme::accent_fg())
                                     .cursor_pointer()
                                     .hover(|d| d.opacity(0.88))
                                     .on_click(cx.listener(
@@ -275,7 +275,7 @@ impl AppState {
         if mcp && skill.mcp.is_none() && !remote_only {
             body = body.child(
                 div()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child("安装时会从上游详情页抓取启动命令"),
             );
@@ -293,8 +293,8 @@ impl AppState {
             .min_w(px(96.0))
             .px_3()
             .py_1p5()
-            .rounded_md()
-            .text_xs();
+            .rounded(px(theme::radius_md()))
+            .text_size(px(theme::text_caption()));
         // 从团队角色面板进来时，主按钮是「绑定到角色」（绑定会先确保安装，
         // MCP 未装则走确认流程，确认后自动绑），不再给卸载入口。
         let bound_role = self.market_detail_role.and_then(|(ti, ri)| {
@@ -321,7 +321,7 @@ impl AppState {
                 let label = format!("＋ 绑定到「{role_name}」");
                 install_btn
                     .bg(theme::accent())
-                    .text_color(gpui::rgb(0xffffff))
+                    .text_color(theme::accent_fg())
                     .cursor_pointer()
                     .hover(|d| d.opacity(0.88))
                     .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
@@ -353,7 +353,7 @@ impl AppState {
         } else {
             install_btn = install_btn
                 .bg(theme::accent())
-                .text_color(gpui::rgb(0xffffff))
+                .text_color(theme::accent_fg())
                 .cursor_pointer()
                 .hover(|d| d.opacity(0.88))
                 .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
@@ -379,10 +379,10 @@ impl AppState {
                         .id("detail-open-source")
                         .px_3()
                         .py_1p5()
-                        .rounded_md()
+                        .rounded(px(theme::radius_md()))
                         .border_1()
                         .border_color(theme::border())
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -433,7 +433,7 @@ fn badge(label: &str, bg: gpui::Rgba, fg: gpui::Rgba) -> AnyElement {
         .py_0p5()
         .rounded_full()
         .bg(bg)
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .text_color(fg)
         .child(SharedString::from(label.to_string()))
         .into_any_element()

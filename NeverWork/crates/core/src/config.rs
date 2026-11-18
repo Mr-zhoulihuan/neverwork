@@ -85,13 +85,16 @@ fn settings_path() -> PathBuf {
 /// 加载设置；文件不存在或损坏时返回默认值。
 ///
 /// 内置模型列表换代后（旧模型下线），仍沿用旧内置预设的厂商会自动升级；
-/// 立即落盘，避免用户本次不改设置就白迁移。
+/// 已下线的旧主题（Nord/Dracula/…）迁到新主题集。两件事都立即落盘，
+/// 避免用户本次不改设置就白迁移。
 pub fn load_settings() -> Settings {
     let mut settings = match std::fs::read_to_string(settings_path()) {
         Ok(text) => serde_json::from_str(strip_bom(&text)).unwrap_or_default(),
         Err(_) => Settings::default(),
     };
-    if settings.upgrade_builtin_models() {
+    let upgraded = settings.upgrade_builtin_models();
+    let theme_changed = settings.migrate_theme();
+    if upgraded || theme_changed {
         let _ = save_settings(&settings);
     }
     settings

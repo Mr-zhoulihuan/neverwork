@@ -54,7 +54,7 @@ impl AppState {
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .child(SharedString::from(tab_hint(self.settings_tab))),
                 ),
@@ -65,11 +65,11 @@ impl AppState {
                 div()
                     .px_3()
                     .py_2()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::green_soft())
                     .border_1()
                     .border_color(theme::green_line())
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::green())
                     .child(SharedString::from(msg.clone())),
             );
@@ -109,8 +109,8 @@ impl AppState {
                 .h(px(30.0))
                 .px_2()
                 .mb_2()
-                .rounded_md()
-                .text_xs()
+                .rounded(px(theme::radius_md()))
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::muted())
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised()))
@@ -130,8 +130,8 @@ impl AppState {
                     .gap_2()
                     .h(px(32.0))
                     .px_2()
-                    .rounded_md()
-                    .text_sm()
+                    .rounded(px(theme::radius_md()))
+                    .text_size(px(theme::text_ui()))
                     .cursor_pointer()
                     .when(on, |d| d.bg(theme::accent_soft()).text_color(theme::accent()))
                     .when(!on, |d| {
@@ -140,7 +140,7 @@ impl AppState {
                     .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
                         this.set_settings_tab(tab, cx);
                     }))
-                    .child(div().text_xs().child(SharedString::from(tab.glyph())))
+                    .child(div().text_size(px(theme::text_caption())).child(SharedString::from(tab.glyph())))
                     .child(SharedString::from(tab.label())),
             );
         }
@@ -148,7 +148,7 @@ impl AppState {
         nav = nav.child(div().flex_1()).child(
             div()
                 .px_2()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child(SharedString::from(format!("v{}", neverwork_core::APP_VERSION))),
         );
@@ -171,7 +171,7 @@ impl AppState {
                 // 主题：每套是完整色板，色卡用它的背景 + 强调色预览。
                 g = g.child(setting_row(
                     "主题",
-                    "9 套完整配色；跟随系统读系统深浅",
+                    "6 套完整配色；跟随系统读系统深浅",
                     div()
                         .flex()
                         .gap_1()
@@ -187,8 +187,8 @@ impl AppState {
                                 .gap_1()
                                 .px_2()
                                 .py_1()
-                                .rounded_md()
-                                .text_xs()
+                                .rounded(px(theme::radius_md()))
+                                .text_size(px(theme::text_caption()))
                                 .cursor_pointer()
                                 .when(on, |d| {
                                     d.bg(theme::accent_soft())
@@ -207,7 +207,7 @@ impl AppState {
                                 .child(
                                     div()
                                         .size(px(12.0))
-                                        .rounded_sm()
+                                        .rounded(px(theme::radius_sm()))
                                         .bg(pbg)
                                         .flex()
                                         .items_center()
@@ -370,9 +370,9 @@ impl AppState {
                 .gap_3()
                 .px_3()
                 .py_2()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .bg(theme::accent_soft())
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::muted())
                 .child(SharedString::from(format!(
                     "已安装 {} 个技能",
@@ -392,12 +392,12 @@ impl AppState {
                     .items_center()
                     .gap_2()
                     .py_8()
-                    .text_sm()
+                    .text_size(px(theme::text_ui()))
                     .text_color(theme::dim())
                     .child("还没有安装任何技能")
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .child("技能可以给 Agent 补上具体领域的做法，安装后即可在对话里引用"),
                     ),
             );
@@ -414,7 +414,7 @@ impl AppState {
                     .gap_3()
                     .px_3()
                     .py_2()
-                    .rounded_lg()
+                    .rounded(px(theme::radius_lg()))
                     .border_1()
                     .border_color(theme::border())
                     .bg(theme::panel())
@@ -425,9 +425,9 @@ impl AppState {
                             .justify_center()
                             .size(px(28.0))
                             .flex_shrink_0()
-                            .rounded_md()
+                            .rounded(px(theme::radius_md()))
                             .bg(theme::with_alpha(hue, 0.18))
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(gpui::rgb(hue))
                             .child(SharedString::from(s.glyph.clone())),
                     )
@@ -445,7 +445,7 @@ impl AppState {
                                     .gap_2()
                                     .child(
                                         div()
-                                            .text_sm()
+                                            .text_size(px(theme::text_ui()))
                                             .text_color(theme::fg())
                                             .child(SharedString::from(s.name.clone())),
                                     )
@@ -453,9 +453,9 @@ impl AppState {
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(theme::text_caption()))
                                     .text_color(theme::dim())
-                                    .child(SharedString::from(fit_text(&s.id, 340.0, 12.0))),
+                                    .child(SharedString::from(fit_text(&s.id, 340.0, theme::text_caption()))),
                             ),
                     )
                     .child(
@@ -463,8 +463,8 @@ impl AppState {
                             .id(SharedString::from(format!("uninstall-{id}")))
                             .px_2()
                             .py_1()
-                            .rounded_md()
-                            .text_xs()
+                            .rounded(px(theme::radius_md()))
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::red())
                             .cursor_pointer()
                             .hover(|d| d.bg(theme::raised()))
@@ -512,9 +512,9 @@ impl AppState {
                         div()
                             .px_3()
                             .py_2()
-                            .rounded_md()
+                            .rounded(px(theme::radius_md()))
                             .bg(theme::raised())
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::muted())
                             .child(SharedString::from(st.clone())),
                     );
@@ -622,8 +622,8 @@ impl AppState {
                                 .gap_2()
                                 .px_2()
                                 .py_1()
-                                .rounded_sm()
-                                .text_xs()
+                                .rounded(px(theme::radius_sm()))
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::muted())
                                 .cursor_pointer()
                                 .hover(|d| d.bg(theme::raised()))
@@ -633,7 +633,7 @@ impl AppState {
                                     cx.notify();
                                 }))
                                 .child(div().text_color(theme::accent()).child("◆"))
-                                .child(SharedString::from(fit_text(name, 240.0, 12.0)))
+                                .child(SharedString::from(fit_text(name, 240.0, theme::text_caption())))
                                 .child(div().flex_1())
                                 .child(SharedString::from(fmt_time(*at))),
                         );
@@ -678,13 +678,13 @@ impl AppState {
                                 div()
                                     .w(px(72.0))
                                     .flex_shrink_0()
-                                    .text_xs()
+                                    .text_size(px(theme::text_caption()))
                                     .text_color(theme::dim())
                                     .child(SharedString::from(k)),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(theme::text_caption()))
                                     .text_color(theme::muted())
                                     .child(SharedString::from(v)),
                             ),
@@ -741,7 +741,7 @@ pub(crate) fn section_card(
         .flex_col()
         .gap_3()
         .p_4()
-        .rounded_lg()
+        .rounded(px(theme::radius_lg()))
         .border_1()
         .border_color(theme::border())
         .bg(theme::panel())
@@ -752,7 +752,7 @@ pub(crate) fn section_card(
                 .gap_1()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::fg())
                         .child(SharedString::from(title.to_string())),
@@ -760,7 +760,7 @@ pub(crate) fn section_card(
                 .when(!hint.is_empty(), |d| {
                     d.child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
                             .child(SharedString::from(hint)),
                     )
@@ -791,16 +791,16 @@ pub(crate) fn setting_row(
                 .flex_shrink_0()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::fg())
                         .child(SharedString::from(title.into())),
                 )
                 .when(!hint.is_empty(), |d| {
                     d.child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
-                            .child(SharedString::from(fit_text(&hint, 180.0, 12.0))),
+                            .child(SharedString::from(fit_text(&hint, 180.0, theme::text_caption()))),
                     )
                 }),
         )
@@ -850,7 +850,7 @@ pub(crate) fn form_row(
                 .when(!hint.is_empty(), |d| {
                     d.child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
                             .child(SharedString::from(hint.to_string())),
                     )
@@ -885,9 +885,9 @@ pub(crate) fn stepper(
                 .items_center()
                 .justify_center()
                 .size(px(24.0))
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .bg(theme::raised())
-                .text_sm()
+                .text_size(px(theme::text_ui()))
                 .text_color(if value <= min { theme::dim() } else { theme::fg() })
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::border()))
@@ -902,7 +902,7 @@ pub(crate) fn stepper(
                 .items_center()
                 .justify_center()
                 .min_w(px(56.0))
-                .text_sm()
+                .text_size(px(theme::text_ui()))
                 .text_color(theme::fg())
                 .child(SharedString::from(if suffix.is_empty() {
                     format!("{value}")
@@ -917,9 +917,9 @@ pub(crate) fn stepper(
                 .items_center()
                 .justify_center()
                 .size(px(24.0))
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .bg(theme::raised())
-                .text_sm()
+                .text_size(px(theme::text_ui()))
                 .text_color(if value >= max { theme::dim() } else { theme::fg() })
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::border()))
@@ -940,9 +940,9 @@ pub(crate) fn btn(
         .id(id)
         .px_3()
         .py_1()
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .bg(theme::accent())
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .text_color(gpui::rgb(0xffffff))
         .cursor_pointer()
         .hover(|d| d.opacity(0.88))
@@ -960,9 +960,9 @@ fn btn_danger(
         .id(id)
         .px_3()
         .py_1()
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .bg(theme::with_alpha(0xef4444, 0.14))
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .text_color(theme::red())
         .cursor_pointer()
         .hover(|d| d.opacity(0.85))
@@ -972,7 +972,7 @@ fn btn_danger(
 
 pub(crate) fn label(text: &str) -> impl IntoElement {
     div()
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .text_color(theme::dim())
         .child(SharedString::from(text.to_string()))
 }
@@ -981,9 +981,9 @@ pub(crate) fn tag(text: &str, color: gpui::Rgba) -> impl IntoElement {
     div()
         .px_1p5()
         .py_0p5()
-        .rounded_sm()
+        .rounded(px(theme::radius_sm()))
         .bg(theme::with_alpha(0xffffff, 0.06))
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .text_color(color)
         .child(SharedString::from(text.to_string()))
 }
@@ -994,8 +994,18 @@ fn stat_line(k: &str, v: String) -> impl IntoElement {
         .items_center()
         .justify_between()
         .py_0p5()
-        .child(div().text_xs().text_color(theme::dim()).child(SharedString::from(k.to_string())))
-        .child(div().text_xs().text_color(theme::fg()).child(SharedString::from(v)))
+        .child(
+            div()
+                .text_size(px(theme::text_caption()))
+                .text_color(theme::dim())
+                .child(SharedString::from(k.to_string())),
+        )
+        .child(
+            div()
+                .text_size(px(theme::text_caption()))
+                .text_color(theme::fg())
+                .child(SharedString::from(v)),
+        )
 }
 
 /// 可点击编辑的输入框。点击后进入 `FormField` 编辑态，回车提交。
@@ -1033,7 +1043,7 @@ pub(crate) fn input_box(
         .min_w(px(0.0))
         .h(px(28.0))
         .px_2()
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .bg(theme::raised())
         .border_1()
         .border_color(if editing {
@@ -1041,7 +1051,7 @@ pub(crate) fn input_box(
         } else {
             theme::border()
         })
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .cursor(gpui::CursorStyle::IBeam)
         .when(editing, |d| d.track_focus(&focus))
         .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
@@ -1089,7 +1099,7 @@ pub(crate) fn input_box(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_color(color)
-                .child(SharedString::from(fit_text(&display, 300.0, 12.0))),
+                .child(SharedString::from(fit_text(&display, 300.0, theme::text_caption()))),
         );
     }
     row.when(editing, |d| {

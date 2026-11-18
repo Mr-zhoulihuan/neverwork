@@ -11,27 +11,35 @@ use serde::{Deserialize, Serialize};
 ///
 /// `System` 在启动时按 Windows 深浅解析成 `Dark` / `Light`；
 /// 旧版 settings.json 里的 `"dark"`/`"light"`/`"system"` 继续有效。
+/// 已下线的旧主题（Nord 等）保留变体仅为反序列化兼容，加载时自动迁移。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
-    /// 深色（默认）。
-    #[default]
+    /// 深色。
     Dark,
     /// 浅色。
     Light,
     /// 跟随系统（深浅二选一，不选具体风格）。
     System,
-    /// Nord：冷调蓝灰。
+    /// Graphite：近黑中性灰 + 靛蓝（默认）。
+    #[default]
+    Graphite,
+    /// Carbon：碳灰 + 蓝，紧凑圆角与等宽数字。
+    Carbon,
+    /// Ember：暖墨灰 + 琥珀。
+    Ember,
+    // ---- retired：仅为旧 settings.json 反序列化保留，不出现在 all() ----
+    /// Nord（已下线，加载时迁到 Graphite）。
     Nord,
-    /// Dracula：紫黑底 + 紫强调。
+    /// Dracula（已下线，加载时迁到 Graphite）。
     Dracula,
-    /// One Dark：编辑器经典深灰。
+    /// One Dark（已下线，加载时迁到 Graphite）。
     OneDark,
-    /// Solarized 浅：暖米色纸感。
+    /// Solarized 浅（已下线，加载时迁到 Light）。
     SolarizedLight,
-    /// Solarized 深：青黑底。
+    /// Solarized 深（已下线，加载时迁到 Graphite）。
     SolarizedDark,
-    /// Gruvbox：暖褐 + 琥珀。
+    /// Gruvbox（已下线，加载时迁到 Graphite）。
     Gruvbox,
 }
 
@@ -41,6 +49,10 @@ impl ThemeMode {
             ThemeMode::Dark => "深色",
             ThemeMode::Light => "浅色",
             ThemeMode::System => "跟随系统",
+            ThemeMode::Graphite => "Graphite",
+            ThemeMode::Carbon => "Carbon",
+            ThemeMode::Ember => "Ember",
+            // retired：不会显示在 UI，只为 match 穷尽。
             ThemeMode::Nord => "Nord",
             ThemeMode::Dracula => "Dracula",
             ThemeMode::OneDark => "One Dark",
@@ -50,14 +62,27 @@ impl ThemeMode {
         }
     }
 
-    /// 在 `all()` 里的下标（也是 UI 色板表的下标）。
+    /// 旧主题的迁移目标：浅色偏好保留，其余统一到 Graphite。
+    pub fn migrated(self) -> ThemeMode {
+        match self {
+            ThemeMode::SolarizedLight => ThemeMode::Light,
+            ThemeMode::Nord
+            | ThemeMode::Dracula
+            | ThemeMode::OneDark
+            | ThemeMode::SolarizedDark
+            | ThemeMode::Gruvbox => ThemeMode::Graphite,
+            other => other,
+        }
+    }
+
+    /// 在 `all()` 里的下标（也是 UI 色板表的下标）。retired 值走迁移目标。
     pub fn index(&self) -> usize {
-        Self::all().iter().position(|m| m == self).unwrap_or(0)
+        Self::all().iter().position(|m| *m == self.migrated()).unwrap_or(0)
     }
 
     /// 该主题是不是浅色底（决定语义色取亮/暗档）。
     pub fn is_light_palette(&self) -> bool {
-        matches!(self, ThemeMode::Light | ThemeMode::SolarizedLight)
+        matches!(self.migrated(), ThemeMode::Light)
     }
 
     /// `System` 按系统深浅解析成具体主题；其它主题原样返回。
@@ -79,12 +104,9 @@ impl ThemeMode {
             ThemeMode::Dark,
             ThemeMode::Light,
             ThemeMode::System,
-            ThemeMode::Nord,
-            ThemeMode::Dracula,
-            ThemeMode::OneDark,
-            ThemeMode::SolarizedLight,
-            ThemeMode::SolarizedDark,
-            ThemeMode::Gruvbox,
+            ThemeMode::Graphite,
+            ThemeMode::Carbon,
+            ThemeMode::Ember,
         ]
     }
 }
@@ -1086,7 +1108,7 @@ impl Default for Settings {
             .map(|p| p.id.clone())
             .unwrap_or_default();
         Self {
-            theme: ThemeMode::Dark,
+            theme: ThemeMode::Graphite,
             ui_scale: default_ui_scale(),
             editor_font_size: default_editor_font(),
             show_line_numbers: true,
@@ -1194,6 +1216,17 @@ impl Settings {
             changed = true;
         }
         changed
+    }
+
+    /// 旧主题迁移：返回是否有改动。加载后调用并落盘。
+    pub fn migrate_theme(&mut self) -> bool {
+        let target = self.theme.migrated();
+        if target != self.theme {
+            self.theme = target;
+            true
+        } else {
+            false
+        }
     }
 
     /// 记录一次工作区打开：同路径更新打开时间（保留自定义名与收藏），
@@ -1701,5 +1734,79 @@ mod tests {
         let glm = s.providers.iter().find(|p| p.id == "glm").unwrap();
         assert_eq!(glm.model, "my-glm");
         assert!(glm.models.iter().any(|m| m.id == "glm-5.3"));
+    }
+
+    #[test]
+    fn default_theme_is_graphite() {
+        assert_eq!(Settings::default().theme, ThemeMode::Graphite);
+        assert_eq!(ThemeMode::default(), ThemeMode::Graphite);
+    }
+
+    #[test]
+    fn retired_theme_deserializes() {
+        // 旧 settings.json 里的主题名不能让整份配置解析失败（否则 Key 会被重置）。
+        let back: Settings = serde_json::from_str(r#"{"theme":"nord"}"#).unwrap();
+        assert_eq!(back.theme, ThemeMode::Nord);
+        assert_eq!(back.theme.migrated(), ThemeMode::Graphite);
+    }
+
+    #[test]
+    fn theme_migration_rules() {
+        assert_eq!(ThemeMode::SolarizedLight.migrated(), ThemeMode::Light);
+        for old in [
+            ThemeMode::Nord,
+            ThemeMode::Dracula,
+            ThemeMode::OneDark,
+            ThemeMode::SolarizedDark,
+            ThemeMode::Gruvbox,
+        ] {
+            assert_eq!(old.migrated(), ThemeMode::Graphite, "{} 应迁到 Graphite", old.label());
+        }
+        for keep in [
+            ThemeMode::Dark,
+            ThemeMode::Light,
+            ThemeMode::System,
+            ThemeMode::Graphite,
+            ThemeMode::Carbon,
+            ThemeMode::Ember,
+        ] {
+            assert_eq!(keep.migrated(), keep, "{} 不该被迁移", keep.label());
+        }
+    }
+
+    #[test]
+    fn active_theme_list_has_six() {
+        let all = ThemeMode::all();
+        assert_eq!(all.len(), 6);
+        for m in [
+            ThemeMode::Dark,
+            ThemeMode::Light,
+            ThemeMode::System,
+            ThemeMode::Graphite,
+            ThemeMode::Carbon,
+            ThemeMode::Ember,
+        ] {
+            assert!(all.contains(&m), "{} 缺失", m.label());
+        }
+    }
+
+    #[test]
+    fn retired_theme_index_falls_back_to_target() {
+        // index() 用于取色板：retired 值不能越界，也不能取错色板。
+        assert_eq!(ThemeMode::Nord.index(), ThemeMode::Graphite.index());
+        assert_eq!(ThemeMode::SolarizedLight.index(), ThemeMode::Light.index());
+        assert!(ThemeMode::SolarizedLight.is_light_palette());
+        assert!(!ThemeMode::Nord.is_light_palette());
+    }
+
+    #[test]
+    fn migrate_theme_flags_changes() {
+        let mut s = Settings::default();
+        assert!(!s.migrate_theme(), "默认 Graphite 不需要迁移");
+        s.theme = ThemeMode::Dracula;
+        assert!(s.migrate_theme());
+        assert_eq!(s.theme, ThemeMode::Graphite);
+        s.theme = ThemeMode::Light;
+        assert!(!s.migrate_theme());
     }
 }

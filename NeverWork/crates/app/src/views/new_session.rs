@@ -24,10 +24,10 @@ impl AppState {
             .flex()
             .flex_col()
             .w(px(560.0))
-            .rounded_lg()
+            .rounded(px(theme::radius_lg()))
             .bg(theme::panel())
             .border_1()
-            .border_color(theme::border())
+            .border_color(theme::border_strong())
             .overflow_hidden();
 
         // ---- 标题 ----
@@ -47,13 +47,13 @@ impl AppState {
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(theme::text_ui()))
                                 .font_weight(FontWeight::BOLD)
                                 .child("新建会话"),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::dim())
                                 .child("先选运行模式；创建后不能切换，需要另一种请再新建一个会话"),
                         ),
@@ -64,8 +64,8 @@ impl AppState {
                         .id("new-session-cancel")
                         .px_2()
                         .py_1()
-                        .rounded_md()
-                        .text_xs()
+                        .rounded(px(theme::radius_md()))
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()))
@@ -86,7 +86,7 @@ impl AppState {
                 .mx_4()
                 .mt_4()
                 .p_4()
-                .rounded_lg()
+                .rounded(px(theme::radius_lg()))
                 .border_1()
                 .border_color(theme::border())
                 .bg(theme::raised())
@@ -102,9 +102,9 @@ impl AppState {
                         .justify_center()
                         .size(px(34.0))
                         .flex_shrink_0()
-                        .rounded_lg()
+                        .rounded(px(theme::radius_lg()))
                         .bg(theme::with_alpha(0x888888, 0.16))
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::muted())
                         .child("◎"),
                 )
@@ -117,14 +117,14 @@ impl AppState {
                         .min_w(px(0.0))
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(theme::text_ui()))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::fg())
                                 .child("单助手"),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::muted())
                                 .child("一个助手带工具：问答、读文件、改代码都由它负责。适合问答、单点修改与快速迭代。"),
                         ),
@@ -136,7 +136,7 @@ impl AppState {
         if team.roles.is_empty() {
             roles_row = roles_row.child(
                 div()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child("团队里还没有角色，创建后去「团队」页添加"),
             );
@@ -159,7 +159,7 @@ impl AppState {
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::muted())
                                 .child(SharedString::from(role.name.clone())),
                         ),
@@ -168,7 +168,7 @@ impl AppState {
             if team.roles.len() > 6 {
                 roles_row = roles_row.child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .child(SharedString::from(format!("+{}", team.roles.len() - 6))),
                 );
@@ -183,7 +183,7 @@ impl AppState {
                 .gap_1()
                 .mt_2()
                 .p_2()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .bg(theme::panel())
                 .border_1()
                 .border_color(theme::border());
@@ -200,7 +200,7 @@ impl AppState {
                         .gap_2()
                         .px_2()
                         .py_1()
-                        .rounded_md()
+                        .rounded(px(theme::radius_md()))
                         .when(on, |d| d.bg(theme::accent_soft()))
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()))
@@ -212,14 +212,14 @@ impl AppState {
                         }))
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(if on { theme::accent() } else { theme::fg() })
                                 .child(SharedString::from(name)),
                         )
                         .child(div().flex_1())
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::dim())
                                 .child(SharedString::from(format!("{n} 个角色"))),
                         ),
@@ -240,7 +240,7 @@ impl AppState {
                 .mt_3()
                 .mb_4()
                 .p_4()
-                .rounded_lg()
+                .rounded(px(theme::radius_lg()))
                 .border_1()
                 .border_color(theme::border())
                 .bg(theme::raised())
@@ -256,9 +256,9 @@ impl AppState {
                         .justify_center()
                         .size(px(34.0))
                         .flex_shrink_0()
-                        .rounded_lg()
+                        .rounded(px(theme::radius_lg()))
                         .bg(theme::accent_soft())
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::accent())
                         .child("◈"),
                 )
@@ -276,7 +276,7 @@ impl AppState {
                                 .gap_2()
                                 .child(
                                     div()
-                                        .text_sm()
+                                        .text_size(px(theme::text_ui()))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(theme::fg())
                                         .child(SharedString::from(format!(
@@ -287,9 +287,9 @@ impl AppState {
                                 .child(
                                     div()
                                         .px_1()
-                                        .rounded_sm()
+                                        .rounded(px(theme::radius_sm()))
                                         .bg(theme::accent_soft())
-                                        .text_xs()
+                                        .text_size(px(theme::text_caption()))
                                         .text_color(theme::accent())
                                         .child("多角色交接"),
                                 )
@@ -301,7 +301,7 @@ impl AppState {
                                         .rounded_full()
                                         .border_1()
                                         .border_color(theme::border())
-                                        .text_xs()
+                                        .text_size(px(theme::text_caption()))
                                         .text_color(theme::accent())
                                         .cursor_pointer()
                                         .hover(|d| d.bg(theme::border()))
@@ -317,7 +317,7 @@ impl AppState {
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::muted())
                                 .child("多角色按交接顺序协作；用 @角色名 指定入口角色，每个角色可绑定插件（技能）。适合分阶段的大任务。"),
                         )

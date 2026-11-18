@@ -84,10 +84,10 @@ impl AppState {
                 .items_center()
                 .justify_center()
                 .size(px(30.0))
-                .rounded_xl()
+                .rounded(px(theme::radius_xl()))
                 .bg(theme::green())
                 .mb_3()
-                .text_sm()
+                .text_size(px(theme::text_ui()))
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_color(gpui::rgb(0xffffff))
                 .child("N"),
@@ -150,7 +150,7 @@ impl AppState {
             .items_center()
             .justify_center()
             .size(px(40.0))
-            .rounded_xl()
+            .rounded(px(theme::radius_xl()))
             .cursor_pointer()
             .when(active, |d| d.bg(theme::raised()))
             .when(!active, |d| d.hover(|d| d.bg(theme::panel())))
@@ -184,7 +184,7 @@ impl AppState {
             // 符号字体（YaHei / Segoe UI Symbol）的墨迹重心比行盒中心低 ≈ 2.5px，
             // 不补偿时图标看起来偏下；pb 把行盒整体上提，让字形几何居中。
             .pb(px(5.0))
-            .rounded_xl()
+            .rounded(px(theme::radius_xl()))
             .text_size(px(18.0))
             .cursor_pointer()
             .when(active, |d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -234,7 +234,7 @@ impl AppState {
                     .justify_center()
                     .w(px(16.0))
                     .h(px(64.0))
-                    .rounded_lg()
+                    .rounded(px(theme::radius_lg()))
                     .bg(theme::raised())
                     .border_1()
                     .border_color(theme::border())
@@ -272,7 +272,7 @@ impl AppState {
                 .child(
                     div()
                         .flex_1()
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(theme::fg())
                         .child("对话"),
@@ -284,11 +284,11 @@ impl AppState {
                         .items_center()
                         .justify_center()
                         .size(px(28.0))
-                        .rounded_lg()
+                        .rounded(px(theme::radius_lg()))
                         .bg(theme::raised())
                         .border_1()
                         .border_color(theme::border())
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::muted())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
@@ -313,7 +313,7 @@ impl AppState {
                 .mb_1()
                 .px_2()
                 .py_1()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .id("workspace-strip")
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised()))
@@ -322,7 +322,7 @@ impl AppState {
                 }))
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(if self.remote.is_some() {
                             theme::yellow()
                         } else {
@@ -334,7 +334,7 @@ impl AppState {
                     div()
                         .flex_shrink_0()
                         .whitespace_nowrap()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .child(SharedString::from(crate::views::text_fit::fit_text(
                             self.workspace
@@ -342,17 +342,22 @@ impl AppState {
                                 .map(|w| w.name.as_str())
                                 .unwrap_or("未选择工作区"),
                             120.0,
-                            12.0,
+                            theme::text_caption(),
                         ))),
                 )
                 .child(div().flex_1())
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .child(SharedString::from(format!("{} 项", self.files.len()))),
                 )
-                .child(div().text_xs().text_color(theme::accent()).child("管理")),
+                .child(
+                    div()
+                        .text_size(px(theme::text_caption()))
+                        .text_color(theme::accent())
+                        .child("管理"),
+                ),
         );
 
         // ---- 会话卡片列表 ----
@@ -404,7 +409,7 @@ impl AppState {
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(theme::text_caption()))
                                     .text_color(theme::dim())
                                     .child("最近"),
                             )
@@ -430,7 +435,7 @@ impl AppState {
                 div()
                     .px_3()
                     .py_4()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child(if filter_active {
                         "没有匹配的会话"
@@ -452,7 +457,7 @@ impl AppState {
                 .px_2()
                 .py_1()
                 .mt_1()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised()))
                 .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -460,13 +465,13 @@ impl AppState {
                 }))
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .child(if self.archive_open { "▾" } else { "▸" }),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .child(SharedString::from(format!("已归档 {count}"))),
                 )
@@ -475,8 +480,8 @@ impl AppState {
                     div()
                         .id("archive-clean")
                         .px_1()
-                        .rounded_sm()
-                        .text_xs()
+                        .rounded(px(theme::radius_sm()))
+                        .text_size(px(theme::text_caption()))
                         .text_color(if confirm { theme::red() } else { theme::dim() })
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
@@ -503,7 +508,7 @@ impl AppState {
                 .justify_between()
                 .px_3()
                 .py_1p5()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child(SharedString::from(format!("{} 个会话", self.sessions.len())))
                 .child(
@@ -514,8 +519,8 @@ impl AppState {
                         .justify_center()
                         .h(px(22.0))
                         .px_2()
-                        .rounded_md()
-                        .text_sm()
+                        .rounded(px(theme::radius_md()))
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::dim())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -541,7 +546,7 @@ impl AppState {
                 .justify_center()
                 .w(px(20.0))
                 .h(px(64.0))
-                .rounded_lg()
+                .rounded(px(theme::radius_lg()))
                 .bg(theme::raised())
                 .border_1()
                 .border_color(theme::border())
@@ -567,7 +572,7 @@ impl AppState {
         let text = if placeholder {
             "搜索会话…".to_string()
         } else {
-            crate::views::text_fit::fit_text(&query, 176.0, 12.0)
+            crate::views::text_fit::fit_text(&query, 176.0, theme::text_caption())
         };
         let mut row = div()
             .id("session-search")
@@ -578,7 +583,7 @@ impl AppState {
             .mb_1()
             .px_2()
             .py_1()
-            .rounded_md()
+            .rounded(px(theme::radius_md()))
             .bg(theme::raised())
             .border_1()
             .border_color(if focused {
@@ -598,14 +603,20 @@ impl AppState {
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
                 this.on_session_search_key(ev, cx);
             }))
-            .child(div().flex_shrink_0().text_xs().text_color(theme::dim()).child("⌕"))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(theme::text_caption()))
+                    .text_color(theme::dim())
+                    .child("⌕"),
+            )
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(if placeholder { theme::dim() } else { theme::fg() })
                     .child(SharedString::from(text)),
             );
@@ -615,8 +626,8 @@ impl AppState {
                     .id("session-search-clear")
                     .flex_shrink_0()
                     .px_1()
-                    .rounded_sm()
-                    .text_xs()
+                    .rounded(px(theme::radius_sm()))
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
@@ -654,7 +665,7 @@ impl AppState {
             0.0
         };
         let title_w = CARD_INNER - 20.0 - 8.0 - badge_w - action_w - tag_w - 6.0 - 18.0;
-        let title_text = crate::views::text_fit::fit_text(&session.title, title_w, 14.0);
+        let title_text = crate::views::text_fit::fit_text(&session.title, title_w, theme::text_title());
 
         // 「执行中」：用动图 + 实时耗时替代静态标签。streaming 是全局的，
         // 重启后残留的 Working 状态因为拿不到本次运行时刻，退回静态胶囊；
@@ -734,7 +745,7 @@ impl AppState {
                     .flex_shrink_0()
                     .rounded_full()
                     .bg(soft(color, 0.22))
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(color)
                     .child(SharedString::from(icon_text)),
             );
@@ -744,7 +755,7 @@ impl AppState {
         head = head.child(
             div()
                 .flex_shrink_0()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(if mode.is_team() {
                     theme::accent()
                 } else {
@@ -757,7 +768,7 @@ impl AppState {
             head = head.child(
                 div()
                     .flex_shrink_0()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::green())
                     .child(SharedString::from(session.badge.clone())),
             );
@@ -772,9 +783,9 @@ impl AppState {
                     .id(SharedString::from(format!("sess-tag-{idx}")))
                     .flex_shrink_0()
                     .px_1()
-                    .rounded_sm()
+                    .rounded(px(theme::radius_sm()))
                     .bg(theme::with_alpha(hue, 0.18))
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(gpui::rgb(hue))
                     .cursor_pointer()
                     .hover(|d| d.opacity(0.75))
@@ -790,7 +801,7 @@ impl AppState {
             div()
                 .flex_shrink_0()
                 .whitespace_nowrap()
-                .text_sm()
+                .text_size(px(theme::text_title()))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme::fg())
                 .child(SharedString::from(title_text)),
@@ -817,7 +828,7 @@ impl AppState {
                     .flex_shrink_0()
                     .rounded_full()
                     .bg(bg)
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(fg)
                     .cursor_pointer()
                     .hover(|d| d.opacity(0.8))
@@ -834,7 +845,7 @@ impl AppState {
         } else {
             session.preview.clone()
         };
-        let preview_text = crate::views::text_fit::fit_text(&preview_raw, preview_w, 12.0);
+        let preview_text = crate::views::text_fit::fit_text(&preview_raw, preview_w, theme::text_caption());
 
         let mut foot = div()
             .flex()
@@ -846,7 +857,7 @@ impl AppState {
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child(SharedString::from(preview_text)),
             )
@@ -854,7 +865,7 @@ impl AppState {
                 div()
                     .flex_shrink_0()
                     .whitespace_nowrap()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child(SharedString::from(session.updated_label.clone())),
             );
@@ -867,9 +878,9 @@ impl AppState {
                 .gap_1()
                 .px_1()
                 .py_0p5()
-                .rounded_sm()
+                .rounded(px(theme::radius_sm()))
                 .bg(pill_bg)
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(pill_fg);
             if running {
                 // 动图：三个点每 200ms 轮流点亮，由 run_clock 心跳驱动重绘。
@@ -899,7 +910,7 @@ impl AppState {
                 .justify_center()
                 .size(px(16.0))
                 .flex_shrink_0()
-                .rounded_sm()
+                .rounded(px(theme::radius_sm()))
                 .text_color(if menu_open { theme::fg() } else { theme::dim() })
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -922,7 +933,7 @@ impl AppState {
                 .justify_center()
                 .size(px(16.0))
                 .flex_shrink_0()
-                .rounded_sm()
+                .rounded(px(theme::radius_sm()))
                 .text_color(if pinned { theme::yellow() } else { theme::dim() })
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -941,7 +952,7 @@ impl AppState {
             .gap_1()
             .px(px(CARD_PAD))
             .py(px(7.0))
-            .rounded_lg()
+            .rounded(px(theme::radius_lg()))
             .cursor_pointer()
             .when(selected, |d| {
                 d.bg(theme::raised())
@@ -984,7 +995,7 @@ impl AppState {
             .gap_1()
             .px_1()
             .py_1()
-            .rounded_md()
+            .rounded(px(theme::radius_md()))
             .bg(theme::bg())
             .border_1()
             .border_color(theme::accent_line())
@@ -997,7 +1008,7 @@ impl AppState {
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::fg())
                     .cursor(gpui::CursorStyle::IBeam)
                     .track_focus(&self.focus_handle)
@@ -1011,16 +1022,18 @@ impl AppState {
                         this.on_rename_session_key(ev, cx);
                     }))
                     .child(SharedString::from(crate::views::text_fit::fit_text(
-                        &value, 120.0, 12.0,
+                        &value,
+                        120.0,
+                        theme::text_caption(),
                     ))),
             )
             .child(
                 div()
                     .id("session-rename-save")
                     .px_1p5()
-                    .rounded_sm()
+                    .rounded(px(theme::radius_sm()))
                     .bg(theme::accent())
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::bg())
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -1033,8 +1046,8 @@ impl AppState {
                 div()
                     .id("session-rename-cancel")
                     .px_1()
-                    .rounded_sm()
-                    .text_xs()
+                    .rounded(px(theme::radius_sm()))
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))

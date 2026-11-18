@@ -69,7 +69,7 @@ pub(crate) fn titlebar(
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_sm()
+                .text_size(px(theme::text_ui()))
                 .child(div().font_weight(FontWeight::BOLD).child("NeverWork"))
                 .child(
                     div()
@@ -82,7 +82,7 @@ pub(crate) fn titlebar(
         .when(std::env::var("NW_LAYOUT_DEBUG").is_ok(), |d| {
             d.child(
                 div()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::yellow())
                     .child(SharedString::from(format!("W={:.0}", state.layout_w.get()))),
             )
@@ -92,8 +92,8 @@ pub(crate) fn titlebar(
                 .id("toggle-focus")
                 .px_2()
                 .py_1()
-                .rounded_md()
-                .text_xs()
+                .rounded(px(theme::radius_md()))
+                .text_size(px(theme::text_caption()))
                 .text_color(if state.focus_mode { theme::accent() } else { theme::muted() })
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised()))

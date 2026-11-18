@@ -12,10 +12,10 @@ pub fn avatar(initial: &str, color: Hsla, size: f32) -> Div {
         .items_center()
         .justify_center()
         .size(px(size))
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .bg(color)
         .text_color(theme::fg())
-        .text_sm()
+        .text_size(px(theme::text_ui()))
         .font_weight(FontWeight::BOLD)
         .child(SharedString::from(initial.to_string()))
 }
@@ -25,12 +25,12 @@ pub fn tag(text: &str) -> Div {
     div()
         .px_2()
         .py_0p5()
-        .rounded_sm()
+        .rounded(px(theme::radius_sm()))
         .bg(theme::raised())
         .border_1()
         .border_color(theme::border())
         .text_color(theme::dim())
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .child(SharedString::from(text.to_string()))
 }
 
@@ -40,8 +40,13 @@ pub fn status_dot(label: &str) -> Div {
         .flex()
         .items_center()
         .gap_1()
-        .child(div().size(px(7.0)).rounded_md().bg(theme::green()))
-        .child(div().text_xs().text_color(theme::muted()).child(SharedString::from(label.to_string())))
+        .child(div().size(px(7.0)).rounded_full().bg(theme::green()))
+        .child(
+            div()
+                .text_size(px(theme::text_caption()))
+                .text_color(theme::muted())
+                .child(SharedString::from(label.to_string())),
+        )
 }
 
 /// 分段按钮（模式切换中的一项）。`on` 表示选中。
@@ -53,8 +58,8 @@ pub fn segment(label: &str, on: bool) -> Div {
         .gap_1()
         .h(px(30.0))
         .flex_1()
-        .rounded_md()
-        .text_sm()
+        .rounded(px(theme::radius_md()))
+        .text_size(px(theme::text_ui()))
         .font_weight(FontWeight::SEMIBOLD);
     if on {
         base.bg(theme::accent_soft()).text_color(theme::accent())
@@ -72,17 +77,22 @@ pub fn session_item(title: &str, time: &str, on: bool) -> Div {
         .gap_2()
         .h(px(32.0))
         .px_2()
-        .rounded_md()
-        .text_sm();
+        .rounded(px(theme::radius_md()))
+        .text_size(px(theme::text_ui()));
     let row = if on {
         base.bg(theme::accent_soft()).text_color(theme::fg())
     } else {
         base.text_color(theme::muted())
     };
-    row.child(div().text_xs().text_color(theme::dim()).child("◐"))
+    row.child(div().text_size(px(theme::text_caption())).text_color(theme::dim()).child("◐"))
         .child(div().flex_shrink_0().child(SharedString::from(title.to_string())))
         .child(div().flex_1())
-        .child(div().text_xs().text_color(theme::dim()).child(SharedString::from(time.to_string())))
+        .child(
+            div()
+                .text_size(px(theme::text_caption()))
+                .text_color(theme::dim())
+                .child(SharedString::from(time.to_string())),
+        )
 }
 
 /// 文件树行。
@@ -95,8 +105,8 @@ pub fn file_row(name: &str, level: u8, is_dir: bool, modified: bool, owner: Opti
         .h(px(28.0))
         .pl(px(indent))
         .pr_2()
-        .rounded_sm()
-        .text_sm();
+        .rounded(px(theme::radius_sm()))
+        .text_size(px(theme::text_ui()));
     let row = if on {
         base.bg(theme::raised()).text_color(theme::fg())
     } else {
@@ -104,20 +114,30 @@ pub fn file_row(name: &str, level: u8, is_dir: bool, modified: bool, owner: Opti
     };
     let icon = if is_dir { "▣" } else { "⬢" };
     let mut row = row
-        .child(div().text_xs().text_color(theme::dim()).child(SharedString::from(icon.to_string())))
+        .child(
+            div()
+                .text_size(px(theme::text_caption()))
+                .text_color(theme::dim())
+                .child(SharedString::from(icon.to_string())),
+        )
         .child(div().flex_1().child(SharedString::from(name.to_string())));
     if let Some(o) = owner {
         row = row.child(
             div()
                 .px_1()
-                .rounded_sm()
+                .rounded(px(theme::radius_sm()))
                 .bg(theme::accent())
-                .text_color(theme::fg())
-                .text_xs()
+                .text_color(theme::accent_fg())
+                .text_size(px(theme::text_caption()))
                 .child(SharedString::from(o.to_string())),
         );
     } else if modified {
-        row = row.child(div().text_xs().text_color(theme::yellow()).child("M"));
+        row = row.child(
+            div()
+                .text_size(px(theme::text_caption()))
+                .text_color(theme::yellow())
+                .child("M"),
+        );
     }
     row
 }
@@ -125,7 +145,7 @@ pub fn file_row(name: &str, level: u8, is_dir: bool, modified: bool, owner: Opti
 /// 卡片容器（边框 + 圆角 + 内边距）。
 pub fn card() -> Div {
     div()
-        .rounded_lg()
+        .rounded(px(theme::radius_lg()))
         .border_1()
         .border_color(theme::border())
         .bg(theme::raised())
@@ -141,10 +161,10 @@ pub fn primary_button(label: &str) -> Div {
         .gap_1()
         .h(px(32.0))
         .px_4()
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .bg(theme::accent())
-        .text_color(theme::fg())
-        .text_sm()
+        .text_color(theme::accent_fg())
+        .text_size(px(theme::text_ui()))
         .font_weight(FontWeight::SEMIBOLD)
         .child(SharedString::from(label.to_string()))
 }
@@ -157,11 +177,11 @@ pub fn ghost_button(label: &str) -> Div {
         .justify_center()
         .h(px(32.0))
         .px_3()
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .border_1()
         .border_color(theme::border())
         .text_color(theme::fg())
-        .text_sm()
+        .text_size(px(theme::text_ui()))
         .child(SharedString::from(label.to_string()))
 }
 
@@ -182,7 +202,10 @@ pub fn px_w(w: f32) -> gpui::Pixels {
 
 /// 文章/正文文本。
 pub fn body_text(text: &str, color: Hsla) -> Div {
-    div().text_sm().text_color(color).child(SharedString::from(text.to_string()))
+    div()
+        .text_size(px(theme::text_ui()))
+        .text_color(color)
+        .child(SharedString::from(text.to_string()))
 }
 
 /// 允许组件被 `.child()` 消费（Div 已实现 IntoElement，这里仅作占位以防类型推断问题）。

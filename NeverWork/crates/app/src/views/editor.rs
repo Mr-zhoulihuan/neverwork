@@ -70,7 +70,7 @@ impl AppState {
                         .bg(theme::surface())
                         .border_b_1()
                         .border_color(theme::accent())
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::fg())
                         // 右键标签：关闭 / 关闭全部
                         .on_mouse_down(
@@ -81,7 +81,7 @@ impl AppState {
                                 this.open_tab_menu(at, cx);
                             }),
                         )
-                        .child(div().text_xs().text_color(theme::orange()).child("⬢"))
+                        .child(div().text_size(px(theme::text_caption())).text_color(theme::orange()).child("⬢"))
                         .child(SharedString::from(format!("{filename}{dirty_mark}")))
                         // 关闭当前文件：有未保存改动会先落盘，失败则不关
                         .child(
@@ -91,8 +91,8 @@ impl AppState {
                                 .items_center()
                                 .justify_center()
                                 .size(px(18.0))
-                                .rounded_sm()
-                                .text_xs()
+                                .rounded(px(theme::radius_sm()))
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::dim())
                                 .cursor_pointer()
                                 .hover(|d| {
@@ -114,8 +114,8 @@ impl AppState {
                         .gap_1()
                         .px_2()
                         .py_1()
-                        .rounded_md()
-                        .text_xs()
+                        .rounded(px(theme::radius_md()))
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()))
@@ -132,8 +132,8 @@ impl AppState {
                         .gap_1()
                         .px_2()
                         .py_1()
-                        .rounded_md()
-                        .text_xs()
+                        .rounded(px(theme::radius_md()))
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::green())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()))
@@ -150,8 +150,8 @@ impl AppState {
                         .gap_1()
                         .px_2()
                         .py_1()
-                        .rounded_md()
-                        .text_xs()
+                        .rounded(px(theme::radius_md()))
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()))
@@ -269,7 +269,7 @@ impl AppState {
                 .border_t_1()
                 .border_color(theme::border())
                 .bg(theme::panel())
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child(SharedString::from(format!(
                     "行 {} · 列 {}　{}　{} 行{}",
@@ -328,7 +328,7 @@ impl AppState {
                     .bg(theme::surface())
                     .border_b_1()
                     .border_color(theme::accent())
-                    .text_sm()
+                    .text_size(px(theme::text_ui()))
                     .text_color(theme::fg())
                     // 右键标签：关闭 / 关闭全部
                     .on_mouse_down(
@@ -339,7 +339,7 @@ impl AppState {
                             this.open_tab_menu(at, cx);
                         }),
                     )
-                    .child(div().text_xs().text_color(color).child("⬢"))
+                    .child(div().text_size(px(theme::text_caption())).text_color(color).child("⬢"))
                     .child(SharedString::from(filename.clone()))
                     .child(
                         div()
@@ -348,8 +348,8 @@ impl AppState {
                             .items_center()
                             .justify_center()
                             .size(px(18.0))
-                            .rounded_sm()
-                            .text_xs()
+                            .rounded(px(theme::radius_sm()))
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
                             .cursor_pointer()
                             .hover(|d| {
@@ -374,8 +374,8 @@ impl AppState {
                     .gap_1()
                     .px_2()
                     .py_1()
-                    .rounded_md()
-                    .text_xs()
+                    .rounded(px(theme::radius_md()))
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::green())
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::raised()))
@@ -393,8 +393,8 @@ impl AppState {
                     .gap_1()
                     .px_2()
                     .py_1()
-                    .rounded_md()
-                    .text_xs()
+                    .rounded(px(theme::radius_md()))
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::accent())
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::raised()))
@@ -413,8 +413,8 @@ impl AppState {
                     .gap_1()
                     .px_2()
                     .py_1()
-                    .rounded_md()
-                    .text_xs()
+                    .rounded(px(theme::radius_md()))
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::muted())
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::raised()))
@@ -475,7 +475,7 @@ impl AppState {
                                 .justify_center()
                                 .w(px(72.0))
                                 .h(px(90.0))
-                                .rounded_lg()
+                                .rounded(px(theme::radius_lg()))
                                 .bg(theme::tint(theme::red(), 0.14))
                                 .border_1()
                                 .border_color(theme::tint(theme::red(), 0.45))
@@ -486,12 +486,12 @@ impl AppState {
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(theme::text_ui()))
                                 .text_color(theme::fg())
                                 .child(SharedString::from(filename.clone())),
                         )
                         .child(
-                            div().text_xs().text_color(theme::dim()).child(
+                            div().text_size(px(theme::text_caption())).text_color(theme::dim()).child(
                                 SharedString::from(format!("{size} · 内置查看暂不支持 PDF 排版渲染")),
                             ),
                         )
@@ -500,9 +500,9 @@ impl AppState {
                                 .id("media-open-external-card")
                                 .px_3()
                                 .py(px(6.0))
-                                .rounded_md()
+                                .rounded(px(theme::radius_md()))
                                 .bg(theme::accent_soft())
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::accent())
                                 .cursor_pointer()
                                 .hover(|d| d.bg(theme::border()))
@@ -553,7 +553,7 @@ impl AppState {
             .border_t_1()
             .border_color(theme::border())
             .bg(theme::panel())
-            .text_xs()
+            .text_size(px(theme::text_caption()))
             .text_color(theme::dim())
             .child(SharedString::from(format!(
                 "{kind}查看 · {filename} · {size}"
@@ -603,7 +603,7 @@ impl AppState {
             .flex()
             .items_center()
             .gap_2()
-            .child(div().text_xs().text_color(theme::dim()).child("⌕"))
+            .child(div().text_size(px(theme::text_caption())).text_color(theme::dim()).child("⌕"))
             .child(
                 div()
                     .id("find-query")
@@ -614,7 +614,7 @@ impl AppState {
                     .min_w(px(80.0))
                     .h(px(26.0))
                     .px_2()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::raised())
                     .border_1()
                     .border_color(if find_editing {
@@ -634,7 +634,7 @@ impl AppState {
                     }))
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(if self.find.query.is_empty() {
                                 theme::dim()
                             } else {
@@ -654,7 +654,7 @@ impl AppState {
                 div()
                     .flex_shrink_0()
                     .min_w(px(56.0))
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(if count == 0 { theme::dim() } else { theme::muted() })
                     .child(SharedString::from(if self.find.query.is_empty() {
                         "—".to_string()
@@ -675,8 +675,8 @@ impl AppState {
                 .items_center()
                 .justify_center()
                 .size(px(22.0))
-                .rounded_sm()
-                .text_xs()
+                .rounded(px(theme::radius_sm()))
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::muted())
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -694,8 +694,8 @@ impl AppState {
                 .id("find-case")
                 .px_1p5()
                 .py_0p5()
-                .rounded_sm()
-                .text_xs()
+                .rounded(px(theme::radius_sm()))
+                .text_size(px(theme::text_caption()))
                 .cursor_pointer()
                 .when(self.find.case_sensitive, |d| {
                     d.bg(theme::accent_soft()).text_color(theme::accent())
@@ -720,7 +720,7 @@ impl AppState {
             .flex()
             .items_center()
             .gap_2()
-            .child(div().text_xs().text_color(theme::dim()).child("⇄"))
+            .child(div().text_size(px(theme::text_caption())).text_color(theme::dim()).child("⇄"))
             .child(
                 div()
                     .id("find-replace")
@@ -731,7 +731,7 @@ impl AppState {
                     .min_w(px(80.0))
                     .h(px(26.0))
                     .px_2()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::raised())
                     .border_1()
                     .border_color(if repl_editing {
@@ -751,7 +751,7 @@ impl AppState {
                     }))
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(if self.find.replace.is_empty() {
                                 theme::dim()
                             } else {
@@ -772,9 +772,9 @@ impl AppState {
                     .id("replace-one")
                     .px_2()
                     .py_1()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::raised())
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::muted())
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::border()).text_color(theme::fg()))
@@ -788,9 +788,9 @@ impl AppState {
                     .id("replace-all")
                     .px_2()
                     .py_1()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::accent())
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(gpui::rgb(0xffffff))
                     .cursor_pointer()
                     .hover(|d| d.opacity(0.88))
@@ -963,8 +963,8 @@ fn render_line(
                         .justify_center()
                         .size(px(12.0))
                         .mr_1()
-                        .rounded_sm()
-                        .text_xs()
+                        .rounded(px(theme::radius_sm()))
+                        .text_size(px(theme::text_caption()))
                         .text_color(if folded { theme::accent() } else { theme::dim() })
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -986,7 +986,7 @@ fn render_line(
             d.child(
                 gutter.child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .child(SharedString::from(format!("{}", idx + 1))),
                 ),

@@ -59,10 +59,10 @@ impl AppState {
             .flex()
             .flex_col()
             .p_1p5()
-            .rounded_xl()
+            .rounded(px(theme::radius_xl()))
             .bg(theme::panel())
             .border_1()
-            .border_color(theme::border())
+            .border_color(theme::border_strong())
             .occlude()
             // 菜单内点击不往外冒，避免误触底座
             .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _w, _cx| {})
@@ -74,7 +74,7 @@ impl AppState {
                     .py_1()
                     .whitespace_nowrap()
                     .overflow_hidden()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child(SharedString::from(crate::views::text_fit::fit_text(
                         &format!("「{title}」"),
@@ -237,7 +237,7 @@ impl AppState {
                 div()
                     .px_2()
                     .py_1()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child("生成中，状态以运行态为准"),
             );
@@ -285,8 +285,8 @@ pub(crate) fn menu_row(
         .gap_2()
         .px_2()
         .py_1p5()
-        .rounded_lg()
-        .text_sm()
+        .rounded(px(theme::radius_lg()))
+        .text_size(px(theme::text_ui()))
         .text_color(label_fg)
         .when(active, |d| d.bg(theme::raised()))
         .child(

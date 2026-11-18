@@ -1,9 +1,10 @@
-//! NeverWork 设计令牌 —— 对齐 `design/DESIGN-SPEC.md`。
+//! NeverWork 设计令牌 —— 对齐 `docs/superpowers/specs/2026-11-18-product-skins-design.md`。
 //!
-//! 多套**完整主题色板**（深色 / 浅色 / Nord / Dracula / One Dark /
-//! Solarized 浅深 / Gruvbox）通过全局模式切换：`set_theme_mode(...)` 之后，
-//! 所有 `theme::xxx()` 调用立刻返回新色板的值，视图无需改一行代码。
-//! 模式存在原子变量里，只在主线程写、渲染线程读，避免给每个视图传上下文。
+//! 6 套**完整主题色板**（深色 / 浅色 / 跟随系统 / Graphite / Carbon / Ember）
+//! 通过全局模式切换：`set_theme_mode(...)` 之后，所有 `theme::xxx()` 调用立刻
+//! 返回新色板的值，视图无需改一行代码。模式存在原子变量里，只在主线程写、
+//! 渲染线程读，避免给每个视图传上下文。形态 token（圆角 / 字号 / mono 数字）
+//! 与色板平行，同一套下标。
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -21,40 +22,57 @@ struct Palette {
     panel: u32,
     raised: u32,
     border: u32,
+    /// 弹层 / 选中态的强边框，比 border 亮一档。
+    border_strong: u32,
     fg: u32,
     muted: u32,
     dim: u32,
     accent: u32,
+    /// accent 填充底上的文字色（亮强调色用深字，保证对比度）。
+    accent_fg: u32,
+    green: u32,
+    yellow: u32,
+    red: u32,
     /// 浅色底：语义色（绿/黄/红…）取暗档。
     light: bool,
 }
 
 /// 下标与 `ThemeMode::all()` 一一对应。
-static PALETTES: [Palette; 9] = [
-    // Dark（默认）
+static PALETTES: [Palette; 6] = [
+    // Dark（经典深色，色值维持原样）
     Palette {
         bg: 0x181818,
         surface: 0x1e1e1e,
         panel: 0x202020,
         raised: 0x252526,
         border: 0x2d2d30,
+        border_strong: 0x3e3e42,
         fg: 0xd4d4d4,
         muted: 0x8a8a8a,
         dim: 0x5f5f5f,
         accent: 0x3b82f6,
+        accent_fg: 0xffffff,
+        green: 0x22c55e,
+        yellow: 0xeab308,
+        red: 0xef4444,
         light: false,
     },
-    // Light
+    // Light（色值维持原样）
     Palette {
         bg: 0xf4f4f5,
         surface: 0xffffff,
         panel: 0xfafafa,
         raised: 0xececef,
         border: 0xe0e0e4,
+        border_strong: 0xcfcfd6,
         fg: 0x1f2023,
         muted: 0x6b6d76,
         dim: 0x9aa0a6,
         accent: 0x2563eb,
+        accent_fg: 0xffffff,
+        green: 0x16a34a,
+        yellow: 0xca8a04,
+        red: 0xdc2626,
         light: true,
     },
     // System（解析后不会落在这里，只为对齐下标 / 色卡预览）
@@ -64,91 +82,105 @@ static PALETTES: [Palette; 9] = [
         panel: 0x202020,
         raised: 0x252526,
         border: 0x2d2d30,
+        border_strong: 0x3e3e42,
         fg: 0xd4d4d4,
         muted: 0x8a8a8a,
         dim: 0x5f5f5f,
         accent: 0x3b82f6,
+        accent_fg: 0xffffff,
+        green: 0x22c55e,
+        yellow: 0xeab308,
+        red: 0xef4444,
         light: false,
     },
-    // Nord：冷调蓝灰
+    // Graphite：近黑中性灰 + 鞑蓝
     Palette {
-        bg: 0x2e3440,
-        surface: 0x2b303b,
-        panel: 0x333a46,
-        raised: 0x3b4252,
-        border: 0x434c5e,
-        fg: 0xd8dee9,
-        muted: 0xa0a8b8,
-        dim: 0x6d7a8c,
-        accent: 0x88c0d0,
+        bg: 0x0a0c10,
+        surface: 0x0e1117,
+        panel: 0x0b0d12,
+        raised: 0x161a22,
+        border: 0x1c2029,
+        border_strong: 0x2a3040,
+        fg: 0xe9edf4,
+        muted: 0x9aa3b2,
+        dim: 0x5b6373,
+        accent: 0x8b93ff,
+        accent_fg: 0x0b0d12,
+        green: 0x3fb950,
+        yellow: 0xd29922,
+        red: 0xf85149,
         light: false,
     },
-    // Dracula：紫黑底 + 紫强调
+    // Carbon：碳灰 + 蓝
     Palette {
-        bg: 0x282a36,
-        surface: 0x2b2d3a,
-        panel: 0x242631,
-        raised: 0x343746,
-        border: 0x44475a,
-        fg: 0xf8f8f2,
-        muted: 0xa8adc4,
-        dim: 0x6272a4,
-        accent: 0xbd93f9,
+        bg: 0x13151a,
+        surface: 0x171a20,
+        panel: 0x111318,
+        raised: 0x1e222a,
+        border: 0x272c35,
+        border_strong: 0x343a45,
+        fg: 0xd9dee6,
+        muted: 0x8d96a3,
+        dim: 0x5d6673,
+        accent: 0x4d9fff,
+        accent_fg: 0x07121f,
+        green: 0x3fb950,
+        yellow: 0xd29922,
+        red: 0xf85149,
         light: false,
     },
-    // One Dark
+    // Ember：暖墨灰 + 琥珀
     Palette {
-        bg: 0x282c34,
-        surface: 0x2c313a,
-        panel: 0x21252b,
-        raised: 0x333842,
-        border: 0x3e4451,
-        fg: 0xabb2bf,
-        muted: 0x8b93a3,
-        dim: 0x5c6370,
-        accent: 0x61afef,
-        light: false,
-    },
-    // Solarized 浅：暖米色纸感
-    Palette {
-        bg: 0xfdf6e3,
-        surface: 0xfffbf0,
-        panel: 0xf5efdc,
-        raised: 0xeee8d5,
-        border: 0xe4dcc6,
-        fg: 0x586e75,
-        muted: 0x839496,
-        dim: 0x93a1a1,
-        accent: 0x268bd2,
-        light: true,
-    },
-    // Solarized 深：青黑底
-    Palette {
-        bg: 0x002b36,
-        surface: 0x073642,
-        panel: 0x00252e,
-        raised: 0x0a3d4a,
-        border: 0x11505f,
-        fg: 0x93a1a1,
-        muted: 0x8a9a9a,
-        dim: 0x586e75,
-        accent: 0x268bd2,
-        light: false,
-    },
-    // Gruvbox：暖褐 + 琥珀
-    Palette {
-        bg: 0x282828,
-        surface: 0x32302f,
-        panel: 0x2c2a29,
-        raised: 0x3c3836,
-        border: 0x504945,
-        fg: 0xebdbb2,
-        muted: 0xa89984,
-        dim: 0x7c6f64,
-        accent: 0xd79921,
+        bg: 0x100f0d,
+        surface: 0x15130f,
+        panel: 0x12100d,
+        raised: 0x201c16,
+        border: 0x2c2820,
+        border_strong: 0x3a342a,
+        fg: 0xf0e9dd,
+        muted: 0xa79c8b,
+        dim: 0x71675a,
+        accent: 0xe8a33d,
+        accent_fg: 0x1b1305,
+        green: 0x6faf6a,
+        yellow: 0xd9b44a,
+        red: 0xe06c5a,
         light: false,
     },
 ];
+
+/// 形态 token：圆角与字号随主题变化（下标与 PALETTES 一致）。
+struct Metrics {
+    radius_sm: f32,
+    radius_md: f32,
+    radius_lg: f32,
+    radius_xl: f32,
+    text_caption: f32,
+    text_ui: f32,
+    text_body: f32,
+    text_title: f32,
+    /// 数值/统计用等宽字体（Carbon 签名）。
+    mono_nums: bool,
+}
+
+static METRICS: [Metrics; 6] = [
+    // Dark：等于历史值（rounded_sm/md/lg/xl = 4/6/8/12，text_xs/sm/base = 12/14/16）
+    Metrics { radius_sm: 4.0, radius_md: 6.0, radius_lg: 8.0, radius_xl: 12.0, text_caption: 12.0, text_ui: 14.0, text_body: 16.0, text_title: 14.0, mono_nums: false },
+    // Light
+    Metrics { radius_sm: 4.0, radius_md: 6.0, radius_lg: 8.0, radius_xl: 12.0, text_caption: 12.0, text_ui: 14.0, text_body: 16.0, text_title: 14.0, mono_nums: false },
+    // System（与 Dark 一致）
+    Metrics { radius_sm: 4.0, radius_md: 6.0, radius_lg: 8.0, radius_xl: 12.0, text_caption: 12.0, text_ui: 14.0, text_body: 16.0, text_title: 14.0, mono_nums: false },
+    // Graphite
+    Metrics { radius_sm: 6.0, radius_md: 8.0, radius_lg: 12.0, radius_xl: 16.0, text_caption: 12.0, text_ui: 13.0, text_body: 15.0, text_title: 14.0, mono_nums: false },
+    // Carbon
+    Metrics { radius_sm: 3.0, radius_md: 4.0, radius_lg: 6.0, radius_xl: 8.0, text_caption: 11.0, text_ui: 13.0, text_body: 15.0, text_title: 14.0, mono_nums: true },
+    // Ember
+    Metrics { radius_sm: 6.0, radius_md: 10.0, radius_lg: 14.0, radius_xl: 18.0, text_caption: 12.0, text_ui: 13.0, text_body: 15.5, text_title: 15.0, mono_nums: false },
+];
+
+fn metrics() -> &'static Metrics {
+    &METRICS[current_mode().index().min(METRICS.len() - 1)]
+}
 
 fn palette_of(mode: ThemeMode) -> &'static Palette {
     &PALETTES[mode.index().min(PALETTES.len() - 1)]
@@ -240,6 +272,10 @@ pub fn raised() -> Rgba {
 pub fn border() -> Rgba {
     gpui::rgb(palette().border)
 }
+/// 弹层 / 选中态的强边框。
+pub fn border_strong() -> Rgba {
+    gpui::rgb(palette().border_strong)
+}
 
 // ============ 文字 ============
 pub fn fg() -> Rgba {
@@ -262,20 +298,24 @@ pub fn accent_soft() -> Rgba {
 pub fn accent_line() -> Rgba {
     with_alpha(palette().accent, 0.5)
 }
+/// accent 填充底上的文字色。
+pub fn accent_fg() -> Rgba {
+    gpui::rgb(palette().accent_fg)
+}
 pub fn green() -> Rgba {
-    pick(0x22c55e, 0x16a34a)
+    gpui::rgb(palette().green)
 }
 pub fn green_soft() -> Rgba {
-    with_alpha(if is_light() { 0x16a34a } else { 0x22c55e }, 0.10)
+    with_alpha(palette().green, 0.10)
 }
 pub fn green_line() -> Rgba {
-    with_alpha(if is_light() { 0x16a34a } else { 0x22c55e }, 0.28)
+    with_alpha(palette().green, 0.28)
 }
 pub fn yellow() -> Rgba {
-    pick(0xeab308, 0xca8a04)
+    gpui::rgb(palette().yellow)
 }
 pub fn red() -> Rgba {
-    pick(0xef4444, 0xdc2626)
+    gpui::rgb(palette().red)
 }
 pub fn purple() -> Rgba {
     pick(0xa855f7, 0x9333ea)
@@ -348,6 +388,36 @@ pub fn mono_fallbacks() -> &'static [&'static str] {
     CANDIDATES
 }
 
+// ============ 形态 token ============
+pub fn radius_sm() -> f32 {
+    metrics().radius_sm
+}
+pub fn radius_md() -> f32 {
+    metrics().radius_md
+}
+pub fn radius_lg() -> f32 {
+    metrics().radius_lg
+}
+pub fn radius_xl() -> f32 {
+    metrics().radius_xl
+}
+pub fn text_caption() -> f32 {
+    metrics().text_caption
+}
+pub fn text_ui() -> f32 {
+    metrics().text_ui
+}
+pub fn text_body() -> f32 {
+    metrics().text_body
+}
+pub fn text_title() -> f32 {
+    metrics().text_title
+}
+/// 数值/统计是否用等宽字体（Carbon 为 true）。
+pub fn mono_nums() -> bool {
+    metrics().mono_nums
+}
+
 // ============ 尺寸 ============
 pub const SIDEBAR_W: f32 = 236.0;
 pub const FILES_W: f32 = 300.0;
@@ -391,7 +461,7 @@ mod tests {
         assert_ne!(dark_bg, light_bg, "深浅两套背景必须不同");
         // 浅色背景应更亮
         assert!(light_bg.r > dark_bg.r);
-        set_theme_mode(ThemeMode::Dark);
+        set_theme_mode(ThemeMode::Graphite);
     }
 
     #[test]
@@ -402,7 +472,20 @@ mod tests {
         set_theme_mode(ThemeMode::Light);
         let l = fg();
         assert!(d.r > l.r, "深色主题的文字应更亮");
-        set_theme_mode(ThemeMode::Dark);
+        set_theme_mode(ThemeMode::Graphite);
+    }
+
+    /// 相对亮度（WCAG 公式），用于 accent / accent_fg 对比度断言。
+    fn luminance(hex: u32) -> f32 {
+        let ch = |v: u32| {
+            let c = v as f32 / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch((hex >> 16) & 0xff) + 0.7152 * ch((hex >> 8) & 0xff) + 0.0722 * ch(hex & 0xff)
     }
 
     #[test]
@@ -423,22 +506,55 @@ mod tests {
             // 文字与背景必须有对比度
             assert_ne!(fg(), bg, "{} 的文字与背景同色", mode.label());
         }
+        set_theme_mode(ThemeMode::Graphite);
+    }
+
+    #[test]
+    fn retired_themes_migrate() {
+        let _guard = theme_test_guard();
+        set_theme_mode(ThemeMode::SolarizedLight);
+        assert!(is_light(), "Solarized 浅要迁到 Light");
+        set_theme_mode(ThemeMode::Nord);
+        let nord_bg = bg();
+        set_theme_mode(ThemeMode::Graphite);
+        assert_eq!(nord_bg, bg(), "其余旧主题统一迁到 Graphite");
+        set_theme_mode(ThemeMode::Graphite);
+    }
+
+    #[test]
+    fn accent_fg_contrasts_with_accent() {
+        // Dark 的 #3B82F6 配白字只有 3.66（现状如此、本轮不改），阈值取 3.0；
+        // 新三套实测 6.9–8.6。
+        for (i, p) in PALETTES.iter().enumerate() {
+            if i == 2 {
+                continue; // System 与 Dark 同色板
+            }
+            let (l1, l2) = (luminance(p.accent), luminance(p.accent_fg));
+            let ratio = (l1.max(l2) + 0.05) / (l1.min(l2) + 0.05);
+            assert!(ratio >= 3.0, "第 {i} 套 accent/accent_fg 对比度只有 {ratio:.2}");
+        }
+    }
+
+    #[test]
+    fn metrics_cover_all_modes() {
+        assert_eq!(METRICS.len(), ThemeMode::all().len());
+        let _guard = theme_test_guard();
         set_theme_mode(ThemeMode::Dark);
+        assert_eq!(
+            (radius_md(), text_ui(), text_body()),
+            (6.0, 14.0, 16.0),
+            "Dark 必须维持现状"
+        );
+        set_theme_mode(ThemeMode::Carbon);
+        assert!(mono_nums());
+        assert_eq!(radius_md(), 4.0);
+        set_theme_mode(ThemeMode::Graphite);
+        assert!(!mono_nums());
     }
 
     #[test]
     fn with_alpha_clamps() {
         assert_eq!(with_alpha(0xffffff, 2.0).a, 1.0);
         assert_eq!(with_alpha(0xffffff, -1.0).a, 0.0);
-    }
-
-    #[test]
-    fn solarized_light_counts_as_light() {
-        let _guard = theme_test_guard();
-        set_theme_mode(ThemeMode::SolarizedLight);
-        assert!(is_light());
-        set_theme_mode(ThemeMode::SolarizedDark);
-        assert!(!is_light());
-        set_theme_mode(ThemeMode::Dark);
     }
 }

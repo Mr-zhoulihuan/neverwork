@@ -39,9 +39,9 @@ impl AppState {
                 .gap_3()
                 .px_3()
                 .py_2()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .bg(theme::accent_soft())
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::muted())
                 .child(SharedString::from(format!(
                     "{} 个厂商 · {} 个已填 Key · 默认使用 {}",
@@ -66,10 +66,10 @@ impl AppState {
                     .items_center()
                     .gap_2()
                     .py_8()
-                    .text_sm()
+                    .text_size(px(theme::text_ui()))
                     .text_color(theme::dim())
                     .child("还没有添加任何厂商")
-                    .child(div().text_xs().child("点右上「＋ 添加厂商」，从预设里选一个或自定义")),
+                    .child(div().text_size(px(theme::text_caption())).child("点右上「＋ 添加厂商」，从预设里选一个或自定义")),
             );
         }
 
@@ -101,7 +101,7 @@ impl AppState {
                 .gap_3()
                 .px_3()
                 .py_2()
-                .rounded_lg()
+                .rounded(px(theme::radius_lg()))
                 .border_1()
                 .border_color(if is_default {
                     theme::accent_line()
@@ -123,9 +123,9 @@ impl AppState {
                         .justify_center()
                         .size(px(30.0))
                         .flex_shrink_0()
-                        .rounded_md()
+                        .rounded(px(theme::radius_md()))
                         .bg(theme::accent_soft())
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::accent())
                         .child(SharedString::from(
                             p.name.chars().next().unwrap_or('?').to_string(),
@@ -145,10 +145,10 @@ impl AppState {
                                 .gap_2()
                                 .child(
                                     div()
-                                        .text_sm()
+                                        .text_size(px(theme::text_ui()))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(theme::fg())
-                                        .child(SharedString::from(fit_text(&p.name, 240.0, 14.0))),
+                                        .child(SharedString::from(fit_text(&p.name, 240.0, theme::text_ui()))),
                                 )
                                 .child(tag(p.preset.kind().label(), theme::dim()))
                                 .child(tag(p.protocol().label(), theme::dim()))
@@ -158,9 +158,9 @@ impl AppState {
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::dim())
-                                .child(SharedString::from(fit_text(&p.base_url, 320.0, 12.0))),
+                                .child(SharedString::from(fit_text(&p.base_url, 320.0, theme::text_caption()))),
                         ),
                 )
                 .child(
@@ -204,14 +204,14 @@ impl AppState {
                 .gap_1()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::fg())
                         .child("添加厂商"),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .child("选一个预设直接填 Key，或自定义地址；已添加的点开即进入详情"),
                 ),
@@ -257,7 +257,7 @@ impl AppState {
             }
             col = col.child(
                 div()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .pt_2()
                     .child(SharedString::from(kind.label())),
@@ -289,7 +289,7 @@ impl AppState {
             .py_2()
             .w(px(220.0))
             .h(px(56.0))
-            .rounded_lg()
+            .rounded(px(theme::radius_lg()))
             .border_1()
             .border_color(theme::border())
             .bg(theme::panel())
@@ -305,9 +305,9 @@ impl AppState {
                     .justify_center()
                     .size(px(26.0))
                     .flex_shrink_0()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::accent_soft())
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::accent())
                     .child(SharedString::from(
                         preset.name().chars().next().unwrap_or('?').to_string(),
@@ -322,32 +322,36 @@ impl AppState {
                     .min_w(px(0.0))
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::fg())
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .child(SharedString::from(fit_text(preset.name(), 150.0, 12.0))),
+                            .child(SharedString::from(fit_text(preset.name(), 150.0, theme::text_caption())))
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .child(SharedString::from(fit_text(
                                 &preset_host(preset),
                                 150.0,
-                                11.0,
+                                theme::text_caption(),
                             ))),
                     ),
             )
             .when(added.is_some(), |d| {
-                d.child(div().text_xs().text_color(if ready {
-                    theme::green()
-                } else {
-                    theme::dim()
-                })
-                .child(if ready { "✓ 已就绪" } else { "✓ 已添加" }))
+                d.child(
+                    div()
+                        .text_size(px(theme::text_caption()))
+                        .text_color(if ready {
+                            theme::green()
+                        } else {
+                            theme::dim()
+                        })
+                        .child(if ready { "✓ 已就绪" } else { "✓ 已添加" }),
+                )
             })
     }
 
@@ -359,7 +363,7 @@ impl AppState {
             return col
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::dim())
                         .child("这个厂商已被移除"),
                 )
@@ -384,7 +388,7 @@ impl AppState {
             .items_center()
             .gap_3()
             .p_3()
-            .rounded_lg()
+            .rounded(px(theme::radius_lg()))
             .border_1()
             .border_color(if is_default {
                 theme::accent_line()
@@ -399,9 +403,9 @@ impl AppState {
                     .justify_center()
                     .size(px(34.0))
                     .flex_shrink_0()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::accent_soft())
-                    .text_sm()
+                    .text_size(px(theme::text_ui()))
                     .text_color(theme::accent())
                     .child(SharedString::from(
                         p.name.chars().next().unwrap_or('?').to_string(),
@@ -421,10 +425,10 @@ impl AppState {
                             .gap_2()
                             .child(
                                 div()
-                                    .text_sm()
+                                    .text_size(px(theme::text_ui()))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme::fg())
-                                    .child(SharedString::from(fit_text(&p.name, 260.0, 14.0))),
+                                    .child(SharedString::from(fit_text(&p.name, 260.0, theme::text_ui()))),
                             )
                             .child(tag(p.preset.kind().label(), theme::dim()))
                             .child(tag(p.protocol().label(), theme::dim()))
@@ -434,9 +438,9 @@ impl AppState {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
-                            .child(SharedString::from(fit_text(&p.base_url, 360.0, 12.0))),
+                            .child(SharedString::from(fit_text(&p.base_url, 360.0, theme::text_caption()))),
                     ),
             )
             .child(div().flex_1());
@@ -494,9 +498,9 @@ impl AppState {
                     .gap_2()
                     .px_3()
                     .py_2()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::accent_soft())
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::muted())
                     .child(
                         div()
@@ -514,7 +518,7 @@ impl AppState {
             .flex_col()
             .gap_2()
             .p_4()
-            .rounded_lg()
+            .rounded(px(theme::radius_lg()))
             .border_1()
             .border_color(theme::border())
             .bg(theme::panel());
@@ -639,7 +643,7 @@ impl AppState {
         tools = tools.child(div().flex_1());
         tools = tools.child(
             div()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child(SharedString::from(format!(
                     "{} 个 · {} 启用",
@@ -697,7 +701,7 @@ impl AppState {
                 div()
                     .px_2()
                     .py_3()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child(if filtering {
                         "没有匹配的模型"
@@ -719,8 +723,8 @@ impl AppState {
                 .gap_2()
                 .h(px(28.0))
                 .px_2()
-                .rounded_sm()
-                .text_xs()
+                .rounded(px(theme::radius_sm()))
+                .text_size(px(theme::text_caption()))
                 .when(!*on, |d| d.opacity(0.55))
                 .hover(|d| d.bg(theme::raised()))
                 .child(
@@ -742,7 +746,7 @@ impl AppState {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_color(if is_current { theme::fg() } else { theme::muted() })
-                        .child(SharedString::from(fit_text(id, 420.0, 12.0))),
+                        .child(SharedString::from(fit_text(id, 420.0, theme::text_caption()))),
                 )
                 .when(is_current, |d| d.child(tag("默认", theme::accent())))
                 .child(div().flex_1())
@@ -752,7 +756,7 @@ impl AppState {
                             .id(SharedString::from(format!("pm-default-{idx}-{j}")))
                             .px_2()
                             .py_0p5()
-                            .rounded_sm()
+                            .rounded(px(theme::radius_sm()))
                             .text_color(theme::accent())
                             .cursor_pointer()
                             .hover(|d| d.bg(theme::border()))
@@ -767,7 +771,7 @@ impl AppState {
                         .id(SharedString::from(format!("pm-del-{idx}-{j}")))
                         .px_2()
                         .py_0p5()
-                        .rounded_sm()
+                        .rounded(px(theme::radius_sm()))
                         .text_color(theme::dim())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::border()).text_color(theme::red()))
@@ -833,7 +837,7 @@ fn back_row(cx: &mut Context<AppState>) -> impl IntoElement {
         .flex()
         .items_center()
         .gap_2()
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .text_color(theme::muted())
         .cursor_pointer()
         .hover(|d| d.text_color(theme::fg()))
@@ -876,8 +880,8 @@ fn ghost(
         .id(SharedString::from(format!("{id}")))
         .px_2()
         .py_1()
-        .rounded_md()
-        .text_xs()
+        .rounded(px(theme::radius_md()))
+        .text_size(px(theme::text_caption()))
         .text_color(color)
         .cursor_pointer()
         .hover(|d| d.bg(theme::border()))

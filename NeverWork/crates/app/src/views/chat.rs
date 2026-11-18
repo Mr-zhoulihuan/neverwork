@@ -4,16 +4,18 @@ use neverwork_core::MessageKind;
 use crate::state::InputTarget;
 use crate::views::text_fit::fit_text;
 
-/// 对话正文基准字号。折行估宽与渲染必须用同一个值：
+/// 对话正文基准字号（随主题）。折行估宽与渲染必须用同一个值：
 /// 估窄了行会顶出气泡右侧被父容器裁掉半截。
-const BODY_PX: f32 = 16.0;
+fn body_px() -> f32 {
+    theme::text_body()
+}
 
 /// 思考档位滑杆的格子宽度（4 档 × 64px，不依赖百分比计算）。
 const THINK_CELL: f32 = 64.0;
 
 /// 列表标记（`•` / `1.`）连同 `gap_2` 占掉的横向宽度。
 fn marker_w(label: &str) -> f32 {
-    label.chars().count() as f32 * BODY_PX * crate::views::text_fit::MONO_ASCII_RATIO + 8.0
+    label.chars().count() as f32 * body_px() * crate::views::text_fit::MONO_ASCII_RATIO + 8.0
 }
 
 /// 点击回调（`cx.listener` 的返回类型）：自由函数要接住它必须装箱。
@@ -34,8 +36,8 @@ fn copy_chip(
         .flex_shrink_0()
         .px_2()
         .py_0p5()
-        .rounded_sm()
-        .text_xs()
+        .rounded(px(theme::radius_sm()))
+        .text_size(px(theme::text_caption()))
         .text_color(theme::dim())
         .cursor_pointer()
         .hover(|d| d.bg(theme::raised()).text_color(theme::accent()))
@@ -57,7 +59,7 @@ pub(crate) fn artifact_save_button(
         .id(id)
         .flex_shrink_0()
         .px_1()
-        .rounded_sm()
+        .rounded(px(theme::radius_sm()))
         .text_size(px(12.0))
         .text_color(theme::dim())
         .cursor_pointer()
@@ -107,7 +109,7 @@ impl AppState {
                         .overflow_hidden()
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(theme::text_title()))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .whitespace_nowrap()
                                 .overflow_hidden()
@@ -130,11 +132,11 @@ impl AppState {
                         .gap_1()
                         .px_3()
                         .py_1p5()
-                        .rounded_md()
+                        .rounded(px(theme::radius_md()))
                         .bg(theme::panel())
                         .border_1()
                         .border_color(theme::border())
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .child(if self.is_team_mode() {
                             SharedString::from(format!(
@@ -173,7 +175,12 @@ impl AppState {
                     for (i, role) in t.roles.iter().enumerate() {
                         if i > 0 {
                             steps = steps
-                                .child(div().text_xs().text_color(theme::dim()).child("→"));
+                                .child(
+                                    div()
+                                        .text_size(px(theme::text_caption()))
+                                        .text_color(theme::dim())
+                                        .child("→"),
+                                );
                         }
                         // 正在发言的角色高亮，空闲时全部正常显示。
                         let on = self.active_role.map_or(true, |a| a == i);
@@ -190,7 +197,7 @@ impl AppState {
                 _ => {
                     steps = steps.child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
                             .child("团队里还没有角色，去「团队」页添加"),
                     );
@@ -212,9 +219,9 @@ impl AppState {
                         div()
                             .px_2()
                             .py_0p5()
-                            .rounded_md()
+                            .rounded(px(theme::radius_md()))
                             .bg(theme::accent_soft())
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::accent())
                             .child(if self.is_running() { "生成中…" } else { "协作团队" }),
                     ),
@@ -232,7 +239,7 @@ impl AppState {
                     .border_color(theme::border())
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::accent())
                             .child("生成中…"),
                     ),
@@ -249,8 +256,8 @@ impl AppState {
             .py_5()
             .font_family(theme::mono_family())
             // 显式钉死字号：gpui 默认是 1rem（16px），但折行估宽用的是
-            // `BODY_PX`，两者必须一致，不能靠默认值巧合相等。
-            .text_size(px(BODY_PX));
+            // `body_px()`，两者必须一致，不能靠默认值巧合相等。
+            .text_size(px(body_px()));
         // 正文折行宽度：中栏真实可用宽度减去左右 px_5 内边距。
         let avail = (self.chat_w - 40.0).max(240.0);
         let sidx = self.active_session;
@@ -281,7 +288,7 @@ impl AppState {
         if self.is_running() {
             thread = thread.child(
                 div()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child("▍正在生成…"),
             );
@@ -335,7 +342,7 @@ impl AppState {
                 .child(div().h(px(1.0)).flex_1().bg(theme::border()))
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .child(SharedString::from(format!("产物 · {}", list.len()))),
                 )
@@ -352,7 +359,7 @@ impl AppState {
                 .h(px(34.0))
                 .pl_1()
                 .pr_2()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .border_1()
                 .border_color(theme::border())
                 .bg(theme::raised())
@@ -369,7 +376,7 @@ impl AppState {
                     div()
                         .size(px(26.0))
                         .flex_shrink_0()
-                        .rounded_sm()
+                        .rounded(px(theme::radius_sm()))
                         .overflow_hidden()
                         .child(
                             img(std::path::PathBuf::from(&a.path))
@@ -383,10 +390,10 @@ impl AppState {
             chip = chip.child(
                 div()
                     .max_w(px(150.0))
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::muted())
                     .whitespace_nowrap()
-                    .child(SharedString::from(fit_text(&a.name, 140.0, 11.0))),
+                    .child(SharedString::from(fit_text(&a.name, 140.0, theme::text_caption()))),
             );
             // chip 与保存按钮并排（不嵌套）：点⤓只保存，不会顺带打开产物
             let save = artifact_save_button(
@@ -406,7 +413,7 @@ impl AppState {
         if let Some(rest) = list.len().checked_sub(8).filter(|n| *n > 0) {
             row = row.child(
                 div()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child(SharedString::from(format!("+{rest}"))),
             );
@@ -423,8 +430,8 @@ impl AppState {
                 .id(id)
                 .px_3()
                 .py_1p5()
-                .rounded_md()
-                .text_xs()
+                .rounded(px(theme::radius_md()))
+                .text_size(px(theme::text_caption()))
                 .text_color(if active { theme::fg() } else { theme::muted() })
                 .bg(if active { theme::raised() } else { theme::panel() })
                 .cursor_pointer()
@@ -445,7 +452,7 @@ impl AppState {
             .items_center()
             .gap_0p5()
             .p_0p5()
-            .rounded_md()
+            .rounded(px(theme::radius_md()))
             .border_1()
             .border_color(theme::border())
             .bg(theme::panel())
@@ -458,8 +465,8 @@ impl AppState {
                     .id("tab-usage")
                     .px_3()
                     .py_1p5()
-                    .rounded_md()
-                    .text_xs()
+                    .rounded(px(theme::radius_md()))
+                    .text_size(px(theme::text_caption()))
                     .text_color(if self.usage_open { theme::fg() } else { theme::muted() })
                     .bg(if self.usage_open { theme::raised() } else { theme::panel() })
                     .cursor_pointer()
@@ -495,7 +502,7 @@ impl AppState {
             .gap_2()
             .px_3()
             .py_1p5()
-            .rounded_md()
+            .rounded(px(theme::radius_md()))
             .border_1()
             .border_color(if open {
                 theme::accent_line()
@@ -503,7 +510,7 @@ impl AppState {
                 theme::border()
             })
             .bg(if open { theme::accent_soft() } else { theme::panel() })
-            .text_xs()
+            .text_size(px(theme::text_caption()))
             .text_color(if open { theme::fg() } else { theme::muted() })
             .cursor_pointer()
             .hover(|d| d.bg(theme::raised()))
@@ -527,7 +534,7 @@ impl AppState {
                         theme::green()
                     }),
             )
-            .child(SharedString::from(fit_text(&label, 240.0, 12.0)))
+            .child(SharedString::from(fit_text(&label, 240.0, theme::text_caption())))
             .child(div().text_color(theme::dim()).child("▾"))
     }
 
@@ -573,11 +580,11 @@ impl AppState {
                     .gap_2()
                     .px_3()
                     .py_2()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::with_alpha(0xf59e0b, 0.12))
                     .border_1()
                     .border_color(theme::with_alpha(0xf59e0b, 0.4))
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::yellow())
                     .child("⚠")
                     .child(SharedString::from(format!(
@@ -587,7 +594,7 @@ impl AppState {
                     .child(div().flex_1())
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
                             .child(if p.tool == "run_command" {
                                 "在上方卡片里点「允许并执行」或「拒绝」"
@@ -603,11 +610,11 @@ impl AppState {
                 div()
                     .px_3()
                     .py_2()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::green_soft())
                     .border_1()
                     .border_color(theme::green_line())
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::yellow())
                     .child(SharedString::from(notice.clone())),
             );
@@ -616,9 +623,9 @@ impl AppState {
                 div()
                     .px_3()
                     .py_2()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::accent_soft())
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::muted())
                     .child("未检测到 AI 配置。设置环境变量 NW_API_KEY 后重启即可对话。"),
             );
@@ -639,11 +646,11 @@ impl AppState {
                                 .gap_1()
                                 .px_2()
                                 .py_0p5()
-                                .rounded_md()
+                                .rounded(px(theme::radius_md()))
                                 .border_1()
                                 .border_color(theme::border())
                                 .bg(theme::panel())
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::muted())
                                 .cursor_pointer()
                                 .hover(|d| d.bg(theme::raised()).text_color(theme::accent()))
@@ -654,7 +661,7 @@ impl AppState {
                                 .child(
                                     div()
                                         .size(px(6.0))
-                                        .rounded_md()
+                                        .rounded(px(theme::radius_md()))
                                         .bg(theme::role_color(role.color_index)),
                                 )
                                 .child(SharedString::from(role.name.clone())),
@@ -681,11 +688,11 @@ impl AppState {
                                 .gap_2()
                                 .px_3()
                                 .py_1p5()
-                                .rounded_md()
+                                .rounded(px(theme::radius_md()))
                                 .bg(theme::accent_soft())
                                 .border_1()
                                 .border_color(theme::accent_line())
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::accent())
                                 .child(SharedString::from(hint)),
                         );
@@ -707,9 +714,9 @@ impl AppState {
             .flex_wrap()
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
-            // 正文用 text_base：原来 text_sm 偏小，长句在宽窗口里很难读
-            .text_base()
-            .line_height(px(24.0))
+            // 正文用 body_px：原来 text_sm 偏小，长句在宽窗口里很难读
+            .text_size(px(body_px()))
+            .line_height(px(body_px() + 8.0))
             .min_h(px(48.0))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.switch_input_target(InputTarget::Chat);
@@ -803,7 +810,7 @@ impl AppState {
 
         // ===== 输入框：大圆角容器 + 左下「＋」+ 右下权限 chip =====
         let mut input_box = div()
-            .rounded_lg()
+            .rounded(px(theme::radius_lg()))
             .border_1()
             .border_color(if self.is_running() {
                 theme::accent_line()
@@ -855,9 +862,9 @@ impl AppState {
                                     .gap_1()
                                     .h(px(28.0))
                                     .px_3()
-                                    .rounded_md()
+                                    .rounded(px(theme::radius_md()))
                                     .bg(theme::raised())
-                                    .text_xs()
+                                    .text_size(px(theme::text_caption()))
                                     .text_color(theme::yellow())
                                     .cursor_pointer()
                                     .hover(|d| d.opacity(0.85))
@@ -871,7 +878,7 @@ impl AppState {
                         .when(!self.is_running() && self.layout_w.get() >= 980.0, |d| {
                             d.child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(theme::text_caption()))
                                     .text_color(theme::dim())
                                     .child("Enter 发送 · Shift+Enter 换行"),
                             )
@@ -908,7 +915,7 @@ impl AppState {
                 .h(px(40.0))
                 .pl_1()
                 .pr_2()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .border_1()
                 .border_color(theme::border())
                 .bg(theme::raised());
@@ -917,7 +924,7 @@ impl AppState {
                     div()
                         .size(px(32.0))
                         .flex_shrink_0()
-                        .rounded_sm()
+                        .rounded(px(theme::radius_sm()))
                         .overflow_hidden()
                         .child(
                             img(std::path::PathBuf::from(&a.path))
@@ -932,17 +939,17 @@ impl AppState {
                 .child(
                     div()
                         .max_w(px(150.0))
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .whitespace_nowrap()
-                        .child(SharedString::from(fit_text(&a.name, 140.0, 11.0))),
+                        .child(SharedString::from(fit_text(&a.name, 140.0, theme::text_caption()))),
                 )
                 .child(
                     div()
                         .id(SharedString::from(format!("attach-x-{i}")))
                         .px_1()
-                        .rounded_sm()
-                        .text_xs()
+                        .rounded(px(theme::radius_sm()))
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .cursor_pointer()
                         .hover(|d| d.text_color(theme::fg()))
@@ -974,7 +981,7 @@ impl AppState {
                 theme::border()
             })
             .bg(if open { theme::accent_soft() } else { theme::raised() })
-            .text_sm()
+            .text_size(px(theme::text_ui()))
             .text_color(if open { theme::accent() } else { theme::muted() })
             .cursor_pointer()
             .hover(|d| d.border_color(theme::accent_line()).text_color(theme::fg()))
@@ -1010,7 +1017,7 @@ impl AppState {
             .items_center()
             .h(px(28.0))
             .px_2()
-            .rounded_md()
+            .rounded(px(theme::radius_md()))
             .border_1()
             .border_color(if open {
                 theme::accent_line()
@@ -1022,7 +1029,7 @@ impl AppState {
             } else {
                 theme::raised()
             })
-            .text_xs()
+            .text_size(px(theme::text_caption()))
             .text_color(if enabled { color } else { theme::dim() })
             .cursor_pointer()
             .hover(|d| d.border_color(theme::accent_line()))
@@ -1058,7 +1065,7 @@ impl AppState {
             .gap_2()
             .px_4()
             .py_3()
-            .rounded_lg()
+            .rounded(px(theme::radius_lg()))
             .border_1()
             .border_color(theme::accent_line())
             .bg(theme::panel())
@@ -1069,7 +1076,7 @@ impl AppState {
                     .gap_2()
                     .child(
                         div()
-                            .text_base()
+                            .text_size(px(theme::text_title()))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::fg())
                             .child(SharedString::from(format!(
@@ -1081,7 +1088,7 @@ impl AppState {
                     .child(
                         div()
                             .flex_1()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
                             .child("随会话保存；切换后下一条消息生效"),
                     )
@@ -1090,9 +1097,9 @@ impl AppState {
                             .id("permission-close")
                             .px_2()
                             .py_1()
-                            .rounded_md()
+                            .rounded(px(theme::radius_md()))
                             .bg(theme::raised())
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::muted())
                             .cursor_pointer()
                             .hover(|d| d.text_color(theme::fg()))
@@ -1121,7 +1128,7 @@ impl AppState {
                     .gap_2()
                     .px_3()
                     .py_2()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .border_1()
                     .border_color(if active {
                         theme::accent_line()
@@ -1149,7 +1156,7 @@ impl AppState {
                     .child(
                         div()
                             .w(px(20.0))
-                            .text_sm()
+                            .text_size(px(theme::text_ui()))
                             .text_color(color)
                             .child(mode.glyph()),
                     )
@@ -1162,14 +1169,14 @@ impl AppState {
                             .gap_1()
                             .child(
                                 div()
-                                    .text_sm()
+                                    .text_size(px(theme::text_ui()))
                                     .when(active, |d| d.text_color(theme::accent()))
                                     .when(!active, |d| d.text_color(theme::fg()))
                                     .child(mode.label()),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(theme::text_caption()))
                                     .text_color(theme::dim())
                                     .child(mode.desc()),
                             ),
@@ -1177,7 +1184,7 @@ impl AppState {
                     .child(
                         div()
                             .w(px(18.0))
-                            .text_sm()
+                            .text_size(px(theme::text_ui()))
                             .text_color(if active {
                                 theme::accent()
                             } else {
@@ -1195,14 +1202,14 @@ impl AppState {
                     .gap_2()
                     .px_3()
                     .py_2()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .border_1()
                     .border_color(theme::yellow())
                     .bg(theme::raised())
                     .child(
                         div()
                             .flex_1()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::yellow())
                             .child("完整权限会跳过写操作与命令的审批，本会话内生效。确认开启？"),
                     )
@@ -1211,9 +1218,9 @@ impl AppState {
                             .id("permission-cancel")
                             .px_2()
                             .py_1()
-                            .rounded_md()
+                            .rounded(px(theme::radius_md()))
                             .bg(theme::panel())
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::muted())
                             .cursor_pointer()
                             .hover(|d| d.text_color(theme::fg()))
@@ -1228,11 +1235,11 @@ impl AppState {
                             .id("permission-confirm")
                             .px_2()
                             .py_1()
-                            .rounded_md()
+                            .rounded(px(theme::radius_md()))
                             .border_1()
                             .border_color(theme::yellow())
                             .bg(theme::raised())
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::yellow())
                             .cursor_pointer()
                             .hover(|d| d.bg(theme::accent_soft()))
@@ -1245,7 +1252,7 @@ impl AppState {
         }
         col.child(
             div()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child("只读/计划会隐藏写文件与命令工具；完整权限只免审批，路径沙箱与超时限制不变。"),
         )
@@ -1271,9 +1278,9 @@ impl AppState {
                     .id("composer-attach")
                     .px_2()
                     .py_1()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::raised())
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::muted())
                     .cursor_pointer()
                     .hover(|d| d.text_color(theme::accent()))
@@ -1288,9 +1295,9 @@ impl AppState {
                     .id("composer-ref")
                     .px_2()
                     .py_1()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::raised())
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .when(has_open_file, |d| d.text_color(theme::muted()))
                     .when(!has_open_file, |d| d.text_color(theme::dim()))
                     .cursor_pointer()
@@ -1306,8 +1313,8 @@ impl AppState {
                     .id("toggle-tools")
                     .px_2()
                     .py_1()
-                    .rounded_md()
-                    .text_xs()
+                    .rounded(px(theme::radius_md()))
+                    .text_size(px(theme::text_caption()))
                     .cursor_pointer()
                     .when(tools_on, |d| {
                         d.bg(theme::accent_soft())
@@ -1330,8 +1337,8 @@ impl AppState {
                     .id("composer-thinking")
                     .px_2()
                     .py_1()
-                    .rounded_md()
-                    .text_xs()
+                    .rounded(px(theme::radius_md()))
+                    .text_size(px(theme::text_caption()))
                     .cursor_pointer()
                     .when(thinking_on, |d| {
                         d.bg(theme::accent_soft())
@@ -1358,9 +1365,9 @@ impl AppState {
                     .id("composer-clear")
                     .px_2()
                     .py_1()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::raised())
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::muted())
                     .cursor_pointer()
                     .hover(|d| d.text_color(theme::fg()))
@@ -1549,7 +1556,7 @@ impl AppState {
                     .w(px(THINK_CELL))
                     .flex()
                     .justify_center()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(if i == idx { theme::fg() } else { theme::dim() })
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
@@ -1565,7 +1572,7 @@ impl AppState {
             .gap_2()
             .px_4()
             .py_3()
-            .rounded_lg()
+            .rounded(px(theme::radius_lg()))
             .border_1()
             .border_color(theme::accent_line())
             .bg(theme::panel())
@@ -1576,7 +1583,7 @@ impl AppState {
                     .gap_2()
                     .child(
                         div()
-                            .text_base()
+                            .text_size(px(theme::text_title()))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(if level.is_auto() {
                                 theme::muted()
@@ -1591,18 +1598,18 @@ impl AppState {
                             .min_w(px(0.0))
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
-                            .child(SharedString::from(fit_text(&model_label, 320.0, 11.0))),
+                            .child(SharedString::from(fit_text(&model_label, 320.0, theme::text_caption()))),
                     )
                     .child(
                         div()
                             .id("think-reset")
                             .px_2()
                             .py_1()
-                            .rounded_md()
+                            .rounded(px(theme::radius_md()))
                             .bg(theme::raised())
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::muted())
                             .cursor_pointer()
                             .hover(|d| d.text_color(theme::accent()))
@@ -1616,9 +1623,9 @@ impl AppState {
                             .id("think-close")
                             .px_2()
                             .py_1()
-                            .rounded_md()
+                            .rounded(px(theme::radius_md()))
                             .bg(theme::raised())
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::muted())
                             .cursor_pointer()
                             .hover(|d| d.text_color(theme::fg()))
@@ -1634,7 +1641,7 @@ impl AppState {
             .child(labels)
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child("可拖动滑杆（或点刻度）；随会话保存；自动 = 不向厂商发送思考参数。网关不支持时会自动去掉重试。"),
             )
@@ -1760,13 +1767,18 @@ pub(crate) fn flow_step(initial: &str, idx: usize, label: &str, active: bool) ->
                 .items_center()
                 .justify_center()
                 .size(px(18.0))
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .bg(color)
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::bg())
                 .child(SharedString::from(initial)),
         )
-        .child(div().text_xs().text_color(text).child(SharedString::from(label.to_string())))
+        .child(
+            div()
+                .text_size(px(theme::text_caption()))
+                .text_color(text)
+                .child(SharedString::from(label.to_string())),
+        )
 }
 
 impl AppState {
@@ -1984,7 +1996,7 @@ impl AppState {
             .items_center()
             .gap_1()
             .py_0p5()
-            .text_xs()
+            .text_size(px(theme::text_caption()))
             .text_color(theme::dim())
             .child(div().text_color(theme::muted()).child("⚒"))
             .child(
@@ -2084,7 +2096,7 @@ impl AppState {
                         .gap_2()
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::yellow())
                                 .child(if is_command {
                                     "会执行命令，确认后运行："
@@ -2097,7 +2109,7 @@ impl AppState {
                                 .min_w(px(0.0))
                                 .overflow_hidden()
                                 .whitespace_nowrap()
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::muted())
                                 .child(SharedString::from(format!(
                                     "{} {arg}",
@@ -2110,7 +2122,7 @@ impl AppState {
                                 .id(SharedString::from(format!("deny-{step_idx}")))
                                 .px_2()
                                 .py_0p5()
-                                .rounded_sm()
+                                .rounded(px(theme::radius_sm()))
                                 .bg(theme::raised())
                                 .text_color(theme::muted())
                                 .cursor_pointer()
@@ -2125,7 +2137,7 @@ impl AppState {
                                 .id(SharedString::from(format!("allow-{step_idx}")))
                                 .px_2()
                                 .py_0p5()
-                                .rounded_sm()
+                                .rounded(px(theme::radius_sm()))
                                 .bg(theme::green())
                                 .text_color(gpui::rgb(0x000000))
                                 .cursor_pointer()
@@ -2172,7 +2184,7 @@ impl AppState {
                         .gap_2()
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::accent())
                                 .child("❓ 需要你决定"),
                         )
@@ -2182,7 +2194,7 @@ impl AppState {
                                 .id(SharedString::from(format!("ask-skip-{start}")))
                                 .px_2()
                                 .py_0p5()
-                                .rounded_sm()
+                                .rounded(px(theme::radius_sm()))
                                 .bg(theme::raised())
                                 .text_color(theme::muted())
                                 .cursor_pointer()
@@ -2195,7 +2207,7 @@ impl AppState {
                 )
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::fg())
                         .child(SharedString::from(ask.question.clone())),
                 );
@@ -2210,7 +2222,7 @@ impl AppState {
                     .gap_0p5()
                     .px_2p5()
                     .py_1()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.answer_ask(label.clone(), cx);
@@ -2226,7 +2238,7 @@ impl AppState {
                 };
                 btn = btn.child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child(SharedString::from(opt.label.clone())),
                 );
@@ -2250,7 +2262,7 @@ impl AppState {
                         .min_w(px(0.0))
                         .px_2p5()
                         .py_1()
-                        .rounded_md()
+                        .rounded(px(theme::radius_md()))
                         .bg(theme::raised())
                         .border_1()
                         .border_color(if ask_focused {
@@ -2281,7 +2293,7 @@ impl AppState {
                         .child(SharedString::from(if custom_placeholder {
                             "或输入自定义答案…".to_string()
                         } else {
-                            fit_text(&custom, 380.0, 12.0)
+                            fit_text(&custom, 380.0, theme::text_caption())
                         })),
                 );
                 // 有内容才显示「发送」，否则只有输入框（回车同效）
@@ -2291,9 +2303,9 @@ impl AppState {
                             .id(SharedString::from(format!("ask-send-{start}")))
                             .px_2p5()
                             .py_1()
-                            .rounded_md()
+                            .rounded(px(theme::radius_md()))
                             .bg(theme::accent())
-                            .text_color(gpui::rgb(0x000000))
+                            .text_color(theme::accent_fg())
                             .cursor_pointer()
                             .hover(|d| d.opacity(0.88))
                             .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -2314,7 +2326,7 @@ impl AppState {
         if pending_here {
             return div()
                 .p_2()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .border_1()
                 .border_color(theme::with_alpha(0xf59e0b, 0.45))
                 .child(col)
@@ -2331,7 +2343,7 @@ impl AppState {
             .flex_col()
             .max_h(px(200.0))
             .overflow_scroll()
-            .rounded_md()
+            .rounded(px(theme::radius_md()))
             .bg(theme::bg())
             .p_2();
 
@@ -2346,9 +2358,9 @@ impl AppState {
                     .flex()
                     .gap_1()
                     .px_1()
-                    .rounded_sm()
+                    .rounded(px(theme::radius_sm()))
                     .bg(bg)
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .child(
                         div()
                             .w(px(10.0))
@@ -2410,7 +2422,7 @@ pub(crate) fn user_bubble(
             body = body.child(
                 div()
                     .w(px(140.0))
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme::border())
@@ -2428,15 +2440,15 @@ pub(crate) fn user_bubble(
                     .gap_2()
                     .px_2()
                     .py_1()
-                    .rounded_md()
+                    .rounded(px(theme::radius_md()))
                     .bg(theme::raised())
                     .child(super::files::file_badge(&a.name))
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::muted())
                             .whitespace_nowrap()
-                            .child(SharedString::from(fit_text(&a.name, 180.0, 11.0))),
+                            .child(SharedString::from(fit_text(&a.name, 180.0, theme::text_caption()))),
                     ),
             );
         }
@@ -2451,8 +2463,9 @@ pub(crate) fn user_bubble(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
+                    .text_size(px(body_px()))
                     .text_color(theme::fg())
-                    .line_height(px(22.0))
+                    .line_height(px(body_px() + 6.0))
                     .child(SharedString::from(text.to_string())),
             )
             .child(copy),
@@ -2497,6 +2510,7 @@ pub(crate) fn agent_bubble(
         .flex()
         .flex_col()
         .gap_2()
+        .text_size(px(body_px()))
         .text_color(theme::fg());
 
     if text.trim().is_empty() && code.is_none() {
@@ -2569,14 +2583,15 @@ fn agent_footer(
         .pt_1()
         .child(
             div()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::role_color(color_idx))
                 .child("▣"),
         )
         .child(
             div()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::muted())
+                .when(theme::mono_nums(), |d| d.font_family(theme::mono_family()))
                 .child(SharedString::from(parts.join(" · "))),
         )
         .child(div().flex_1());
@@ -2620,7 +2635,7 @@ pub(crate) fn team_bubble(
         .gap_2()
         .child(
             div()
-                .text_sm()
+                .text_size(px(theme::text_ui()))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(color)
                 .child(SharedString::from(name.to_string())),
@@ -2630,9 +2645,9 @@ pub(crate) fn team_bubble(
             div()
                 .px_1p5()
                 .py_0p5()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .bg(theme::raised())
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child(SharedString::from(kind_label.trim().to_string())),
         );
@@ -2674,12 +2689,12 @@ pub(crate) fn team_bubble(
             div()
                 .flex_shrink_0()
                 .size(px(28.0))
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .bg(color)
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
+                .text_size(px(theme::text_ui()))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::bg())
                 .child(SharedString::from(initial)),
@@ -2694,7 +2709,7 @@ pub(crate) fn team_bubble(
                 .child(head)
                 .child(
                     div()
-                        .rounded_lg()
+                        .rounded(px(theme::radius_lg()))
                         .border_1()
                         .border_color(theme::border())
                         .bg(theme::panel())
@@ -2769,8 +2784,8 @@ pub(crate) fn markdown_block(
         }
         Block::Paragraph(text) => div()
             .text_color(theme::fg())
-            .line_height(px(22.0))
-            .child(inline_row(&text, avail, BODY_PX))
+            .line_height(px(body_px() + 6.0))
+            .child(inline_row(&text, avail, body_px()))
             .into_any_element(),
         Block::Code { lang, lines } => code_fence_block(&lang, &lines).into_any_element(),
         Block::Bullet(items) => {
@@ -2785,7 +2800,7 @@ pub(crate) fn markdown_block(
                         .gap_2()
                         .items_start()
                         .child(div().text_color(theme::dim()).child("•"))
-                        .child(div().flex_1().line_height(px(22.0)).child(inline_row(&item, inner, BODY_PX))),
+                        .child(div().flex_1().line_height(px(body_px() + 6.0)).child(inline_row(&item, inner, body_px()))),
                 );
             }
             col.into_any_element()
@@ -2807,7 +2822,7 @@ pub(crate) fn markdown_block(
                                 .text_color(theme::dim())
                                 .child(SharedString::from(label)),
                         )
-                        .child(div().flex_1().line_height(px(22.0)).child(inline_row(&item, inner, BODY_PX))),
+                        .child(div().flex_1().line_height(px(body_px() + 6.0)).child(inline_row(&item, inner, body_px()))),
                 );
             }
             col.into_any_element()
@@ -2817,7 +2832,7 @@ pub(crate) fn markdown_block(
             // 左侧 pl_3（12）+ 竖线（2）会吃掉内容宽度
             let inner = (avail - 14.0).max(120.0);
             for line in items {
-                col = col.child(div().line_height(px(22.0)).child(inline_row(&line, inner, BODY_PX)));
+                col = col.child(div().line_height(px(body_px() + 6.0)).child(inline_row(&line, inner, body_px())));
             }
             div()
                 .pl_3()
@@ -2863,7 +2878,7 @@ fn image_block(
                 .child(
                     div()
                         .id(SharedString::from(id))
-                        .rounded_md()
+                        .rounded(px(theme::radius_md()))
                         .border_1()
                         .border_color(theme::border())
                         .overflow_hidden()
@@ -2882,10 +2897,10 @@ fn image_block(
                 .when(!caption.is_empty(), |d| {
                     d.child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
                             .whitespace_nowrap()
-                            .child(SharedString::from(fit_text(caption, max_w, 11.0))),
+                            .child(SharedString::from(fit_text(caption, max_w, theme::text_caption()))),
                     )
                 })
                 .into_any_element()
@@ -2896,17 +2911,17 @@ fn image_block(
             .gap_2()
             .px_3()
             .py_2()
-            .rounded_md()
+            .rounded(px(theme::radius_md()))
             .border_1()
             .border_color(theme::border())
             .bg(theme::surface())
-            .text_xs()
+            .text_size(px(theme::text_caption()))
             .text_color(theme::dim())
             .child("▧")
             .child(SharedString::from(fit_text(
                 if caption.is_empty() { src } else { caption },
                 (max_w - 40.0).max(80.0),
-                11.0,
+                theme::text_caption(),
             )))
             .into_any_element(),
     }
@@ -2942,7 +2957,7 @@ fn table_block(
     for (c, w) in natural.iter_mut().enumerate() {
         let mut max_w = 0.0f32;
         let mut measure = |text: &str| {
-            let t: f32 = text.chars().map(|ch| char_width_mono(ch, BODY_PX)).sum();
+            let t: f32 = text.chars().map(|ch| char_width_mono(ch, body_px())).sum();
             max_w = max_w.max(t);
         };
         measure(&text_at(headers, c));
@@ -2974,7 +2989,7 @@ fn table_block(
             .child(inline_row_layout(
                 text,
                 inner,
-                BODY_PX,
+                body_px(),
                 24.0,
                 aligns.get(c).copied().unwrap_or(Align::Left),
             ))
@@ -3013,7 +3028,7 @@ fn table_block(
         .flex_col()
         .w_full()
         .max_w(px(total_w))
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .border_1()
         .border_color(theme::border())
         .overflow_hidden()
@@ -3146,7 +3161,7 @@ fn code_fence_block(lang: &str, lines: &[String]) -> impl IntoElement {
         body = body.child(row);
     }
     div()
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .border_1()
         .border_color(theme::border())
         .overflow_hidden()
@@ -3155,7 +3170,7 @@ fn code_fence_block(lang: &str, lines: &[String]) -> impl IntoElement {
             div()
                 .px_3()
                 .py_2()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .font_family(theme::mono_family())
                 .child(body),
         )
@@ -3172,7 +3187,7 @@ impl AppState {
 pub(crate) fn code_block(c: &neverwork_core::CodeBlock) -> impl IntoElement {
     div()
         .mt_2()
-        .rounded_lg()
+        .rounded(px(theme::radius_lg()))
         .border_1()
         .border_color(theme::border())
         .overflow_hidden()
@@ -3187,13 +3202,40 @@ pub(crate) fn code_block(c: &neverwork_core::CodeBlock) -> impl IntoElement {
                 .bg(theme::raised())
                 .border_b_1()
                 .border_color(theme::border())
-                .child(div().text_xs().text_color(theme::orange()).child("⬢"))
-                .child(div().text_xs().text_color(theme::muted()).child(SharedString::from(c.filename.clone())))
+                .child(
+                    div()
+                        .text_size(px(theme::text_caption()))
+                        .text_color(theme::orange())
+                        .child("⬢"),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::text_caption()))
+                        .text_color(theme::muted())
+                        .child(SharedString::from(c.filename.clone())),
+                )
                 .child(div().flex_1())
-                .child(div().text_xs().text_color(theme::green()).child(SharedString::from(format!("+{}", c.added))))
-                .child(div().text_xs().text_color(theme::red()).child(SharedString::from(format!("−{}", c.removed)))),
+                .child(
+                    div()
+                        .text_size(px(theme::text_caption()))
+                        .text_color(theme::green())
+                        .child(SharedString::from(format!("+{}", c.added))),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::text_caption()))
+                        .text_color(theme::red())
+                        .child(SharedString::from(format!("−{}", c.removed))),
+                ),
         )
-        .child(div().px_3().py_2().text_xs().text_color(theme::fg()).child(SharedString::from(c.code.clone())))
+        .child(
+            div()
+                .px_3()
+                .py_2()
+                .text_size(px(theme::text_body()))
+                .text_color(theme::fg())
+                .child(SharedString::from(c.code.clone())),
+        )
 }
 
 /// 角色交接卡片：默认一行「需求验证 → 接口成员 · 需要修改 3 处」，
@@ -3212,7 +3254,7 @@ pub(crate) fn handoff_card(
         .flex()
         .items_center()
         .gap_2()
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .text_color(theme::muted())
         .child(div().text_color(theme::accent()).child("⇄"))
         .child(SharedString::from(from.to_string()))
@@ -3238,7 +3280,7 @@ pub(crate) fn handoff_card(
         .gap_2()
         .px_3()
         .py_2()
-        .rounded_lg()
+        .rounded(px(theme::radius_lg()))
         .bg(theme::panel())
         .border_1()
         .border_color(theme::border())
@@ -3256,7 +3298,7 @@ pub(crate) fn handoff_card(
             .pt_2()
             .border_t_1()
             .border_color(theme::border())
-            .text_xs()
+            .text_size(px(theme::text_caption()))
             .text_color(theme::muted());
         for line in detail.trim().lines() {
             body = body.child(if line.trim().is_empty() {
@@ -3277,11 +3319,11 @@ pub(crate) fn tool_result(summary: &str) -> impl IntoElement {
         .gap_2()
         .px_3()
         .py_2()
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .bg(theme::green_soft())
         .border_1()
         .border_color(theme::green_line())
-        .text_xs()
+        .text_size(px(theme::text_caption()))
         .text_color(theme::muted())
         .child(
             div()
@@ -3289,7 +3331,7 @@ pub(crate) fn tool_result(summary: &str) -> impl IntoElement {
                 .items_center()
                 .justify_center()
                 .size(px(15.0))
-                .rounded_sm()
+                .rounded(px(theme::radius_sm()))
                 .bg(theme::green_soft())
                 .text_color(theme::green())
                 .child("✓"),
@@ -3312,11 +3354,11 @@ pub(crate) fn parallel_row(items: &[neverwork_core::ParallelItem]) -> impl IntoE
                 .gap_2()
                 .px_3()
                 .py_1p5()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .bg(theme::panel())
                 .border_1()
                 .border_color(theme::border())
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::muted())
                 .child(
                     div()
@@ -3324,7 +3366,7 @@ pub(crate) fn parallel_row(items: &[neverwork_core::ParallelItem]) -> impl IntoE
                         .items_center()
                         .justify_center()
                         .size(px(15.0))
-                        .rounded_sm()
+                        .rounded(px(theme::radius_sm()))
                         .bg(theme::role_color(it.color_index))
                         .text_color(theme::fg())
                         .child(SharedString::from(it.initial.clone())),
@@ -3343,8 +3385,13 @@ pub(crate) fn role_dot(name: &str, idx: usize) -> impl IntoElement {
         .flex()
         .items_center()
         .gap_1()
-        .child(div().size(px(6.0)).rounded_md().bg(theme::role_color(idx)))
-        .child(div().text_xs().text_color(theme::muted()).child(SharedString::from(name.to_string())))
+        .child(div().size(px(6.0)).rounded_full().bg(theme::role_color(idx)))
+        .child(
+            div()
+                .text_size(px(theme::text_caption()))
+                .text_color(theme::muted())
+                .child(SharedString::from(name.to_string())),
+        )
 }
 
 /// 顶栏角色圆点行（来自会话所属团队）。

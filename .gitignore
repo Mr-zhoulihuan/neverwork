@@ -14,6 +14,7 @@ Thumbs.db
 desktop.ini
 .idea/
 .vscode/
+.superpowers/
 
 # ===== 运行期临时文件 =====
 *.log

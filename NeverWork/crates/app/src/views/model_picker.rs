@@ -238,7 +238,7 @@ impl AppState {
                 .gap_2()
                 .h(px(30.0))
                 .px_2()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .bg(theme::raised())
                 .border_1()
                 .border_color(if editing {
@@ -246,7 +246,7 @@ impl AppState {
                 } else {
                     theme::border()
                 })
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .cursor(gpui::CursorStyle::IBeam)
                 .when(editing, |d| d.track_focus(&self.editor_focus))
                 .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
@@ -324,7 +324,7 @@ impl AppState {
                 div()
                     .px_2()
                     .py_3()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child("没有匹配的模型：先到「设置 → 模型与厂商」填 Key、启用模型"),
             );
@@ -341,9 +341,9 @@ impl AppState {
                     .px_2()
                     .pt_2()
                     .pb_1()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
-                    .child(SharedString::from(fit_text(&group.name, 220.0, 11.0)))
+                    .child(SharedString::from(fit_text(&group.name, 220.0, theme::text_caption())))
                     .child("·")
                     .child(SharedString::from(group.kind))
                     .child(div().flex_1())
@@ -373,7 +373,7 @@ impl AppState {
                 .flex()
                 .items_center()
                 .gap_3()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child("↑↓ 选择")
                 .child("Enter 确认")
@@ -412,8 +412,8 @@ fn option_row(
         .gap_2()
         .h(px(30.0))
         .px_2()
-        .rounded_sm()
-        .text_xs()
+        .rounded(px(theme::radius_sm()))
+        .text_size(px(theme::text_caption()))
         .cursor_pointer()
         .when(highlighted, |d| d.bg(theme::accent_soft()))
         .when(!highlighted, |d| d.hover(|d| d.bg(theme::raised())))
@@ -435,7 +435,7 @@ fn option_row(
                 } else {
                     theme::muted()
                 })
-                .child(SharedString::from(fit_text(&title, 280.0, 12.0))),
+                .child(SharedString::from(fit_text(&title, 280.0, theme::text_caption()))),
         )
         .when(!hint.is_empty(), |d| {
             d.child(
@@ -445,7 +445,7 @@ fn option_row(
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_color(theme::dim())
-                    .child(SharedString::from(fit_text(&hint, 320.0, 11.0))),
+                    .child(SharedString::from(fit_text(&hint, 320.0, theme::text_caption()))),
             )
         })
 }

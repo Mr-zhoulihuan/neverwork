@@ -28,7 +28,7 @@ impl AppState {
             .flex_col()
             .w(px(640.0))
             .max_h(px(560.0))
-            .rounded_lg()
+            .rounded(px(theme::radius_lg()))
             .border_1()
             .border_color(theme::border())
             .bg(theme::surface())
@@ -53,14 +53,14 @@ impl AppState {
                         .min_w(px(0.0))
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(theme::text_ui()))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::fg())
                                 .child("用量"),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(px(theme::text_caption()))
                                 .text_color(theme::dim())
                                 .child(SharedString::from(format!("当前模型 {model_label}"))),
                         ),
@@ -72,7 +72,7 @@ impl AppState {
                         .items_center()
                         .justify_center()
                         .size(px(24.0))
-                        .rounded_md()
+                        .rounded(px(theme::radius_md()))
                         .text_color(theme::muted())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -126,7 +126,7 @@ impl AppState {
             .gap_2()
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(theme::text_ui()))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::fg())
                     .child("账户余额"),
@@ -135,7 +135,7 @@ impl AppState {
         if !name.is_empty() {
             head = head.child(
                 div()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child(SharedString::from(name.clone())),
             );
@@ -145,8 +145,8 @@ impl AppState {
                 .id("usage-balance-refresh")
                 .px_2()
                 .py_1()
-                .rounded_md()
-                .text_xs()
+                .rounded(px(theme::radius_md()))
+                .text_size(px(theme::text_caption()))
                 .text_color(if busy { theme::dim() } else { theme::accent() })
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::border()))
@@ -161,7 +161,7 @@ impl AppState {
             None if busy => {
                 body = body.child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .child("正在向厂商查询余额…"),
                 );
@@ -169,7 +169,7 @@ impl AppState {
             None => {
                 body = body.child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .child("点「刷新」查询余额"),
                 );
@@ -177,7 +177,7 @@ impl AppState {
             Some(BalanceOutcome::Unsupported) => {
                 body = body.child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .line_height(px(18.0))
                         .text_color(theme::muted())
                         .child("该厂商没有公开的余额查询接口，请到厂商控制台查看账户余额。"),
@@ -195,8 +195,8 @@ impl AppState {
                                     .id("usage-console")
                                     .px_2()
                                     .py_1()
-                                    .rounded_md()
-                                    .text_xs()
+                                    .rounded(px(theme::radius_md()))
+                                    .text_size(px(theme::text_caption()))
                                     .text_color(theme::accent())
                                     .cursor_pointer()
                                     .hover(|d| d.bg(theme::raised()))
@@ -219,18 +219,19 @@ impl AppState {
                             .text_size(px(22.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::fg())
+                            .when(theme::mono_nums(), |d| d.font_family(theme::mono_family()))
                             .child(SharedString::from(format!("{symbol}{}", info.total))),
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::dim())
                             .child(SharedString::from(info.currency.clone())),
                     );
                 if !info.note.is_empty() {
                     amount = amount.child(
                         div()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .text_color(theme::yellow())
                             .child(SharedString::from(format!("· {}", info.note))),
                     );
@@ -242,7 +243,7 @@ impl AppState {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .text_xs()
+                            .text_size(px(theme::text_caption()))
                             .child(div().text_color(theme::dim()).child(SharedString::from(k.clone())))
                             .child(
                                 div()
@@ -255,7 +256,7 @@ impl AppState {
             Some(BalanceOutcome::Failed(e)) => {
                 body = body.child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .line_height(px(18.0))
                         .text_color(theme::red())
                         .child(SharedString::from(format!("查询失败：{e}"))),
@@ -266,7 +267,7 @@ impl AppState {
         div()
             .flex()
             .flex_col()
-            .rounded_lg()
+            .rounded(px(theme::radius_lg()))
             .border_1()
             .border_color(theme::border())
             .bg(theme::panel())
@@ -291,13 +292,13 @@ fn session_card(t: &crate::usage_ops::UsageTotals) -> impl IntoElement {
         .flex_col()
         .gap_2()
         .p_3()
-        .rounded_lg()
+        .rounded(px(theme::radius_lg()))
         .border_1()
         .border_color(theme::border())
         .bg(theme::panel())
         .child(
             div()
-                .text_sm()
+                .text_size(px(theme::text_ui()))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::fg())
                 .child("本会话用量"),
@@ -312,7 +313,7 @@ fn models_card(rows: &[ModelUsage]) -> impl IntoElement {
         list = list.child(
             div()
                 .py_2()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child("还没有可统计的用量：发出第一条消息后就有了。"),
         );
@@ -343,7 +344,7 @@ fn models_card(rows: &[ModelUsage]) -> impl IntoElement {
                 .items_center()
                 .gap_2()
                 .py_1p5()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .child(
                     div()
                         .flex_1()
@@ -392,7 +393,7 @@ fn models_card(rows: &[ModelUsage]) -> impl IntoElement {
         .flex_col()
         .gap_2()
         .p_3()
-        .rounded_lg()
+        .rounded(px(theme::radius_lg()))
         .border_1()
         .border_color(theme::border())
         .bg(theme::panel())
@@ -403,7 +404,7 @@ fn models_card(rows: &[ModelUsage]) -> impl IntoElement {
                 .gap_2()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(theme::text_ui()))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::fg())
                         .child("按模型汇总"),
@@ -434,7 +435,7 @@ fn stat_tile(label: &str, value: String) -> impl IntoElement {
         .min_w(px(0.0))
         .px_2()
         .py_2()
-        .rounded_md()
+        .rounded(px(theme::radius_md()))
         .bg(theme::raised())
         .child(
             div()
@@ -444,8 +445,9 @@ fn stat_tile(label: &str, value: String) -> impl IntoElement {
         )
         .child(
             div()
-                .text_sm()
+                .text_size(px(theme::text_ui()))
                 .text_color(theme::fg())
+                .when(theme::mono_nums(), |d| d.font_family(theme::mono_family()))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .child(SharedString::from(value)),

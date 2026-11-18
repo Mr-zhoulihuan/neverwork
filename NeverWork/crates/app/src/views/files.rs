@@ -66,7 +66,7 @@ pub(crate) fn file_badge(name: &str) -> impl IntoElement {
         .w(px(26.0))
         .h(px(15.0))
         .flex_shrink_0()
-        .rounded_sm()
+        .rounded(px(theme::radius_sm()))
         .bg(theme::tint(color, 0.16))
         .border_1()
         .border_color(theme::tint(color, 0.45))
@@ -104,8 +104,8 @@ impl AppState {
                         .justify_center()
                         .w(px(14.0))
                         .h(px(44.0))
-                        .rounded_sm()
-                        .text_xs()
+                        .rounded(px(theme::radius_sm()))
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -149,8 +149,8 @@ impl AppState {
                         .items_center()
                         .justify_center()
                         .size(px(22.0))
-                        .rounded_md()
-                        .text_xs()
+                        .rounded(px(theme::radius_md()))
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -178,7 +178,7 @@ impl AppState {
                 .py_2()
                 .border_t_1()
                 .border_color(theme::border())
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child(if self.remote.is_some() {
                     "⇅ 远程"
@@ -204,8 +204,8 @@ impl AppState {
             .items_center()
             .h(px(28.0))
             .px_2()
-            .rounded_md()
-            .text_sm()
+            .rounded(px(theme::radius_md()))
+            .text_size(px(theme::text_ui()))
             .cursor_pointer()
             .when(on, |d| d.bg(theme::raised()).text_color(theme::fg()))
             .when(!on, |d| d.text_color(theme::muted()).hover(|d| d.bg(theme::raised())))
@@ -237,7 +237,7 @@ impl AppState {
                 .px_3()
                 .border_b_1()
                 .border_color(theme::border())
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child("本会话产物")
                 .child(SharedString::from(format!("{} 项", list.len()))),
@@ -246,7 +246,7 @@ impl AppState {
             return col.child(
                 div()
                     .p_3()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .line_height(px(20.0))
                     .text_color(theme::dim())
                     .child("暂无产物。Agent 写入的文件、生成的图片会自动收集到这里。"),
@@ -272,7 +272,7 @@ impl AppState {
                 .gap_2()
                 .px_2()
                 .py_1()
-                .rounded_md()
+                .rounded(px(theme::radius_md()))
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised()))
                 .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
@@ -283,7 +283,7 @@ impl AppState {
                     div()
                         .size(px(30.0))
                         .flex_shrink_0()
-                        .rounded_sm()
+                        .rounded(px(theme::radius_sm()))
                         .overflow_hidden()
                         .child(
                             gpui::img(std::path::PathBuf::from(&a.path))
@@ -308,16 +308,17 @@ impl AppState {
                 .overflow_hidden()
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .whitespace_nowrap()
-                        .child(SharedString::from(fit_text(&a.name, 180.0, 11.0))),
+                        .child(SharedString::from(fit_text(&a.name, 180.0, theme::text_caption()))),
                 );
             if !sub.is_empty() {
                 info = info.child(
                     div()
                         .text_size(px(10.0))
                         .text_color(theme::dim())
+                        .when(theme::mono_nums(), |d| d.font_family(theme::mono_family()))
                         .child(SharedString::from(sub)),
                 );
             }
@@ -348,7 +349,7 @@ impl AppState {
                 .items_start()
                 .gap_2()
                 .p_3()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child("还没有选择工作区")
                 .child(
@@ -356,7 +357,7 @@ impl AppState {
                         .id("files-open-folder")
                         .px_2()
                         .py_1()
-                        .rounded_md()
+                        .rounded(px(theme::radius_md()))
                         .bg(theme::raised())
                         .border_1()
                         .border_color(theme::border())
@@ -388,8 +389,8 @@ impl AppState {
                         .items_center()
                         .justify_center()
                         .size(px(24.0))
-                        .rounded_md()
-                        .text_sm()
+                        .rounded(px(theme::radius_md()))
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::muted())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()))
@@ -405,8 +406,8 @@ impl AppState {
                         .items_center()
                         .justify_center()
                         .size(px(24.0))
-                        .rounded_md()
-                        .text_sm()
+                        .rounded(px(theme::radius_md()))
+                        .text_size(px(theme::text_ui()))
                         .text_color(theme::muted())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::raised()))
@@ -418,10 +419,10 @@ impl AppState {
                 .child(div().flex_1())
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .child(SharedString::from(if let Some(t) = &self.remote {
-                            fit_text(&t.display(), 140.0, 12.0)
+                            fit_text(&t.display(), 140.0, theme::text_caption())
                         } else {
                             self.workspace
                                 .as_ref()
@@ -453,7 +454,7 @@ impl AppState {
             // 文件行：目录继续用箭头，文件按类型给彩色徽标（一眼看出是什么文件）。
             let icon: AnyElement = if f.is_dir {
                 div()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::accent())
                     .child(SharedString::from(if f.expanded { "▾" } else { "▸" }))
                     .into_any_element()
@@ -469,8 +470,8 @@ impl AppState {
                 .h(px(28.0))
                 .pl(px(indent))
                 .pr_2()
-                .rounded_sm()
-                .text_sm()
+                .rounded(px(theme::radius_sm()))
+                .text_size(px(theme::text_ui()))
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised()))
                 .when(is_open, |d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -527,7 +528,7 @@ impl AppState {
             tree = tree.child(
                 div()
                     .p_3()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child("这个目录里没有可显示的文件"),
             );
@@ -545,7 +546,7 @@ impl AppState {
                 .flex_col()
                 .gap_2()
                 .p_3()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child("还没有选择工作区")
                 .child(
@@ -564,7 +565,7 @@ impl AppState {
                 .flex_col()
                 .gap_2()
                 .p_3()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child("远程工作区暂不支持改动面板")
                 .child(
@@ -586,13 +587,18 @@ impl AppState {
             .px_3()
             .border_b_1()
             .border_color(theme::border())
-            .child(div().text_xs().text_color(theme::accent()).child("⎇"));
+            .child(
+                div()
+                    .text_size(px(theme::text_caption()))
+                    .text_color(theme::accent())
+                    .child("⎇"),
+            );
 
         // 分支名只读展示（改动面板只列文件，不提供分支操作）
         head = head.child(
             div()
                 .px_1()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .flex()
                 .items_center()
                 .whitespace_nowrap()
@@ -600,14 +606,14 @@ impl AppState {
                 .child(SharedString::from(if st.branch.is_empty() {
                     "—".to_string()
                 } else {
-                    fit_text(&st.branch, 120.0, 12.0)
+                    fit_text(&st.branch, 120.0, theme::text_caption())
                 })),
         );
 
         if st.ahead > 0 {
             head = head.child(
                 div()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::green())
                     .child(SharedString::from(format!("↑{}", st.ahead))),
             );
@@ -615,7 +621,7 @@ impl AppState {
         if st.behind > 0 {
             head = head.child(
                 div()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::yellow())
                     .child(SharedString::from(format!("↓{}", st.behind))),
             );
@@ -630,8 +636,8 @@ impl AppState {
                     .items_center()
                     .justify_center()
                     .size(px(22.0))
-                    .rounded_md()
-                    .text_xs()
+                    .rounded(px(theme::radius_md()))
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::muted())
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::raised()).text_color(theme::fg()))
@@ -652,7 +658,7 @@ impl AppState {
                 .gap_1()
                 .px_3()
                 .pb_2()
-                .text_xs();
+                .text_size(px(theme::text_caption()));
             bar = bar.child(
                 div()
                     .w_full()
@@ -672,7 +678,7 @@ impl AppState {
                         .id(SharedString::from(format!("gitrepo-{name}")))
                         .px_2()
                         .py_0p5()
-                        .rounded_sm()
+                        .rounded(px(theme::radius_sm()))
                         .cursor_pointer()
                         .when(on, |d| {
                             d.bg(theme::accent_soft()).text_color(theme::accent())
@@ -685,7 +691,7 @@ impl AppState {
                         .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
                             this.select_git_repo(p2.clone(), cx);
                         }))
-                        .child(SharedString::from(fit_text(name, 90.0, 12.0))),
+                        .child(SharedString::from(fit_text(name, 90.0, theme::text_caption()))),
                 );
             }
             col = col.child(bar);
@@ -700,7 +706,7 @@ impl AppState {
                         .flex_col()
                         .gap_2()
                         .p_3()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::dim())
                         .child("请先在上方选一个仓库")
                         .child(
@@ -724,7 +730,7 @@ impl AppState {
                 .flex_col()
                 .gap_2()
                 .p_3()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child("当前工作区不是 git 仓库");
 
@@ -751,8 +757,8 @@ impl AppState {
                             .gap_2()
                             .h(px(26.0))
                             .px_2()
-                            .rounded_sm()
-                            .text_xs()
+                            .rounded(px(theme::radius_sm()))
+                            .text_size(px(theme::text_caption()))
                             .cursor_pointer()
                             .hover(|d| d.bg(theme::raised()))
                             .child(div().text_color(theme::accent()).child("⎇"))
@@ -763,7 +769,7 @@ impl AppState {
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_color(theme::fg())
-                                    .child(SharedString::from(fit_text(&label, 180.0, 12.0))),
+                                    .child(SharedString::from(fit_text(&label, 180.0, theme::text_caption()))),
                             )
                             .child(
                                 div()
@@ -787,7 +793,7 @@ impl AppState {
                 .gap_2()
                 .px_3()
                 .py_2()
-                .text_xs()
+                .text_size(px(theme::text_caption()))
                 .text_color(theme::dim())
                 .child(SharedString::from(crate::git::summary_line(st)))
                 .when(st.has_conflicts(), |d| {
@@ -795,7 +801,7 @@ impl AppState {
                         div()
                             .px_1p5()
                             .py_0p5()
-                            .rounded_sm()
+                            .rounded(px(theme::radius_sm()))
                             .bg(theme::with_alpha(0xef4444, 0.18))
                             .text_color(theme::red())
                             .child("有冲突"),
@@ -821,7 +827,7 @@ impl AppState {
                 div()
                     .px_2()
                     .py_2()
-                    .text_xs()
+                    .text_size(px(theme::text_caption()))
                     .text_color(theme::dim())
                     .child("工作区干净，没有未提交改动"),
             );
@@ -847,8 +853,8 @@ impl AppState {
                     .gap_2()
                     .h(px(24.0))
                     .px_2()
-                    .rounded_sm()
-                    .text_xs()
+                    .rounded(px(theme::radius_sm()))
+                    .text_size(px(theme::text_caption()))
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::with_alpha(0xffffff, 0.04)))
                     .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _w, cx| {
@@ -885,7 +891,7 @@ impl AppState {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_color(theme::muted())
-                            .child(SharedString::from(fit_text(&path, 190.0, 12.0))),
+                            .child(SharedString::from(fit_text(&path, 190.0, theme::text_caption()))),
                     ),
             );
         }
@@ -915,11 +921,16 @@ impl AppState {
                 .px_3()
                 .border_b_1()
                 .border_color(theme::border())
-                .child(div().text_xs().text_color(theme::dim()).child(header_hint))
+                .child(
+                    div()
+                        .text_size(px(theme::text_caption()))
+                        .text_color(theme::dim())
+                        .child(header_hint),
+                )
                 .child(div().flex_1())
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(theme::text_caption()))
                         .text_color(theme::muted())
                         .child(SharedString::from(name.clone())),
                 ),
@@ -933,7 +944,7 @@ impl AppState {
             .gap_0p5()
             .flex_1()
             .overflow_scroll()
-            .text_xs();
+            .text_size(px(theme::text_caption()));
 
         if let Some(media) = &media {
             match media {
@@ -950,7 +961,7 @@ impl AppState {
                         div()
                             .id("preview-image")
                             .w_full()
-                            .rounded_md()
+                            .rounded(px(theme::radius_md()))
                             .overflow_hidden()
                             .border_1()
                             .border_color(theme::border())
@@ -965,6 +976,7 @@ impl AppState {
                         div()
                             .pt_1()
                             .text_color(theme::dim())
+                            .when(theme::mono_nums(), |d| d.font_family(theme::mono_family()))
                             .child(SharedString::from(format!("{name} · {size} · 图片"))),
                     );
                 }
@@ -980,7 +992,7 @@ impl AppState {
                             .flex_col()
                             .gap_2()
                             .p_2()
-                            .rounded_md()
+                            .rounded(px(theme::radius_md()))
                             .border_1()
                             .border_color(theme::border())
                             .bg(theme::raised())
@@ -997,11 +1009,11 @@ impl AppState {
                                             .w(px(34.0))
                                             .h(px(42.0))
                                             .flex_shrink_0()
-                                            .rounded_sm()
+                                            .rounded(px(theme::radius_sm()))
                                             .bg(theme::tint(theme::red(), 0.14))
                                             .border_1()
                                             .border_color(theme::tint(theme::red(), 0.45))
-                                            .text_xs()
+                                            .text_size(px(theme::text_caption()))
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(theme::red())
                                             .child("PDF"),
@@ -1012,15 +1024,18 @@ impl AppState {
                                             .child(SharedString::from(name.clone())),
                                     ),
                             )
-                            .child(div().text_color(theme::dim()).child(format!(
-                                "{size} · 内置查看暂不支持 PDF 排版渲染"
-                            )))
+                            .child(
+                                div()
+                                    .text_color(theme::dim())
+                                    .when(theme::mono_nums(), |d| d.font_family(theme::mono_family()))
+                                    .child(format!("{size} · 内置查看暂不支持 PDF 排版渲染")),
+                            )
                             .child(
                                 div()
                                     .id("preview-open-external")
                                     .px_2()
                                     .py_1()
-                                    .rounded_md()
+                                    .rounded(px(theme::radius_md()))
                                     .bg(theme::accent_soft())
                                     .text_color(theme::accent())
                                     .cursor_pointer()
