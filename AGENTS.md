@@ -10,7 +10,7 @@
 cargo run -p neverwork          # 主界面
 cargo test --workspace          # 全部测试（3 条打真实 DeepSeek，需 NW_DEEPSEEK_KEY）
 cargo build -p neverwork        # 只编应用（增量约 6s）
-powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 → dist\NeverWork-0.1.0-setup.exe（dist/ 已 gitignore，需 NSIS；exe 图标由 build.rs 内嵌，图标源 crates\app\assets\neverwork.ico）
+powershell -ExecutionPolicy Bypass -File installer\build.ps1   # NSIS 安装包 → dist\NeverWork-<版本>-setup.exe（版本取自 workspace Cargo.toml，发版同步改 crates\app\assets\neverwork.rc；dist/ 已 gitignore，需 NSIS；exe 图标由 build.rs 内嵌，图标源 crates\app\assets\neverwork.ico）
 ```
 
 运行期变量：`NW_ROOT`、`NW_REMOTE`（`user@host:/path`）、`NW_API_KEY`/`NW_PROVIDER`/`NW_BASE_URL`/`NW_MODEL`、`NW_VIEW`、`NW_SETTINGS_TAB`、`NW_OPEN`、`NW_WIN_W`/`NW_WIN_H`、`NW_MAXIMIZE`、`NW_CONFIG_DIR`；验证专用 `NW_SEND`/`NW_AUTO_APPROVE`/`NW_TEAM`/`NW_RIGHT_COLLAPSED`/`NW_RIGHT_TAB`（`files`|`git`|`artifacts`|`preview`）/`NW_SESSION_COLLAPSED`/`NW_FIND`/`NW_FOLD`/`NW_CURSORS`/`NW_PICK_MODEL`/`NW_PROVIDER_VIEW`（`add`|下标）/`NW_COMPOSER`（`thinking`|`menu`|`permission`）/`NW_PERMISSION`（`read_only`|`plan`|`standard`|`full`）/`NW_LAYOUT_DEBUG`/`NW_MARKET_SOURCE`/`NW_MARKET_NO_REFRESH`/`NW_SKILLS_TAB`/`NW_SKILL_QUERY`/`NW_INSTALL_SKILL`/`NW_SESSION_QUERY`/`NW_SESSION_MENU`/`NW_ARCHIVE_OPEN`/`NW_WORKSPACE_POPUP`/`NW_DEMO_STATUS`/`NW_SWITCH_WS`/`NW_TRACE`（=1 启动即开轨迹页；=0 关）/`NW_TRACE_SELECT`（选中下标）/`NW_TRACE_QUERY`（搜索词）/`NW_USAGE`（=1 启动即开「用量」弹框）/`NW_ALLOW_MULTI`（=1 绕过单实例互斥量并行多开）；`NW_ASKPASS_MODE`/`NW_ASKPASS_SECRET` 由 ssh 回调应用自身时使用，不要手动设置；密码往返测试用 `NW_ASKPASS_EXE` 指向 `target/debug/neverwork.exe`。

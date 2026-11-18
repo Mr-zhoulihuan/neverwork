@@ -19,7 +19,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1            # 编 re
 powershell -ExecutionPolicy Bypass -File installer\build.ps1 -SkipBuild # 复用已有 release 产物
 ```
 
-产出 `dist\NeverWork-0.1.0-setup.exe`（约 5.5MB）：按用户安装到 `%LOCALAPPDATA%\Programs\NeverWork`、
+产出 `dist\NeverWork-<版本>-setup.exe`（版本取自 workspace `Cargo.toml`，如 0.2.0；约 5.5MB）：按用户安装到 `%LOCALAPPDATA%\Programs\NeverWork`、
 不弹 UAC、可选桌面快捷方式；卸载保留 `%USERPROFILE%\.neverwork`（会话 / 设置 / Key）。
 依赖 NSIS（`winget install NSIS.NSIS`）。应用图标已入库（`crates\app\assets\neverwork.ico`），编 exe 时由 `build.rs` 内嵌进资源段（任务栏 / 资源管理器直接显示）；改图标后跑 `python installer\make_icon.py` 重新生成。
 

@@ -17,7 +17,11 @@ Unicode true
 !include "LogicLib.nsh"
 
 !define APP_NAME "NeverWork"
-!define APP_VERSION "0.1.0"
+; 版本默认值：installer\build.ps1 会从 workspace Cargo.toml 读取并用 /D 传入；
+; 直接 makensis 时退回到这里的默认值。发版时记得同步 crates\app\assets\neverwork.rc。
+!ifndef APP_VERSION
+  !define APP_VERSION "0.2.0"
+!endif
 !define APP_EXE "neverwork.exe"
 !define APP_PUBLISHER "NeverWork"
 !define APP_REG "Software\NeverWork"

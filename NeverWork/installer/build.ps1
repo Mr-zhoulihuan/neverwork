@@ -11,6 +11,13 @@ param([switch]$SkipBuild)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
+# 版本号只认 workspace Cargo.toml：nsi 的 APP_VERSION 由这里通过 /D 传入，
+# 避免发版时改了 Cargo.toml 忘了同步安装包版本（exe 版本信息在 assets\neverwork.rc，仍需同步改）。
+$ver = (Select-String -Path (Join-Path $root "Cargo.toml") -Pattern '^version\s*=\s*"([^"]+)"' |
+    Select-Object -First 1).Matches[0].Groups[1].Value
+if (-not $ver) { throw "无法从 Cargo.toml 读取版本号" }
+Write-Host "NeverWork $ver"
+
 $running = Get-Process neverwork -ErrorAction SilentlyContinue
 if ($running) {
     throw "NeverWork 正在运行：先关闭再构建（进程占用 exe 时 cargo 会失败且返回码仍是 0）。"
@@ -41,11 +48,11 @@ if (-not $makensis) {
 New-Item -ItemType Directory -Force (Join-Path $root "dist") | Out-Null
 Push-Location $PSScriptRoot
 try {
-    & $makensis "neverwork.nsi"
+    & $makensis "/DAPP_VERSION=$ver" "neverwork.nsi"
     if ($LASTEXITCODE -ne 0) { throw "makensis 编译失败" }
 } finally {
     Pop-Location
 }
 
-Get-Item (Join-Path $root "dist\NeverWork-0.1.0-setup.exe") |
+Get-Item (Join-Path $root "dist\NeverWork-$ver-setup.exe") |
     Select-Object FullName, Length, LastWriteTime
