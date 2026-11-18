@@ -867,6 +867,33 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// `browser_report` 结果首行的绝对路径（「测试报告已生成：<path>」）。
+fn report_path_from(content: &str) -> Option<&str> {
+    content
+        .lines()
+        .next()?
+        .strip_prefix("测试报告已生成：")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// 本地路径 → `file:///` URL：盘符保留、`\` 换 `/`、非安全字符百分号编码。
+fn file_url(path: &std::path::Path) -> String {
+    let raw = path.to_string_lossy();
+    // 去掉 Windows 扩展路径前缀 `\\?\`（NW_ROOT / canonicalize 可能带进来）。
+    let raw = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
+    let s = raw.replace('\\', "/");
+    let mut out = String::from("file:///");
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b':' | b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// 把一个会话库装进内存：空库补一条空白会话、重算相对时间、按 `active_id` 恢复选中。
 ///
 /// 启动与切换工作区共用。切换时不用损伤报告（
@@ -2863,6 +2890,15 @@ impl AppState {
             self.open_image_view(p, cx);
             return;
         }
+        // HTML（测试报告）用系统默认浏览器打开：编辑器只会显示源码。
+        if p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))
+            .unwrap_or(false)
+        {
+            cx.open_url(&file_url(&p));
+            return;
+        }
         self.open_file(p, cx);
     }
 
@@ -4697,15 +4733,10 @@ impl AppState {
                                     }
                                 }
                             }
-                            // 浏览器截图不在 written_paths 里：从结果首行解析绝对路径后登记，
-                            // 让截图出现在「产物」面板与对话底部条（工作区/配置目录都适用）。
-                            if result.ok && result.name == "browser_screenshot" {
-                                if let Some(abs) = result
-                                    .content
-                                    .lines()
-                                    .next()
-                                    .and_then(|l| l.strip_prefix("截图已保存："))
-                                {
+                            // 测试报告不在 written_paths 里：从结果首行解析绝对路径登记为产物。
+                            // 测试过程截图不再登记（截图只进报告，用户明确要求）。
+                            if result.ok && result.name == "browser_report" {
+                                if let Some(abs) = report_path_from(&result.content) {
                                     let thread = tmsg
                                         .and_then(|i| this.sessions[session_idx].messages.get(i))
                                         .and_then(|m| match &m.kind {
@@ -4713,7 +4744,7 @@ impl AppState {
                                             _ => None,
                                         })
                                         .unwrap_or(0);
-                                    this.register_artifact(session_idx, abs.trim(), thread);
+                                    this.register_artifact(session_idx, abs, thread);
                                 }
                             }
                             for (rel, thread) in written {
@@ -6995,5 +7026,36 @@ mod session_inherit_tests {
         assert!(inherit_session_model(Some(&src), &[p]).0.is_empty());
         assert!(inherit_session_model(Some(&src), &[]).0.is_empty());
         assert_eq!(inherit_session_model(None, &[]), (String::new(), String::new()));
+    }
+}
+
+#[cfg(test)]
+mod artifact_path_tests {
+    use super::{file_url, report_path_from};
+
+    #[test]
+    fn report_path_parses_first_line_only() {
+        let content = "测试报告已生成：D:\\ws\\artifacts\\测试报告-20261118-153045.html\n用例 2 个：通过 2 / 失败 0 / 跳过 0";
+        assert_eq!(
+            report_path_from(content),
+            Some("D:\\ws\\artifacts\\测试报告-20261118-153045.html")
+        );
+        assert_eq!(report_path_from("测试报告已生成：\n其它"), None, "空路径");
+        assert_eq!(report_path_from("别的结果"), None);
+    }
+
+    #[test]
+    fn file_url_encodes_space_and_chinese() {
+        let u = file_url(std::path::Path::new(r"D:\ws a\测试报告.html"));
+        assert!(u.starts_with("file:///D:/ws%20a/"), "{u}");
+        assert!(u.ends_with(".html"));
+        assert!(!u.contains('\\'));
+    }
+
+    #[test]
+    fn file_url_strips_windows_extended_prefix() {
+        let u = file_url(std::path::Path::new(r"\\?\D:\ws\报告.html"));
+        assert!(u.starts_with("file:///D:/ws/"), "{u}");
+        assert!(!u.contains("%3F"), "不应把扩展前缀编码进 URL：{u}");
     }
 }

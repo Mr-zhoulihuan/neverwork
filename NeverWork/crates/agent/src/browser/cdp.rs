@@ -37,6 +37,16 @@ pub(crate) struct ConsoleLine {
     pub text: String,
 }
 
+/// 本次浏览器会话内的一张截图（测试报告素材，编号 = 清单下标 + 1）。
+#[derive(Debug, Clone)]
+pub struct Shot {
+    pub path: PathBuf,
+    /// 截图时的页面标题。
+    pub title: String,
+    /// 截图时间（Unix 秒）。
+    pub at: u64,
+}
+
 /// 一个活跃的浏览器实例。
 pub(crate) struct BrowserSession {
     child: Child,
@@ -46,6 +56,12 @@ pub(crate) struct BrowserSession {
     /// 最近一次快照的编号 → backendDOMNodeId。
     pub refs: HashMap<u32, i64>,
     console: Arc<Mutex<Vec<ConsoleLine>>>,
+    /// 本会话截图清单：`browser_report` 按编号内嵌进报告。
+    pub shots: Vec<Shot>,
+    /// 会话开始时间（报告显示「浏览器会话耗时」）。
+    pub started: Instant,
+    /// 浏览器可执行文件名（如 msedge.exe），报告元信息用。
+    pub browser: String,
 }
 
 impl BrowserSession {
@@ -153,6 +169,13 @@ impl BrowserSession {
             headed,
             refs: HashMap::new(),
             console,
+            shots: Vec::new(),
+            started: Instant::now(),
+            browser: exe
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Edge/Chrome")
+                .to_string(),
         })
     }
 

@@ -11,6 +11,7 @@
 //! 或进程退出（Drop）时清理。
 
 pub mod cdp;
+pub mod report;
 pub mod snapshot;
 pub mod ws;
 
@@ -46,6 +47,7 @@ pub fn execute(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
         "browser_press" => press(call),
         "browser_wait" => wait(call),
         "browser_screenshot" => screenshot(call, ctx),
+        "browser_report" => report(call, ctx),
         "browser_console" => console(call),
         "browser_close" => close(call),
         other => ToolResult::err_code(
@@ -285,15 +287,252 @@ fn screenshot(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
         let file = dir.join(format!("{name}.png"));
         std::fs::write(&file, png)
             .map_err(|e| format!("写入截图失败（{}）：{e}", file.display()))?;
-        let abs = file.to_string_lossy().to_string();
-        let md = abs.replace('\\', "/");
+        let title = b.title_url().map(|(t, _)| t).unwrap_or_default();
+        b.shots.push(cdp::Shot {
+            path: file,
+            title: title.clone(),
+            at: neverwork_core::config::now_secs(),
+        });
+        let n = b.shots.len();
         Ok(format!(
-            "截图已保存：{abs}\n![{name}]({md})\n（图片是给用户看的；页面内容请用 browser_snapshot 判断）"
+            "截图已归档：#{n}（{title}）\n（截图只进 browser_report 生成的测试报告；不要在正文里引用截图）"
         ))
     }) {
         Ok(msg) => ToolResult::ok(call, msg),
         Err(r) => r,
     }
+}
+
+/// `browser_report` 报告工具：把本次测试整理成自包含 HTML 报告。
+///
+/// 截图 base64 内嵌（用户要求「全部放测试报告最终结果」），报告是唯一产物；
+/// `browser_screenshot` 的原始 png 只留作排障，不登记产物。
+fn report(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
+    let a = call.args();
+    let title = arg_str(&a, "title");
+    if title.is_empty() {
+        return bad_args(call, "title 必填：给报告起一个标题");
+    }
+    let summary = arg_str(&a, "summary");
+    let include_console = a
+        .get("include_console")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let cases = match parse_cases(&a) {
+        Ok(c) => c,
+        Err(e) => return bad_args(call, e),
+    };
+    // 浏览器素材（截图清单 / console / 地址 / 浏览器名 / 耗时）一次性取出，
+    // 渲染与写文件在锁外做。
+    let (shots, console, url, browser, elapsed_secs) = match with_existing(call, |b| {
+        let url = b.title_url().map(|(_, u)| u).unwrap_or_default();
+        Ok((
+            b.shots.clone(),
+            b.console_lines(),
+            url,
+            b.browser.clone(),
+            b.started.elapsed().as_secs(),
+        ))
+    }) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    // 编号校验放在渲染前：一次报全，模型好改。
+    for case in &cases {
+        for n in &case.screenshots {
+            if *n == 0 || *n > shots.len() {
+                let avail = if shots.is_empty() {
+                    "（本次会话还没有截图）".to_string()
+                } else {
+                    format!("1..={}", shots.len())
+                };
+                return bad_args(
+                    call,
+                    format!(
+                        "用例「{}」引用了不存在的截图 #{n}；可用编号：{avail}",
+                        case.name
+                    ),
+                );
+            }
+        }
+    }
+    // 截图 → data URI；缺失/过大给占位说明。
+    const MAX_INLINE: u64 = 8 * 1024 * 1024;
+    use base64::Engine as _;
+    let infos: Vec<report::ShotInfo> = shots
+        .iter()
+        .map(|s| {
+            let (data_uri, note) = match std::fs::metadata(&s.path) {
+                Ok(m) if m.len() > MAX_INLINE => (None, "图片过大（>8MB）未内嵌".to_string()),
+                _ => match std::fs::read(&s.path) {
+                    Ok(bytes) => (
+                        Some(format!(
+                            "data:image/png;base64,{}",
+                            base64::engine::general_purpose::STANDARD.encode(&bytes)
+                        )),
+                        String::new(),
+                    ),
+                    Err(_) => (None, "图片缺失".to_string()),
+                },
+            };
+            report::ShotInfo {
+                title: s.title.clone(),
+                data_uri,
+                note,
+            }
+        })
+        .collect();
+    let console_items: Vec<report::ConsoleItem> = if include_console {
+        console
+            .iter()
+            .filter(|l| {
+                matches!(
+                    l.level.as_str(),
+                    "error" | "warning" | "warn" | "assert" | "http" | "net"
+                )
+            })
+            .take(100)
+            .map(|l| report::ConsoleItem {
+                level: l.level.clone(),
+                text: l.text.clone(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let generated_at = neverwork_core::config::local_datetime_now();
+    let input = report::ReportInput {
+        title: title.clone(),
+        summary,
+        url: url.clone(),
+        browser,
+        generated_at: generated_at.clone(),
+        elapsed_secs,
+        root: if ctx.is_remote() {
+            String::new()
+        } else {
+            // 去掉 canonicalize 带来的 `\\?\` 前缀，报告里只显示可读路径。
+            let r = ctx.root.to_string_lossy();
+            r.strip_prefix(r"\\?\").unwrap_or(r.as_ref()).to_string()
+        },
+        cases: cases.clone(),
+        shots: infos,
+        console: console_items,
+    };
+    let html = report::render_html(&input);
+    let dir = artifacts_dir(ctx);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return fail(
+            call,
+            "BROWSER_ERROR",
+            format!("创建 artifacts 目录失败（{}）：{e}", dir.display()),
+            true,
+        );
+    }
+    let stamp = neverwork_core::config::local_timestamp();
+    let mut file = dir.join(format!("测试报告-{stamp}.html"));
+    let mut seq = 2;
+    while file.exists() {
+        file = dir.join(format!("测试报告-{stamp}-{seq}.html"));
+        seq += 1;
+    }
+    if let Err(e) = std::fs::write(&file, html) {
+        return fail(
+            call,
+            "BROWSER_ERROR",
+            format!("写入测试报告失败（{}）：{e}", file.display()),
+            true,
+        );
+    }
+    let abs = file.to_string_lossy().to_string();
+    let passed = cases
+        .iter()
+        .filter(|c| c.status == report::CaseStatus::Pass)
+        .count();
+    let failed = cases
+        .iter()
+        .filter(|c| c.status == report::CaseStatus::Fail)
+        .count();
+    let skipped = cases.len() - passed - failed;
+    let embedded = input.shots.iter().filter(|s| s.data_uri.is_some()).count();
+    ToolResult::ok(
+        call,
+        format!(
+            "测试报告已生成：{abs}\n用例 {} 个：通过 {passed} / 失败 {failed} / 跳过 {skipped}\n（已内嵌 {embedded} 张截图与 console 错误；在产物里点击用默认浏览器打开）",
+            cases.len()
+        ),
+    )
+}
+
+/// 解析 `cases` 数组：严格校验名称与状态，截图编号接受数字或 "[3]"/"3"。
+fn parse_cases(a: &Value) -> Result<Vec<report::ReportCase>, String> {
+    let arr = a
+        .get("cases")
+        .and_then(Value::as_array)
+        .ok_or("cases 必填：测试用例数组")?;
+    if arr.is_empty() {
+        return Err("cases 至少要有一条用例".into());
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            return Err(format!("cases[{i}] 缺少 name"));
+        }
+        let status = item
+            .get("status")
+            .and_then(Value::as_str)
+            .and_then(report::CaseStatus::parse)
+            .ok_or_else(|| format!("cases[{i}]（{name}）的 status 必须是 pass/fail/skip"))?;
+        let mut screenshots = Vec::new();
+        if let Some(nums) = item.get("screenshots").and_then(Value::as_array) {
+            for v in nums {
+                let n = v.as_u64().map(|x| x as usize).or_else(|| {
+                    v.as_str()
+                        .and_then(|s| s.trim().trim_matches(['[', ']']).parse().ok())
+                });
+                match n {
+                    Some(n) => screenshots.push(n),
+                    None => return Err(format!("cases[{i}].screenshots 里有不是编号的值：{v}")),
+                }
+            }
+        }
+        out.push(report::ReportCase {
+            name,
+            status,
+            steps: item
+                .get("steps")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            expected: item
+                .get("expected")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            actual: item
+                .get("actual")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            chapter: item
+                .get("chapter")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            screenshots,
+        });
+    }
+    Ok(out)
 }
 
 fn console(call: &ToolCall) -> ToolResult {
@@ -339,10 +578,10 @@ fn close(call: &ToolCall) -> ToolResult {
 }
 
 /// 需要已打开的浏览器；崩溃时重启一次再重试。
-fn with_existing(
+fn with_existing<T>(
     call: &ToolCall,
-    mut f: impl FnMut(&mut BrowserSession) -> Result<String, String>,
-) -> Result<String, ToolResult> {
+    mut f: impl FnMut(&mut BrowserSession) -> Result<T, String>,
+) -> Result<T, ToolResult> {
     let mut guard = lock();
     if guard.is_none() {
         return Err(fail(

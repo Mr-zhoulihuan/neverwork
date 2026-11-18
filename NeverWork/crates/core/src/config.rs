@@ -203,6 +203,86 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// 本地时间 `[年, 月, 日, 时, 分, 秒]`。
+///
+/// Windows 走 `GetLocalTime`（手写 FFI，不引时间库）；其它平台退回 UTC
+/// （NeverWork 只发布 Windows，这条分支仅测试环境使用）。
+fn local_parts() -> [u16; 6] {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct SystemTime {
+            wYear: u16,
+            wMonth: u16,
+            wDayOfWeek: u16,
+            wDay: u16,
+            wHour: u16,
+            wMinute: u16,
+            wSecond: u16,
+            wMilliseconds: u16,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetLocalTime(st: *mut SystemTime);
+        }
+        let mut st = SystemTime {
+            wYear: 0,
+            wMonth: 0,
+            wDayOfWeek: 0,
+            wDay: 0,
+            wHour: 0,
+            wMinute: 0,
+            wSecond: 0,
+            wMilliseconds: 0,
+        };
+        unsafe { GetLocalTime(&mut st) };
+        [st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond]
+    }
+    #[cfg(not(windows))]
+    {
+        let secs = now_secs();
+        let days = (secs / 86_400) as i64;
+        let rem = secs % 86_400;
+        let (y, m, d) = civil_from_days(days);
+        [
+            y as u16,
+            m as u16,
+            d as u16,
+            (rem / 3600) as u16,
+            ((rem % 3600) / 60) as u16,
+            (rem % 60) as u16,
+        ]
+    }
+}
+
+/// 公历日数（1970-01-01 起）→ (年, 月, 日)，Howard Hinnant 算法。
+#[cfg(not(windows))]
+fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    ((y + (m <= 2) as i64) as i32, m as u32, d as u32)
+}
+
+/// `20261118-153045`：报告文件名用。
+pub fn local_timestamp() -> String {
+    let [y, mo, d, h, mi, s] = local_parts();
+    format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}")
+}
+
+/// `2026-11-18 15:30:45`：报告正文用。
+pub fn local_datetime_now() -> String {
+    let [y, mo, d, h, mi, s] = local_parts();
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +304,23 @@ mod tests {
         let (_, back, secrets) = import_all(&format!("\u{feff}{text}")).expect("带 BOM 也要能导");
         assert!(!secrets);
         assert_eq!(back.theme, Settings::default().theme);
+    }
+
+    #[test]
+    fn local_timestamp_has_expected_shape() {
+        let t = local_timestamp();
+        assert_eq!(t.len(), 15, "YYYYMMDD-HHMMSS 共 15 字符: {t}");
+        assert_eq!(t.as_bytes()[8], b'-');
+        assert_eq!(t.chars().filter(|c| c.is_ascii_digit()).count(), 14);
+        let [y, mo, d, _, _, _] = local_parts();
+        assert!(y >= 2024 && (1..=12).contains(&mo) && (1..=31).contains(&d));
+    }
+
+    #[test]
+    fn local_datetime_now_is_readable() {
+        let t = local_datetime_now();
+        assert_eq!(t.len(), 19, "YYYY-MM-DD HH:MM:SS 共 19 字符: {t}");
+        assert_eq!(&t[4..5], "-");
+        assert_eq!(&t[10..11], " ");
     }
 }

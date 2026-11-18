@@ -201,6 +201,11 @@ impl ToolCall {
                 .and_then(|v| v.as_str())
                 .unwrap_or("截图")
                 .to_string(),
+            "browser_report" => a
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("测试报告")
+                .to_string(),
             "browser_console" => "console 错误与失败请求".to_string(),
             "browser_close" => "关闭浏览器".to_string(),
             _ => String::new(),
@@ -651,6 +656,7 @@ pub const BROWSER_TOOLS: &[&str] = &[
     "browser_press",
     "browser_wait",
     "browser_screenshot",
+    "browser_report",
     "browser_console",
     "browser_close",
 ];
@@ -953,8 +959,43 @@ fn builtin_specs() -> Vec<ToolSpec> {
             requires_approval: false,
         },
         ToolSpec {
+            name: "browser_report".into(),
+            description: "把本次浏览器测试整理成自包含 HTML 测试报告（左侧目录 + 按章节分组）：用例汇总/步骤/预期/实际/状态 + 内嵌截图 + console 错误，存工作区 artifacts/ 并登记为产物。浏览器测试收尾必须调用；先生成报告再 browser_close。截图编号来自 browser_screenshot 返回值。用例可用 chapter 分组，同章用例聚合（2.1/2.2…）；主题多时建议分章。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "报告标题，如「FcStor 登录流程验收」" },
+                    "summary": { "type": "string", "description": "可选，一句话总体结论" },
+                    "include_console": { "type": "boolean", "description": "是否附 console 错误段，默认 true" },
+                    "cases": {
+                        "type": "array",
+                        "description": "测试用例列表（至少 1 条）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "description": "用例名" },
+                                "status": { "type": "string", "enum": ["pass", "fail", "skip"] },
+                                "steps": { "type": "string", "description": "操作步骤，多行文本，可选" },
+                                "expected": { "type": "string", "description": "预期结果" },
+                                "actual": { "type": "string", "description": "实际结果" },
+                                "chapter": { "type": "string", "description": "所属章节名（如「登录流程」）；同一章节的用例会聚合，缺省归入「其他」" },
+                                "screenshots": {
+                                    "type": "array",
+                                    "items": { "type": "integer" },
+                                    "description": "browser_screenshot 返回的截图编号"
+                                }
+                            },
+                            "required": ["name", "status", "expected", "actual"]
+                        }
+                    }
+                },
+                "required": ["title", "cases"]
+            }),
+            requires_approval: false,
+        },
+        ToolSpec {
             name: "browser_screenshot".into(),
-            description: "把当前页面截图为 PNG 存到工作区 artifacts/，返回保存路径与 Markdown 图片。图片是给用户看的；你自己判断页面内容用 browser_snapshot，不要依赖截图。".into(),
+            description: "把当前页面截图为 PNG 存到工作区 artifacts/，返回截图编号（#1、#2…）。截图只进 browser_report 生成的测试报告（不作为独立产物），不要在正文里引用；判断页面内容用 browser_snapshot。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
