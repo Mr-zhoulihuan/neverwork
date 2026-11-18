@@ -161,6 +161,7 @@ impl ToolCall {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            "browser_takeover" => "人工接管（打开可见窗口）".to_string(),
             "browser_snapshot" => a
                 .get("limit")
                 .and_then(|v| v.as_u64())
@@ -650,6 +651,7 @@ pub fn specs_for(permission: neverwork_core::PermissionMode) -> Vec<ToolSpec> {
 /// 浏览器工具名（权限过滤、打码、统计等多处共用）。
 pub const BROWSER_TOOLS: &[&str] = &[
     "browser_open",
+    "browser_takeover",
     "browser_snapshot",
     "browser_click",
     "browser_type",
@@ -884,15 +886,21 @@ fn builtin_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "browser_open".into(),
-            description: "用系统 Edge/Chrome（headless）打开一个 http/https 页面，后续 browser_* 工具都作用于这个页面。测本地 Web 项目时先起 dev server，再打开它的地址。返回页面标题与最终 URL。headed=true 开有头窗口——滑块/扫码类验证码需要人工完成时用。".into(),
+            description: "用系统 Edge/Chrome 打开一个 http/https 页面。默认显示可见窗口（用户能看见你点了什么、输入了什么）；只有后台/CI 场景才传 headed=false。后续 browser_* 工具都作用于这个页面。测本地 Web 项目时先起 dev server，再打开它的地址。返回页面标题与最终 URL。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "url": { "type": "string", "description": "完整地址，如 http://localhost:3000/login" },
-                    "headed": { "type": "boolean", "description": "是否开有头窗口（需要人工过验证码/扫码登录时），默认 false" }
+                    "headed": { "type": "boolean", "description": "默认 true = 可见窗口（用户能看到操作过程）；false = 无头，看不到" }
                 },
                 "required": ["url"]
             }),
+            requires_approval: false,
+        },
+        ToolSpec {
+            name: "browser_takeover".into(),
+            description: "人工接管：遇到验证码、账号密码、扫码、滑块等需要真人输入的画面时，把当前无头浏览器切换为可见窗口（页面会重新加载到当前地址），让用户自己输入。不要用截图+ask_user 让用户口述验证码，也不要猜测/编造账号密码。调用后用 ask_user 请用户确认「已完成」，再 browser_snapshot 继续。".into(),
+            parameters: json!({ "type": "object", "properties": {} }),
             requires_approval: false,
         },
         ToolSpec {

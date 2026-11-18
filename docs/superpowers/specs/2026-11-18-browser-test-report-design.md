@@ -12,6 +12,14 @@ NeverWork 已有内置浏览器自动化（`browser_open/snapshot/click/type/pre
 - 产物区点开 `.html` 用系统默认浏览器打开（当前会进文本编辑器显示源码）。
 - 自动化：浏览器测试收尾时由 Agent 自动调用报告工具；漏调用时机制提醒一次。
 
+## 后续增补：人工接管（`browser_takeover`）
+
+遇到验证码、账号密码、扫码、滑块等**必须真人输入**的画面时，不再用截图+`ask_user` 让用户口述验证码，而是：
+
+- 新增免审批无参工具 `browser_takeover()`（`browser/mod.rs::takeover`）：若当前是 headless，关闭会话并以 headed 重开、导航回当前页（新临时 profile，页面重新加载，登录态不保证保留）；若已是 headed 则直接提醒窗口已可见。
+- 提示词要求：需要人工输入时先调 `browser_takeover`，再用 `ask_user` 等用户确认「已完成」，然后 `browser_snapshot` 继续；密码/验证码不进对话、不编造。
+- 属于 `BROWSER_TOOLS`：只读/计划档同样剔除；后续汇报用 `browser_report` 照常引用截图编号（重启会清空截图清单，所以先截图后接管）。
+
 ## 方案对比（结论：A）
 
 | 方案 | 做法 | 结论 |

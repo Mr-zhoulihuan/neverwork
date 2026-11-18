@@ -37,10 +37,27 @@ fn lock() -> MutexGuard<'static, Option<BrowserSession>> {
     slot().lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// 自动化浏览器默认显示可见窗口（用户要能看见测试在点什么）；
+/// `NW_BROWSER_HEADLESS=1` 强制无头（CI / 自动化验收用）。
+fn default_headed() -> bool {
+    headed_from_env(std::env::var("NW_BROWSER_HEADLESS").ok().as_deref())
+}
+
+fn headed_from_env(headless: Option<&str>) -> bool {
+    headless.map(|v| v != "1").unwrap_or(true)
+}
+
+/// 关闭全局浏览器会话（用户停止生成时调用）：Drop 里 Browser.close + kill，
+/// 正在执行的 CDP 调用随之失败返回，不用等它自己跑完。
+pub fn shutdown() {
+    let _ = lock().take();
+}
+
 /// 执行一个 `browser_*` 工具。
 pub fn execute(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
     match call.name.as_str() {
         "browser_open" => open(call),
+        "browser_takeover" => takeover(call),
         "browser_snapshot" => snapshot(call),
         "browser_click" => click(call),
         "browser_type" => type_text(call),
@@ -104,7 +121,10 @@ fn open(call: &ToolCall) -> ToolResult {
             "只支持 http/https 地址（本地 dev server 与内网放行；file://、data: 不允许）",
         );
     }
-    let headed = a.get("headed").and_then(Value::as_bool).unwrap_or(false);
+    let headed = a
+        .get("headed")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(default_headed);
     let mut guard = lock();
     let mut restart = guard.is_none();
     if let Some(b) = guard.as_mut() {
@@ -145,6 +165,82 @@ fn open(call: &ToolCall) -> ToolResult {
             }
             fail(call, "NAV_FAILED", e, true)
         }
+    }
+}
+
+/// 人工接管：遇到验证码/账号密码等必须真人输入的画面时，把无头浏览器
+/// 切换成可见窗口（关闭当前无头会话，以 headed 重开并导航回当前页面），
+/// 让用户直接在窗口里输入。后续用 ask_user 请用户确认完成，再 snapshot 继续。
+fn takeover(call: &ToolCall) -> ToolResult {
+    let mut guard = lock();
+    if guard.is_none() {
+        return fail(
+            call,
+            "NO_SESSION",
+            "还没有打开浏览器：先 browser_open 打开目标页面，再 browser_takeover",
+            true,
+        );
+    }
+    let (headed, current) = {
+        let b = guard.as_ref().expect("刚检查过会话存在");
+        (b.headed, b.title_url().ok())
+    };
+    if headed {
+        let page = current
+            .map(|(t, u)| format!("{t}（{u}）"))
+            .unwrap_or_default();
+        return ToolResult::ok(
+            call,
+            format!(
+                "浏览器窗口已经可见：{page}\n请用户直接在窗口中完成验证码/账号密码等输入（若没看到窗口，从任务栏切到 Edge/Chrome）；完成后先 ask_user 请用户确认「已完成」，再 browser_snapshot 继续。"
+            ),
+        );
+    }
+    let Some((_title, url)) = current else {
+        return fail(
+            call,
+            "NO_PAGE",
+            "读不到当前页面地址；请先 browser_open 打开页面再接管",
+            true,
+        );
+    };
+    if !url.starts_with("http") {
+        return fail(
+            call,
+            "NO_PAGE",
+            "当前页面不是 http(s) 页面，无法人工接管；请先 browser_open 打开目标页面",
+            true,
+        );
+    }
+    // 关闭无头会话、以 headed 重开并回到同一页面；profile 保留，登录态不丢。
+    *guard = None;
+    match BrowserSession::launch(true) {
+        Ok(mut b) => {
+            let nav = b.navigate(&url);
+            match nav {
+                Ok((title, final_url)) => {
+                    *guard = Some(b);
+                    ToolResult::ok(
+                        call,
+                        format!(
+                            "已切换为可见浏览器窗口：{title}\nURL：{final_url}\n页面已重新加载（登录状态会保留），请用户直接在窗口里输入验证码/账号密码并完成登录（若没看到窗口，从任务栏切到 Edge/Chrome）。\n下一步：先 ask_user 请用户确认「已完成」，再 browser_snapshot 探测页面。"
+                        ),
+                    )
+                }
+                Err(e) => {
+                    *guard = Some(b);
+                    fail(
+                        call,
+                        "NAV_FAILED",
+                        format!(
+                            "已打开可见浏览器窗口，但重新加载 {url} 失败：{e}\n用户可以手动在窗口里打开目标页面；完成后继续。"
+                        ),
+                        true,
+                    )
+                }
+            }
+        }
+        Err(e) => fail(call, "BROWSER_LAUNCH", e, true),
     }
 }
 
@@ -445,6 +541,18 @@ fn report(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
         );
     }
     let abs = file.to_string_lossy().to_string();
+    // 测试过程清理：截图已 base64 内嵌进报告，原始 png 不再保留（用户要求）。
+    // 只删截图文件，不碰报告本身与其他产物。
+    let mut removed = 0usize;
+    for s in &shots {
+        if std::fs::remove_file(&s.path).is_ok() {
+            removed += 1;
+        }
+    }
+    if let Some(b) = lock().as_mut() {
+        b.shots.clear();
+        b.report_written = true;
+    }
     let passed = cases
         .iter()
         .filter(|c| c.status == report::CaseStatus::Pass)
@@ -458,7 +566,7 @@ fn report(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
     ToolResult::ok(
         call,
         format!(
-            "测试报告已生成：{abs}\n用例 {} 个：通过 {passed} / 失败 {failed} / 跳过 {skipped}\n（已内嵌 {embedded} 张截图与 console 错误；在产物里点击用默认浏览器打开）",
+            "测试报告已生成：{abs}\n用例 {} 个：通过 {passed} / 失败 {failed} / 跳过 {skipped}\n（已内嵌 {embedded} 张截图与 console 错误；测试过程截图已清理 {removed} 个；在产物里点击用默认浏览器打开）",
             cases.len()
         ),
     )
@@ -572,7 +680,39 @@ fn console(call: &ToolCall) -> ToolResult {
 fn close(call: &ToolCall) -> ToolResult {
     let had = lock().take();
     match had {
-        Some(_) => ToolResult::ok(call, "浏览器已关闭，临时配置目录已清理。"),
+        Some(b) => {
+            // 显式关闭 = 结束整个浏览器任务：先出收尾文案，再关进程、删 profile
+            // （profile 会被下次任务重新创建，登录态一并清掉）。
+            let profile = b.profile.clone();
+            let msg = if b.report_written {
+                // 报告已内嵌图片：收尾时把报告之后新截的过程图也清掉。
+                let mut removed = 0usize;
+                for s in &b.shots {
+                    if std::fs::remove_file(&s.path).is_ok() {
+                        removed += 1;
+                    }
+                }
+                if removed > 0 {
+                    format!(
+                        "浏览器已关闭，临时配置目录已清理。{removed} 张残留测试截图已删除（测试报告已内嵌图片，不受影响）。"
+                    )
+                } else {
+                    "浏览器已关闭，临时配置目录已清理。测试过程截图均已清理，报告保留。".to_string()
+                }
+            } else if !b.shots.is_empty() {
+                // 没出报告：截图是唯一证据，先不删；会话已关闭，无法再补内嵌报告。
+                format!(
+                    "浏览器已关闭，临时配置目录已清理。\n注意：本次有 {} 张过程截图还没归档（仍保留在原路径，未删除）；报告需要在关闭浏览器前生成，本次会话已结束。",
+                    b.shots.len()
+                )
+            } else {
+                "浏览器已关闭，临时配置目录已清理。".to_string()
+            };
+            // 先让 Drop 关浏览器（否则 Windows 下 profile 文件被占用删不掉），再删目录。
+            drop(b);
+            let _ = std::fs::remove_dir_all(&profile);
+            ToolResult::ok(call, msg)
+        }
         None => ToolResult::ok(call, "当前没有打开浏览器。"),
     }
 }
@@ -692,5 +832,12 @@ mod tests {
         assert_eq!(sanitize_name("登录页"), "登录页");
         assert_eq!(sanitize_name("a/b:c*d"), "a-b-c-d");
         assert!(sanitize_name("").starts_with("browser-"));
+    }
+
+    #[test]
+    fn headed_defaults_to_visible_unless_headless_env() {
+        assert!(headed_from_env(None), "默认显示窗口，用户能看到操作");
+        assert!(headed_from_env(Some("0")));
+        assert!(!headed_from_env(Some("1")), "NW_BROWSER_HEADLESS=1 才用无头");
     }
 }

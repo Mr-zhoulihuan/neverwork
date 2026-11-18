@@ -10,7 +10,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -990,28 +990,6 @@ fn safe_file_name(title: &str, id: &str) -> String {
         trimmed
     };
     format!("{name}-{id}")
-}
-
-/// 在 `dir` 下找一个不冲突的文件名：`name`、`name (2)`、`name (3)`……
-/// 导出产物重名时不覆盖旧文件。
-fn unique_dest(dir: &Path, name: &str) -> PathBuf {
-    let first = dir.join(name);
-    if !first.exists() {
-        return first;
-    }
-    let p = Path::new(name);
-    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
-    let ext = p.extension().and_then(|e| e.to_str());
-    for n in 2..1000u32 {
-        let cand = match ext {
-            Some(e) => dir.join(format!("{stem} ({n}).{e}")),
-            None => dir.join(format!("{stem} ({n})")),
-        };
-        if !cand.exists() {
-            return cand;
-        }
-    }
-    dir.join(name)
 }
 
 /// 会话卡片第二行：把最后一条有内容的消息压成一行。
@@ -2902,11 +2880,9 @@ impl AppState {
         self.open_file(p, cx);
     }
 
-    /// 把产物另存一份到本地可找到的位置（「保存」按钮）。
-    ///
-    /// 目标：工作区下的 `artifacts/`；没有本地工作区时落到
-    /// `<配置目录>/artifacts/exports/`。重名不覆盖，自动追加 ` (2)`。
-    /// 产物本来就在目标目录里则只提示不复制；远程工作区暂不支持。
+    /// 产物「另存为」：弹系统保存对话框（默认目录：工作区 `artifacts/`，
+    /// 无本地工作区时 `<配置目录>/artifacts/exports/`），用户可改到任意位置。
+    /// 重名覆盖由系统对话框确认；远程工作区暂不支持。
     pub(crate) fn export_artifact(&mut self, path: &str, cx: &mut Context<Self>) {
         if self.remote.is_some() {
             self.notice = Some("远程工作区产物：暂不能导出".into());
@@ -2925,30 +2901,39 @@ impl AppState {
                 .join("artifacts")
                 .join("exports"),
         };
-        // 已经在目标目录里：不重复复制一份自己
-        if let (Ok(d), Ok(s)) = (dir.canonicalize(), src.canonicalize()) {
-            if s.parent() == Some(d.as_path()) {
-                self.notice = Some(format!("已在导出的目录里：{}", s.display()));
-                cx.notify();
-                return;
-            }
-        }
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.notice = Some(format!("导出失败：{e}"));
-            cx.notify();
-            return;
-        }
+        // 默认目录不存在时对话框定位不到它：先建好
+        let _ = std::fs::create_dir_all(&dir);
         let name = src
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("artifact")
             .to_string();
-        let dest = unique_dest(&dir, &name);
-        match std::fs::copy(&src, &dest) {
-            Ok(_) => self.notice = Some(format!("已保存到 {}", dest.display())),
-            Err(e) => self.notice = Some(format!("导出失败：{e}")),
-        }
-        cx.notify();
+        let rx = cx.prompt_for_new_path(&dir, Some(&name));
+        cx.spawn(async move |weak, async_cx| match rx.await {
+            Ok(Ok(Some(dest))) => {
+                let msg = if dest == src {
+                    "目标就是产物本身，无需另存".to_string()
+                } else {
+                    match std::fs::copy(&src, &dest) {
+                        Ok(_) => format!("已另存为 {}", dest.display()),
+                        Err(e) => format!("另存失败：{e}"),
+                    }
+                };
+                let _ = weak.update(async_cx, |this, cx| {
+                    this.notice = Some(msg);
+                    cx.notify();
+                });
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => {
+                let _ = weak.update(async_cx, |this, cx| {
+                    this.notice = Some(format!("打开保存对话框失败：{e}"));
+                    cx.notify();
+                });
+            }
+            Err(_) => {}
+        })
+        .detach();
     }
 
     /// 打开图片放大查看器（只接受本地存在的文件）。
@@ -5379,6 +5364,9 @@ impl AppState {
 
     pub(crate) fn stop_streaming(&mut self, cx: &mut Context<Self>) {
         self.cancel.store(true, Ordering::Relaxed);
+        // 停止 = 结束本轮自动化：后台关掉浏览器会话（工具正在执行时锁被占，
+        // 不能卡 UI；等工具释放锁后 Drop 会关窗口/结束进程，后续工具报 NO_SESSION）。
+        std::thread::spawn(|| neverwork_agent::browser::shutdown());
         // 解开可能挂起的审批，让 Agent 线程立刻退出而不是等到超时。
         if let Some(p) = self.pending.take() {
             let _ = p.respond.send(false);
@@ -5844,7 +5832,7 @@ fn tool_placeholder(status: neverwork_core::ToolRunStatus) -> &'static str {
     match status {
         S::Denied => "[用户拒绝了这次调用，没有执行]",
         S::Failed => "[调用失败，没有输出]",
-        S::Cancelled => "[用户中断了生成，这次调用没有结果]",
+        S::Cancelled => "[用户停止了本次生成（不是审批拒绝），这次调用没有结果]",
         _ => "[没有输出]",
     }
 }
@@ -6905,7 +6893,7 @@ mod history_tests {
 
 #[cfg(test)]
 mod export_tests {
-    use super::{safe_file_name, session_markdown, unique_dest};
+    use super::{safe_file_name, session_markdown};
     use neverwork_core::Session;
 
     fn session(json: &str) -> Session {
@@ -6926,30 +6914,6 @@ mod export_tests {
     #[test]
     fn safe_file_name_falls_back_when_title_is_all_punctuation() {
         assert_eq!(safe_file_name("///", "s9"), "session-s9");
-    }
-
-    #[test]
-    fn unique_dest_appends_suffix_on_conflict() {
-        let dir = std::env::temp_dir().join(format!(
-            "nw-unique-dest-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("a.png"), b"1").unwrap();
-        let d2 = unique_dest(&dir, "a.png");
-        assert_eq!(d2.file_name().unwrap().to_str().unwrap(), "a (2).png");
-        std::fs::write(&d2, b"2").unwrap();
-        let d3 = unique_dest(&dir, "a.png");
-        assert_eq!(d3.file_name().unwrap().to_str().unwrap(), "a (3).png");
-        // 无扩展名时后缀接在名字后面
-        std::fs::write(dir.join("LICENSE"), b"x").unwrap();
-        let n2 = unique_dest(&dir, "LICENSE");
-        assert_eq!(n2.file_name().unwrap().to_str().unwrap(), "LICENSE (2)");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

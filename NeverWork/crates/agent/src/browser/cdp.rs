@@ -2,8 +2,9 @@
 //!
 //! 进程策略：系统 Edge（找不到再 Chrome）以 `--headless=new` 启动，
 //! `--remote-debugging-port=0` 让浏览器自己挑端口，再从 `DevToolsActivePort`
-//! 读回来——不写死端口，也不用扫端口。`user-data-dir` 用临时目录，
-//! 会话结束（Drop）时连同进程一起清理。
+//! 读回来——不写死端口，也不用扫端口。`user-data-dir` 用进程级固定的临时目录：
+//! 会话内重启/人工接管复用同一 profile，cookie 与登录态不丢；
+//! `browser_close` 显式关闭时才删除，崩溃残留由下次启动按天清理。
 //!
 //! CDP 传输：读写两条线程共用一条 TCP 连接；按 `id` 把响应分发给等待中的
 //! `call`，事件（console / 网络失败）进环形缓冲供 `browser_console` 读取。
@@ -12,8 +13,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{json, Value};
 
@@ -50,7 +51,8 @@ pub struct Shot {
 /// 一个活跃的浏览器实例。
 pub(crate) struct BrowserSession {
     child: Child,
-    profile: PathBuf,
+    /// 进程级固定 profile（`session_profile`）：重启/接管复用，browser_close 时删。
+    pub(crate) profile: PathBuf,
     pub cdp: Cdp,
     pub headed: bool,
     /// 最近一次快照的编号 → backendDOMNodeId。
@@ -62,6 +64,8 @@ pub(crate) struct BrowserSession {
     pub started: Instant,
     /// 浏览器可执行文件名（如 msedge.exe），报告元信息用。
     pub browser: String,
+    /// 本会话是否已生成测试报告：成功后截图已内嵌、过程 png 会被清理。
+    pub report_written: bool,
 }
 
 impl BrowserSession {
@@ -71,14 +75,20 @@ impl BrowserSession {
             "未找到可用的 Edge/Chrome；可用环境变量 NW_BROWSER_PATH 指定浏览器可执行文件"
                 .to_string()
         })?;
-        let profile = std::env::temp_dir().join(format!(
-            "neverwork-browser-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
-        std::fs::create_dir_all(&profile)
-            .map_err(|e| format!("创建临时 profile 失败：{e}"))?;
+        // 进程级固定 profile：重启/接管复用，登录态不丢（见 session_profile）。
+        let profile = session_profile().to_path_buf();
+        std::fs::create_dir_all(&profile).map_err(|e| format!("创建浏览器 profile 失败：{e}"))?;
+        // 复用目录时先清掉上一轮的端口文件（避免读到旧端口），
+        // 并给上一个实例一点时间退出、释放目录锁。
+        if profile.join("DevToolsActivePort").exists() {
+            let _ = std::fs::remove_file(profile.join("DevToolsActivePort"));
+            let _ = std::fs::remove_file(profile.join("SingletonLock"));
+            std::thread::sleep(Duration::from_millis(300));
+        }
 
+        // 浏览器启动日志（stderr）落 profile：失败时把尾部带进错误信息。
+        let log_path = profile.join("neverwork-launch.log");
+        let log = std::fs::File::create(&log_path).ok();
         let spawn = || -> Result<Child, String> {
             let mut cmd = Command::new(&exe);
             if !headed {
@@ -94,9 +104,13 @@ impl BrowserSession {
                 .arg("--disable-background-networking")
                 .arg("--window-size=1280,800")
                 .arg("about:blank")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stdin(Stdio::null());
+            // 诊断日志：Edge 的关键报错和 "DevTools listening on ..." 都走 stderr，
+            // 不再直接丢弃；两个管道都指向同一文件。
+            let out = log.as_ref().and_then(|f| f.try_clone().ok());
+            let err = log.as_ref().and_then(|f| f.try_clone().ok());
+            cmd.stdout(out.map(Stdio::from).unwrap_or_else(Stdio::null))
+                .stderr(err.map(Stdio::from).unwrap_or_else(Stdio::null));
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -109,14 +123,18 @@ impl BrowserSession {
         let mut child = match spawn() {
             Ok(c) => c,
             Err(e) => {
-                let _ = std::fs::remove_dir_all(&profile);
+                let _ = std::fs::remove_file(profile.join("DevToolsActivePort"));
                 return Err(e);
             }
         };
 
         // 浏览器启动后会写 DevToolsActivePort：首行端口、次行 browser ws 路径。
+        // 注意：Edge 的启动器进程可能先把浏览器主进程转交给另一个 msedge 后
+        // 自己先退出（本机实测会这样），但主进程仍继续往 profile 写端口。
+        // 所以「拉起的进程退出」不能立刻判死：再给 3 秒等端口出现。
         let port_file = profile.join("DevToolsActivePort");
         let deadline = Instant::now() + LAUNCH_TIMEOUT;
+        let mut child_exited_at: Option<Instant> = None;
         let mut port = None;
         while Instant::now() < deadline {
             if let Ok(text) = std::fs::read_to_string(&port_file) {
@@ -129,23 +147,39 @@ impl BrowserSession {
                     break;
                 }
             }
-            if child.try_wait().ok().flatten().is_some() {
-                let _ = std::fs::remove_dir_all(&profile);
-                return Err("浏览器启动后立即退出（可尝试升级 Edge/Chrome）".into());
+            if child_exited_at.is_none() && child.try_wait().ok().flatten().is_some() {
+                child_exited_at = Some(Instant::now());
+            }
+            // 转交后的进程 3 秒内还没写端口，说明这次真没起来，别让用户干等 15s。
+            if matches!(child_exited_at, Some(t) if t.elapsed() > Duration::from_secs(3)) {
+                break;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
         let Some(port) = port else {
             let _ = child.kill();
-            let _ = std::fs::remove_dir_all(&profile);
-            return Err("等待浏览器调试端口超时".into());
+            let detail = launch_log_tail(&log_path);
+            let _ = std::fs::remove_file(&port_file);
+            let what = if child_exited_at.is_some() {
+                "浏览器进程启动后退出，且没有写出调试端口"
+            } else {
+                "等待浏览器调试端口超时"
+            };
+            let hint = if detail.is_empty() {
+                String::new()
+            } else {
+                format!("；浏览器日志：{detail}")
+            };
+            return Err(format!(
+                "{what}{hint}（可尝试升级/重装 Edge/Chrome，或用 NW_BROWSER_PATH 指定浏览器）"
+            ));
         };
 
         let ws_url = match page_ws_url(port) {
             Ok(u) => u,
             Err(e) => {
                 let _ = child.kill();
-                let _ = std::fs::remove_dir_all(&profile);
+                let _ = std::fs::remove_file(&port_file);
                 return Err(e);
             }
         };
@@ -154,7 +188,7 @@ impl BrowserSession {
             Ok(c) => c,
             Err(e) => {
                 let _ = child.kill();
-                let _ = std::fs::remove_dir_all(&profile);
+                let _ = std::fs::remove_file(&port_file);
                 return Err(e);
             }
         };
@@ -176,12 +210,18 @@ impl BrowserSession {
                 .and_then(|n| n.to_str())
                 .unwrap_or("Edge/Chrome")
                 .to_string(),
+            report_written: false,
         })
     }
 
-    /// 进程还活着吗（崩溃检测）。
+    /// 浏览器还活着吗（崩溃检测）。
+    /// 不能用 `child.try_wait()`：Edge 的启动器进程常在把主进程转交后先退出，
+    /// 那样会把「正常运行」误判成「崩溃」→ 重启一个全新 profile，登录态全丢。
+    /// 以 CDP 能应答为准（Browser.getVersion 走浏览器进程，不依赖页面）。
     pub fn alive(&mut self) -> bool {
-        self.child.try_wait().ok().flatten().is_none()
+        self.cdp
+            .call("Browser.getVersion", json!({}), Duration::from_millis(800))
+            .is_ok()
     }
 
     /// 打开一个 URL，等页面就绪后返回（标题，最终 URL）。
@@ -436,13 +476,39 @@ impl BrowserSession {
 
 impl Drop for BrowserSession {
     fn drop(&mut self) {
-        // 先礼貌关浏览器，再兜底 kill；临时 profile 一并删除。
+        // 先记下浏览器主进程 id：Edge 会把主进程转交给另一个 msedge，我们拉起的
+        // child 只是启动器——kill(child) 杀不到真浏览器，Browser.close 没送到时会
+        // 留下一整棵 msedge（实测 18 个）。
+        let browser_pid = self
+            .cdp
+            .call("SystemInfo.getProcessInfo", json!({}), Duration::from_secs(2))
+            .ok()
+            .and_then(|v| {
+                v.get("processInfo")?.as_array()?.iter().find_map(|p| {
+                    let t = p.get("type")?.as_str()?;
+                    (t == "browser").then(|| p.get("id")?.as_u64()).flatten()
+                })
+            });
+        // 先礼貌关浏览器，再兜底 kill 启动器与整棵浏览器进程树。
         let _ = self
             .cdp
             .call("Browser.close", json!({}), Duration::from_secs(3));
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.profile);
+        #[cfg(windows)]
+        if let Some(pid) = browser_pid {
+            use std::os::windows::process::CommandExt;
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .creation_flags(0x0800_0000)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        #[cfg(not(windows))]
+        let _ = browser_pid;
+        // profile 目录保留：同一进程内重启/接管会复用它，cookie 与登录态不丢；
+        // 只有 browser_close（显式关闭）时删。
     }
 }
 
@@ -659,6 +725,22 @@ fn page_ws_url(port: u16) -> Result<String, String> {
     }
 }
 
+/// 取浏览器启动日志的尾部（错误诊断用；一行显示，避免多行把提示撑乱）。
+fn launch_log_tail(path: &std::path::Path) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(600)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    tail.trim().replace('\n', " ")
+}
+
 /// 探测系统浏览器：NW_BROWSER_PATH → 常见安装路径 → PATH。
 fn find_browser() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("NW_BROWSER_PATH") {
@@ -799,11 +881,43 @@ fn clamp(s: &str) -> String {
     t
 }
 
-fn now_ms() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
+/// 本进程的浏览器 profile（全进程固定一个）。
+/// 重启/人工接管复用同一目录，cookie 与登录态不丢——「登录一次、后续步骤不再掉线」
+/// 靠的就是它；`browser_close` 显式关闭时才删除。
+pub(crate) fn session_profile() -> &'static std::path::Path {
+    static PROFILE: OnceLock<PathBuf> = OnceLock::new();
+    PROFILE
+        .get_or_init(|| {
+            sweep_stale_profiles();
+            std::env::temp_dir().join(format!("neverwork-browser-{}", std::process::id()))
+        })
+        .as_path()
+}
+
+/// 清理一天前遗留的 profile（应用崩溃/强杀时 Drop 不跑，目录会留在 TEMP）。
+fn sweep_stale_profiles() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(24 * 3600))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let own = format!("neverwork-browser-{}", std::process::id());
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("neverwork-browser-") || name == own {
+            continue;
+        }
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t < cutoff)
+            .unwrap_or(false);
+        if old {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 /// 允许显式配置浏览器路径的测试钩子（集成测试使用）。
@@ -828,6 +942,14 @@ mod tests {
     fn js_string_is_escaped() {
         assert_eq!(js_str("a\"b"), "\"a\\\"b\"");
         assert_eq!(js_str("密码"), "\"密码\"");
+    }
+
+    #[test]
+    fn session_profile_is_fixed_per_process() {
+        let a = session_profile().to_path_buf();
+        let b = session_profile().to_path_buf();
+        assert_eq!(a, b, "同一进程必须复用同一个 profile（重启不丢登录态）");
+        assert!(a.to_string_lossy().contains(&std::process::id().to_string()));
     }
 
     #[test]
