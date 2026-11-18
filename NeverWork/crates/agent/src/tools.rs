@@ -156,6 +156,53 @@ impl ToolCall {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            "browser_open" => a
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            "browser_snapshot" => a
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| format!("limit {n}"))
+                .unwrap_or_default(),
+            "browser_click" => a
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string(),
+            // 只显示目标与字数：无论是否 secret，输入内容都不进摘要。
+            "browser_type" => {
+                let target = a.get("target").and_then(|v| v.as_str()).unwrap_or("?");
+                let n = a
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(|t| t.chars().count())
+                    .unwrap_or(0);
+                format!("{target}（{n} 字符）")
+            }
+            "browser_press" => a
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            "browser_wait" => a
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    a.get("ms")
+                        .and_then(|v| v.as_u64())
+                        .map(|ms| format!("{ms}ms"))
+                })
+                .unwrap_or_default(),
+            "browser_screenshot" => a
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("截图")
+                .to_string(),
+            "browser_console" => "console 错误与失败请求".to_string(),
+            "browser_close" => "关闭浏览器".to_string(),
             _ => String::new(),
         }
     }
@@ -588,9 +635,71 @@ pub fn tool_specs() -> Vec<ToolSpec> {
 pub fn specs_for(permission: neverwork_core::PermissionMode) -> Vec<ToolSpec> {
     let mut v = tool_specs();
     if permission.hides_write_tools() {
-        v.retain(|t| !t.requires_approval);
+        // 浏览器工具整体剔除：没 browser_open 就没有页面，
+        // 其余 browser_* 单独留着只会给模型制造幻觉调用。
+        v.retain(|t| !t.requires_approval && !is_browser_tool(&t.name));
     }
     v
+}
+
+/// 浏览器工具名（权限过滤、打码、统计等多处共用）。
+pub const BROWSER_TOOLS: &[&str] = &[
+    "browser_open",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_press",
+    "browser_wait",
+    "browser_screenshot",
+    "browser_console",
+    "browser_close",
+];
+
+/// 是否浏览器工具。只读/计划档整体剔除它们（见 `specs_for`）。
+pub fn is_browser_tool(name: &str) -> bool {
+    BROWSER_TOOLS.contains(&name)
+}
+
+/// 浏览器只接受 http/https；`file://`、`data:`、`javascript:` 一律拒绝，
+/// 防止页面地址变成绕过工作区路径校验的读文件通道。
+/// localhost / 127.0.0.1 / 内网**放行**：测本地 dev server 是核心场景。
+pub fn browser_url_ok(url: &str) -> bool {
+    let u = url.trim();
+    if u.is_empty() || u.chars().count() > 2048 {
+        return false;
+    }
+    if u.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    let lower = u.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// 落历史/展示前把敏感参数打码：`browser_type` 且 `secret=true` 时
+/// `text` 换成圆点。执行仍用原调用，明文只在本轮内存里。
+pub fn redacted_call(call: &ToolCall) -> ToolCall {
+    if call.name != "browser_type" {
+        return call.clone();
+    }
+    let mut a = call.args();
+    if a.get("secret").and_then(Value::as_bool) != Some(true) {
+        return call.clone();
+    }
+    if a.get("text").and_then(Value::as_str).is_none() {
+        return call.clone();
+    }
+    a["text"] = json!("••••••");
+    ToolCall {
+        arguments: a.to_string(),
+        ..call.clone()
+    }
+}
+
+/// 整批打码（写会话历史与团队交接前用）。
+pub fn redact_calls(calls: &mut [ToolCall]) {
+    for c in calls.iter_mut() {
+        *c = redacted_call(c);
+    }
 }
 
 /// 内置工具（不依赖任何外部进程）。
@@ -764,6 +873,113 @@ fn builtin_specs() -> Vec<ToolSpec> {
                     "allow_custom": { "type": "boolean", "description": "是否允许用户自定义输入，默认 true" }
                 },
                 "required": ["question", "options"]
+            }),
+            requires_approval: false,
+        },
+        ToolSpec {
+            name: "browser_open".into(),
+            description: "用系统 Edge/Chrome（headless）打开一个 http/https 页面，后续 browser_* 工具都作用于这个页面。测本地 Web 项目时先起 dev server，再打开它的地址。返回页面标题与最终 URL。headed=true 开有头窗口——滑块/扫码类验证码需要人工完成时用。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "完整地址，如 http://localhost:3000/login" },
+                    "headed": { "type": "boolean", "description": "是否开有头窗口（需要人工过验证码/扫码登录时），默认 false" }
+                },
+                "required": ["url"]
+            }),
+            requires_approval: false,
+        },
+        ToolSpec {
+            name: "browser_snapshot".into(),
+            description: "读取当前页面的可访问性文本快照：交互元素（按钮/输入框/链接等）按顺序编号 [1] [2]…，点击/输入用编号；文本内容按行展示。每次点击或跳转后重新调用它确认结果。limit 是字符预算，默认 10000。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "字符预算，默认 10000，上限 20000" }
+                }
+            }),
+            requires_approval: false,
+        },
+        ToolSpec {
+            name: "browser_click".into(),
+            description: "点击页面元素。target 用快照里的编号（如 [3]）或 CSS 选择器（如 #login）。点击后短暂等待加载，再用 browser_snapshot 确认结果。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": "快照编号 [n] 或 CSS 选择器" }
+                },
+                "required": ["target"]
+            }),
+            requires_approval: false,
+        },
+        ToolSpec {
+            name: "browser_type".into(),
+            description: "向输入框输入文本。target 用编号或 CSS 选择器；submit=true 输入后按 Enter。**密码等敏感内容必须传 secret=true**：该调用的参数在会话历史/轨迹页会被打码，明文只用于本次输入；工具结果也从不回显输入内容。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": "快照编号 [n] 或 CSS 选择器" },
+                    "text": { "type": "string", "description": "要输入的内容" },
+                    "secret": { "type": "boolean", "description": "密码/令牌等敏感内容必须为 true（历史打码）" },
+                    "submit": { "type": "boolean", "description": "输入后是否按 Enter，默认 false" }
+                },
+                "required": ["target", "text"]
+            }),
+            requires_approval: false,
+        },
+        ToolSpec {
+            name: "browser_press".into(),
+            description: "在当前焦点上按一个键：Enter / Tab / Escape / ArrowUp / ArrowDown / ArrowLeft / ArrowRight / Backspace。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "键名，如 Enter" }
+                },
+                "required": ["key"]
+            }),
+            requires_approval: false,
+        },
+        ToolSpec {
+            name: "browser_wait".into(),
+            description: "等待页面条件：传 selector 等元素出现；或传 ms 等固定时长（上限 15000ms）。默认超时 15 秒。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "CSS 选择器，等它出现" },
+                    "ms": { "type": "integer", "description": "固定等待毫秒数（与 selector 二选一）" },
+                    "timeout_ms": { "type": "integer", "description": "最长等待毫秒数，默认 15000" }
+                }
+            }),
+            requires_approval: false,
+        },
+        ToolSpec {
+            name: "browser_screenshot".into(),
+            description: "把当前页面截图为 PNG 存到工作区 artifacts/，返回保存路径与 Markdown 图片。图片是给用户看的；你自己判断页面内容用 browser_snapshot，不要依赖截图。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "文件名（不含扩展名），可选" }
+                }
+            }),
+            requires_approval: false,
+        },
+        ToolSpec {
+            name: "browser_console".into(),
+            description: "返回页面 console 的 error/warn 与失败网络请求（HTTP >=400、加载失败），用于断言前端报错。clear=true 读取后清空。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "clear": { "type": "boolean", "description": "读取后是否清空缓冲，默认 false" }
+                }
+            }),
+            requires_approval: false,
+        },
+        ToolSpec {
+            name: "browser_close".into(),
+            description: "关闭当前浏览器并清理临时配置目录。任务结束或需要重启浏览器时用。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {}
             }),
             requires_approval: false,
         },
@@ -1035,6 +1251,10 @@ pub fn execute(call: &ToolCall, ctx: &ToolContext) -> ToolResult {
     // 它们的路径约束由 server 自己管，这里只负责转发。
     if crate::mcp::is_mcp(&call.name) {
         return crate::mcp::execute(call);
+    }
+    // 浏览器工具自带会话单例与进程生命周期，单独一个模块。
+    if is_browser_tool(&call.name) {
+        return crate::browser::execute(call, ctx);
     }
     let a = call.args();
     match call.name.as_str() {
@@ -2271,5 +2491,74 @@ mod tests {
             arguments: "not json".into(),
         };
         assert!(validate_handoff(&c, &t, 0).is_err());
+    }
+
+    #[test]
+    fn browser_tools_present_and_free_of_approval() {
+        let names: Vec<String> = tool_specs().iter().map(|t| t.name.clone()).collect();
+        for n in BROWSER_TOOLS {
+            assert!(names.iter().any(|x| x == n), "缺少工具 {n}");
+            assert!(!requires_approval(n), "{n} 应免审批（用户要求全自动）");
+            assert!(is_browser_tool(n));
+        }
+    }
+
+    #[test]
+    fn read_only_and_plan_hide_browser_tools() {
+        use neverwork_core::PermissionMode;
+        for mode in [PermissionMode::ReadOnly, PermissionMode::Plan] {
+            let specs = specs_for(mode);
+            assert!(
+                !specs.iter().any(|t| is_browser_tool(&t.name)),
+                "{mode:?} 档不应包含浏览器工具"
+            );
+        }
+        let std_specs = specs_for(PermissionMode::Standard);
+        assert!(std_specs.iter().any(|t| t.name == "browser_open"));
+        assert_eq!(
+            specs_for(PermissionMode::Full).len(),
+            std_specs.len(),
+            "完整档与标准档工具清单一致"
+        );
+    }
+
+    #[test]
+    fn browser_url_policy_rejects_local_file_and_weird_schemes() {
+        assert!(browser_url_ok("http://localhost:3000"));
+        assert!(browser_url_ok("https://example.com/a?b=1"));
+        assert!(browser_url_ok("HTTP://127.0.0.1:8080/x"));
+        assert!(!browser_url_ok("file:///C:/Windows/win.ini"));
+        assert!(!browser_url_ok("javascript:alert(1)"));
+        assert!(!browser_url_ok("data:text/html,hi"));
+        assert!(!browser_url_ok(""));
+        assert!(!browser_url_ok(&format!("http://x/{}", "a".repeat(3000))));
+    }
+
+    #[test]
+    fn secret_browser_type_is_redacted() {
+        let mut calls = vec![
+            call(
+                "browser_type",
+                json!({"target": "[1]", "text": "hunter2", "secret": true}),
+            ),
+            call("browser_type", json!({"target": "[2]", "text": "alice"})),
+            call("write_file", json!({"path": "a.txt", "content": "x"})),
+        ];
+        redact_calls(&mut calls);
+        assert_eq!(calls[0].args()["text"], "••••••");
+        assert_eq!(calls[1].args()["text"], "alice");
+        assert_eq!(calls[2].args()["content"], "x");
+        assert!(!calls[0].arguments.contains("hunter2"));
+    }
+
+    #[test]
+    fn browser_summary_never_echoes_typed_text() {
+        let c = call(
+            "browser_type",
+            json!({"target": "#pw", "text": "hunter2", "secret": true}),
+        );
+        let s = c.summary();
+        assert!(!s.contains("hunter2"), "{s}");
+        assert!(s.contains("#pw"), "{s}");
     }
 }

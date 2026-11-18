@@ -92,3 +92,25 @@ fn prompt_requires_verification_after_edits() {
     );
     assert!(p.contains("未验证"), "无法验证时要如实标注");
 }
+
+// ---- 浏览器验收：工具清单、secret 打码与登录流程 ----
+
+#[test]
+fn prompt_documents_browser_verification_and_login() {
+    let p = crate::agent_loop::build_system_prompt("", &crate::tools::ToolContext::new("E:/go"));
+    assert!(p.contains("browser_open"), "缺少浏览器工具清单");
+    assert!(p.contains("browser_snapshot"), "缺少浏览器快照工具");
+    assert!(p.contains("secret=true"), "密码输入必须提示 secret=true");
+    assert!(
+        p.contains("浏览器验收与登录测试"),
+        "缺少浏览器验收章节"
+    );
+    assert!(
+        p.contains("ask_user") && p.contains("验证码"),
+        "验证码流程要引导 ask_user"
+    );
+    assert!(
+        p.contains("未经浏览器验收"),
+        "浏览器链路不可用时要如实标注"
+    );
+}

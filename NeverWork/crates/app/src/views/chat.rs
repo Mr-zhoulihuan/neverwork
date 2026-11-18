@@ -2114,11 +2114,19 @@ impl AppState {
 
         // ask_user 待回答：问题 + 推荐选项 + 自定义输入行。
         // 与审批卡同位置渲染（统计行下方），否则用户没地方点。
-        if let Some(ask) = self
-            .pending_ask
-            .as_ref()
-            .filter(|p| p.session_idx == sidx)
-        {
+        //
+        // 只在自己的工具组后渲染：先前只按 session 过滤，历史里每一组工具调用
+        // 后面都会重复画一张卡（截图里同一问题出现两次），两份卡片的元素 id
+        // 也完全相同，点击/焦点状态在 GlobalElementId 上互相踩，按钮就点不动了。
+        let last_tool_group = !session
+            .messages
+            .get(end..)
+            .unwrap_or_default()
+            .iter()
+            .any(|m| matches!(m.kind, MessageKind::ToolCall { .. }));
+        if let Some(ask) = self.pending_ask.as_ref().filter(|p| {
+            p.session_idx == sidx && ask_card_in_group(p.msg_idx, start, end, last_tool_group)
+        }) {
             let ask_focused = self.input_target == InputTarget::AskCustom;
             let custom = self.ask_custom.text().to_string();
             let custom_placeholder = custom.is_empty();
@@ -2141,7 +2149,7 @@ impl AppState {
                         .child(div().flex_1())
                         .child(
                             div()
-                                .id("ask-skip")
+                                .id(SharedString::from(format!("ask-skip-{start}")))
                                 .px_2()
                                 .py_0p5()
                                 .rounded_sm()
@@ -2166,7 +2174,7 @@ impl AppState {
             for (i, opt) in ask.options.iter().enumerate() {
                 let label = opt.label.clone();
                 let mut btn = div()
-                    .id(SharedString::from(format!("ask-opt-{i}")))
+                    .id(SharedString::from(format!("ask-opt-{start}-{i}")))
                     .flex()
                     .flex_col()
                     .gap_0p5()
@@ -2207,7 +2215,7 @@ impl AppState {
             if ask.allow_custom {
                 let mut input_row = div().flex().items_center().gap_1p5().child(
                     div()
-                        .id("ask-custom")
+                        .id(SharedString::from(format!("ask-custom-{start}")))
                         .flex_1()
                         .min_w(px(0.0))
                         .px_2p5()
@@ -2250,7 +2258,7 @@ impl AppState {
                 if !custom_placeholder {
                     input_row = input_row.child(
                         div()
-                            .id("ask-send")
+                            .id(SharedString::from(format!("ask-send-{start}")))
                             .px_2p5()
                             .py_1()
                             .rounded_md()
@@ -3318,5 +3326,38 @@ pub(crate) fn role_dots_row(team: Option<&neverwork_core::Team>) -> impl IntoEle
         }
     }
     row
+}
+
+/// `pending_ask` 卡片归属哪一组工具调用：[start, end) 且同一会话。
+///
+/// 索引未知（`usize::MAX`，工具消息还没落进消息表）时只有最后一组能画，
+/// 否则历史里每组工具后面都会重复一张同样的卡片。
+pub(crate) fn ask_card_in_group(msg_idx: usize, start: usize, end: usize, last_group: bool) -> bool {
+    if msg_idx == usize::MAX {
+        last_group
+    } else {
+        msg_idx >= start && msg_idx < end
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ask_card_in_group;
+
+    #[test]
+    fn ask_card_renders_only_in_its_tool_group() {
+        // 消息落在第一组：只有第一组画卡片
+        assert!(ask_card_in_group(3, 2, 7, false));
+        assert!(!ask_card_in_group(3, 7, 12, true));
+        // 消息落在第二组
+        assert!(!ask_card_in_group(9, 2, 7, false));
+        assert!(ask_card_in_group(9, 7, 12, true));
+        // 组边界：end 是开区间
+        assert!(ask_card_in_group(2, 2, 7, false));
+        assert!(!ask_card_in_group(7, 2, 7, false));
+        // 索引未知：只放在最后一组，只有一张
+        assert!(!ask_card_in_group(usize::MAX, 2, 7, false));
+        assert!(ask_card_in_group(usize::MAX, 7, 12, true));
+    }
 }
 

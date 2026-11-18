@@ -4697,6 +4697,25 @@ impl AppState {
                                     }
                                 }
                             }
+                            // 浏览器截图不在 written_paths 里：从结果首行解析绝对路径后登记，
+                            // 让截图出现在「产物」面板与对话底部条（工作区/配置目录都适用）。
+                            if result.ok && result.name == "browser_screenshot" {
+                                if let Some(abs) = result
+                                    .content
+                                    .lines()
+                                    .next()
+                                    .and_then(|l| l.strip_prefix("截图已保存："))
+                                {
+                                    let thread = tmsg
+                                        .and_then(|i| this.sessions[session_idx].messages.get(i))
+                                        .and_then(|m| match &m.kind {
+                                            MessageKind::ToolCall { thread, .. } => *thread,
+                                            _ => None,
+                                        })
+                                        .unwrap_or(0);
+                                    this.register_artifact(session_idx, abs.trim(), thread);
+                                }
+                            }
                             for (rel, thread) in written {
                                 let path = match &this.root {
                                     Some(root) if this.remote.is_none() => {

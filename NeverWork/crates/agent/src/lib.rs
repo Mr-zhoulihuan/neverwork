@@ -4,6 +4,7 @@
 //! 使用 `ureq`（阻塞 + 流式读取）在后台线程运行，避免与 GPUI 的异步执行器冲突。
 
 mod agent_loop;
+pub mod browser;
 pub mod mcp;
 pub mod models;
 pub mod multi_patch;
