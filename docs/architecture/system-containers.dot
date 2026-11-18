@@ -1,0 +1,118 @@
+// NeverWork L2/L3 容器与组件（当前状态，证据见 system-model.evidence.md）
+// 渲染：dot -Tsvg system-containers.dot -o system-containers.svg
+// 或在 Qoder 中用 DOT 预览打开。
+digraph neverwork_containers {
+  graph [
+    rankdir=TB,
+    bgcolor="#0f1115",
+    fontname="Microsoft YaHei",
+    fontcolor="#e6e9ef",
+    fontsize=20,
+    pad=0.4,
+    nodesep=0.35,
+    ranksep=0.55,
+    compound=true,
+    label=<<b>NeverWork · L2/L3 容器与组件（单进程内 4 crate）</b>>,
+    labelloc=t
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Microsoft YaHei",
+    fontsize=11,
+    color="#2a2f3a",
+    fontcolor="#e6e9ef",
+    fillcolor="#171a21"
+  ];
+  edge [
+    color="#5b6472",
+    fontname="Microsoft YaHei",
+    fontsize=9,
+    fontcolor="#9aa4b2"
+  ];
+
+  subgraph cluster_app {
+    label=<<b>crate neverwork（app / bin neverwork）</b>　UI 主线程 + 视图 + 状态机>;
+    color="#4f8cff";
+    fontcolor="#8fb6ff";
+    style="rounded,dashed";
+    margin=12;
+
+    main      [label="main.rs\naskpass 端点 / 单实例 / 崩溃日志 / 无边框窗口", fillcolor="#12233f"];
+    state     [label=<<b>AppState</b>（state.rs ~6.0k 行）<br/>工作区 · 会话 · 视图 · 输入 · 运行时句柄>, fillcolor="#16304f", color="#4f8cff"];
+    views     [label="views/（19 个视图）\nchat · editor · team · skills · settings\nfiles · sidebar · palette · trace …"];
+    editor    [label="编辑内核\ntext_buffer · input_handler\nkeymap · find · folding · highlight · line_cache"];
+    integ     [label="本地集成\nfilesystem · git（只读）· artifacts\nmarkdown · marketplace · skills_ops · settings_ops"];
+    persistui [label="会话落盘\nSessionStore（节流 + 原子写）"];
+  }
+
+  subgraph cluster_agent {
+    label=<<b>crate neverwork-agent</b>　Agent 工作线程（阻塞 ureq 流式）>;
+    color="#3fb950";
+    fontcolor="#7ee787";
+    style="rounded,dashed";
+    margin=12;
+
+    runner    [label="spawn_agents_chain（app 侧线程入口）\n单角色 / handoff 链", fillcolor="#12261a"];
+    loop      [label=<<b>agent_loop</b>（~1.9k 行）<br/>模型→工具→回填循环 · 审批 · ask_user<br/>MAX_REPEAT · 验证门禁 · 预算>, fillcolor="#14321f", color="#3fb950"];
+    providers [label="Provider 适配\nopenai · anthropic · gemini · sse · models"];
+    tools     [label=<<b>tools</b>（~2.3k 行）<br/>ToolContext::resolve 路径沙箱<br/>读自动 / 写与 run_command 需审批>, fillcolor="#14321f", color="#3fb950"];
+    rag       [label="rag（BM25 分块检索）\n→ search_code 工具"];
+    web       [label="web\n必应 RSS · HTML→纯文本"];
+    mcp       [label="mcp（stdio JSON-RPC）\n工具名 mcp__<server>__<tool>"];
+    team      [label="team · supervisor\nteam 能力保留，app 仅用 handoff 链"];
+    diffmod   [label="diff · multi_patch\n先全量校验再写"];
+  }
+
+  subgraph cluster_core {
+    label=<<b>crate neverwork-core</b>　领域模型与持久化（无 UI 依赖）>;
+    color="#d29922";
+    fontcolor="#e3b341";
+    style="rounded,dashed";
+    margin=12;
+
+    model    [label="model.rs\nWorkspace · Team · Role · Session\nMessage · PermissionMode", fillcolor="#2a2110"];
+    settings [label="settings.rs\nSettings · ProviderEntry · Skill\nMcpServerConfig（Key 明文）"];
+    sessions [label="sessions.rs\nSessionStore（每工作区一个文件）"];
+    sshc     [label="ssh.rs\nSshTarget · RemoteAuth · RemoteFs"];
+    cfg      [label="config.rs\nConfig（团队）· config_dir()"];
+  }
+
+  subgraph cluster_ui {
+    label=<<b>crate neverwork-ui</b>　共享 UI 基座>;
+    color="#a371f7";
+    fontcolor="#c9a8ff";
+    style="rounded,dashed";
+    margin=12;
+
+    theme      [label="theme.rs\n9 套色板 · TITLEBAR_H 等常量", fillcolor="#241a33"];
+    components [label="components.rs\n共享组件"];
+  }
+
+  // 线程与通道（运行时关系）
+  state -> runner [label="send: spawn thread", color="#4f8cff"];
+  runner -> loop [label="run_agent / run_agent_in_team"];
+  loop -> providers [label="stream_chat_with_tools"];
+  loop -> tools [label="执行工具"];
+  tools -> rag [label="search_code"];
+  tools -> web [label="web_search / web_fetch"];
+  tools -> mcp [label="mcp__* 路由"];
+  loop -> team [label="handoff 校验"];
+  loop -> diffmod [label="写前 diff 预览"];
+  loop -> state [label="flume AgentEvent\n(TextDelta / ToolStarted / NeedApproval / AskUser)", style=dashed, color="#3fb950", dir=both, fontcolor="#7ee787"];
+
+  // 视图与状态
+  views -> state [label="读状态 / listener 改状态"];
+  editor -> state [label="TextBuffer"];
+  integ -> state [label="上下文动作"];
+  persistui -> sessions [label="save / load"];
+
+  // crate 依赖（静态）
+  state -> model [label="使用领域类型", style=dotted];
+  state -> settings [style=dotted];
+  state -> sshc [label="远程后端", style=dotted];
+  views -> theme [style=dotted];
+  tools -> sshc [label="远程工作区走 ssh", style=dotted];
+  mcp -> settings [label="McpServerConfig", style=dotted];
+  agent_dep_note [label="静态依赖：app → {core, ui, agent}；agent → core；ui → core（无环）", shape=note, fillcolor="#1a2028", color="#5b6472", fontsize=10];
+}

@@ -1,0 +1,60 @@
+// NeverWork L1 系统上下文（当前状态，证据见 system-model.evidence.md）
+// 渲染：dot -Tsvg system-context.dot -o system-context.svg
+// 或在 Qoder 中用 DOT 预览打开。rankdir=TB，避免横向过宽。
+digraph neverwork_context {
+  graph [
+    rankdir=TB,
+    bgcolor="#0f1115",
+    fontname="Microsoft YaHei",
+    fontcolor="#e6e9ef",
+    fontsize=20,
+    pad=0.4,
+    nodesep=0.45,
+    ranksep=0.65,
+    label=<<b>NeverWork · L1 系统上下文（当前状态）</b>>,
+    labelloc=t
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Microsoft YaHei",
+    fontsize=12,
+    color="#2a2f3a",
+    fontcolor="#e6e9ef",
+    fillcolor="#171a21"
+  ];
+  edge [
+    color="#5b6472",
+    fontname="Microsoft YaHei",
+    fontsize=10,
+    fontcolor="#9aa4b2"
+  ];
+
+  user [label="本地用户\n（Windows 桌面）", fillcolor="#1f2937", color="#3d4654"];
+
+  app [
+    label=<<b>NeverWork.exe</b><br/>单进程桌面应用 · 无服务端<br/>GPUI 主线程 + Agent 工作线程>,
+    fillcolor="#12233f",
+    color="#4f8cff",
+    fontsize=13
+  ];
+
+  llm    [label="LLM 厂商 API\nOpenAI 兼容 / Anthropic / Gemini", fillcolor="#12261a", color="#3fb950"];
+  fs     [label="本地工作区文件系统\ngit status 子进程 · notify watcher", fillcolor="#2a2110", color="#d29922"];
+  ssh    [label="远程 SSH 主机\n（ssh:// 工作区，密钥/agent 认证）", fillcolor="#2a2110", color="#d29922"];
+  mcp    [label="MCP server 子进程\nstdio JSON-RPC 2.0", fillcolor="#241a33", color="#a371f7"];
+  market [label="技能市场源\nMCP Registry / 腾讯云广场 / skills.sh", fillcolor="#241a33", color="#a371f7"];
+  web    [label="必应 RSS / 公网 http(s)", fillcolor="#241a33", color="#a371f7"];
+  store  [label="~/.neverwork\nconfig.json · settings.json\nsessions/*.json · marketplace.json", fillcolor="#1a2028", color="#5b6472"];
+
+  user -> app [label="键鼠 / 输入法"];
+  app -> llm [label="HTTPS 流式（SSE）"];
+  app -> fs [label="读写 / git status / watch", dir=both];
+  app -> ssh [label="ssh 子进程（文件与命令）", dir=both];
+  app -> mcp [label="initialize → tools/list → tools/call", dir=both];
+  app -> market [label="GET（失败读缓存）"];
+  app -> web [label="GET（只读，不审批）"];
+  app -> store [label="原子写（临时文件 + rename）", dir=both];
+
+  { rank=same; user; app }
+}

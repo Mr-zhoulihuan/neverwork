@@ -1,0 +1,220 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="960" viewBox="0 0 1440 960">
+  <defs>
+    <marker id="arr-blue" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#4f8cff"/>
+    </marker>
+    <marker id="arr-green" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#3fb950"/>
+    </marker>
+    <marker id="arr-purple" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#a371f7"/>
+    </marker>
+    <marker id="arr-orange" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#d29922"/>
+    </marker>
+    <marker id="arr-start-purple" viewBox="0 0 8 8" refX="1" refY="4" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M8,0 L0,4 L8,8 Z" fill="#a371f7"/>
+    </marker>
+    <style>
+      .t { font-family: 'Microsoft YaHei','Segoe UI',sans-serif; fill: #e6e9ef; }
+      .muted { fill: #9aa4b2; }
+      .h { font-weight: 700; }
+      .lbl { font-family: 'Microsoft YaHei','Segoe UI',sans-serif; font-size: 10px; fill: #9aa4b2;
+             paint-order: stroke; stroke: #0f1115; stroke-width: 3px; }
+      .lbl-c { font-family: 'Microsoft YaHei','Segoe UI',sans-serif; font-size: 10px; fill: #7ee787;
+               paint-order: stroke; stroke: #0f1115; stroke-width: 3px; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="960" fill="#0f1115"/>
+
+  <text x="40" y="46" class="t h" font-size="24">NeverWork 架构全景</text>
+  <text x="40" y="72" class="t muted" font-size="13">单进程 · 4 crate · 无服务端　｜　GPUI 主线程 ⇄ Agent 工作线程（flume 通道 + AgentEvent）</text>
+
+  <!-- ============ 泳道背景 ============ -->
+  <rect x="24" y="92" width="396" height="568" rx="10" fill="#10141b" stroke="#262c37"/>
+  <rect x="468" y="92" width="428" height="568" rx="10" fill="#10141b" stroke="#262c37"/>
+  <rect x="960" y="92" width="456" height="568" rx="10" fill="#10141b" stroke="#262c37"/>
+
+  <text x="40" y="118" class="t h" font-size="12" fill="#8fb6ff">GPUI 主线程 · crate neverwork（app）</text>
+  <text x="484" y="118" class="t h" font-size="12" fill="#7ee787">Agent 工作线程 · crate neverwork-agent</text>
+  <text x="976" y="118" class="t h" font-size="12" fill="#c9a8ff">外部系统 · 本地存储</text>
+
+  <!-- ============ 左列：UI ============ -->
+  <g>
+    <rect x="40" y="136" width="364" height="54" rx="8" fill="#12233f" stroke="#2f5a94"/>
+    <text x="56" y="158" class="t h" font-size="12">main.rs · 进程入口</text>
+    <text x="56" y="177" class="t muted" font-size="11">askpass → 单实例 → 崩溃日志 → 无边框窗口</text>
+
+    <path d="M222,190 L222,206" fill="none" stroke="#4f8cff" stroke-width="1.5" marker-end="url(#arr-blue)"/>
+
+    <rect x="40" y="206" width="364" height="84" rx="8" fill="#17395f" stroke="#4f8cff" stroke-width="1.8"/>
+    <text x="56" y="230" class="t h" font-size="13">AppState · 状态机（state.rs ≈ 6k 行）</text>
+    <text x="56" y="252" class="t muted" font-size="11">工作区 · 会话 · 视图 · 输入缓冲区 · 焦点</text>
+    <text x="56" y="272" class="t muted" font-size="11">待审批 / 待回答 · 市场与设置状态</text>
+
+    <path d="M222,290 L222,310" fill="none" stroke="#2f5a94" stroke-width="1.5" marker-end="url(#arr-blue)"/>
+
+    <rect x="40" y="310" width="364" height="72" rx="8" fill="#12233f" stroke="#2f5a94"/>
+    <text x="56" y="334" class="t h" font-size="12">views/ · 19 个视图</text>
+    <text x="56" y="354" class="t muted" font-size="11">chat editor team skills settings files …</text>
+    <text x="56" y="372" class="t muted" font-size="11">只组装 div；状态变更回调 AppState</text>
+
+    <rect x="40" y="398" width="364" height="72" rx="8" fill="#12233f" stroke="#2f5a94"/>
+    <text x="56" y="422" class="t h" font-size="12">编辑内核（文本插入只有一条路径）</text>
+    <text x="56" y="442" class="t muted" font-size="11">EntityInputHandler → TextBuffer</text>
+    <text x="56" y="460" class="t muted" font-size="11">keymap find folding highlight line_cache</text>
+
+    <rect x="40" y="486" width="364" height="72" rx="8" fill="#12233f" stroke="#2f5a94"/>
+    <text x="56" y="510" class="t h" font-size="12">本地集成</text>
+    <text x="56" y="530" class="t muted" font-size="11">filesystem git(只读) artifacts markdown</text>
+    <text x="56" y="548" class="t muted" font-size="11">marketplace skills_ops settings_ops</text>
+
+    <rect x="40" y="574" width="364" height="60" rx="8" fill="#12233f" stroke="#2f5a94"/>
+    <text x="56" y="598" class="t h" font-size="12">会话落盘 SessionStore</text>
+    <text x="56" y="618" class="t muted" font-size="11">流式节流 2s · 原子写（tmp + rename）</text>
+  </g>
+
+  <!-- ============ 中列：Agent ============ -->
+  <g>
+    <rect x="484" y="136" width="412" height="58" rx="8" fill="#12261a" stroke="#2f6b3f"/>
+    <text x="500" y="158" class="t h" font-size="12">spawn_agents_chain · 线程入口</text>
+    <text x="500" y="178" class="t muted" font-size="11">单角色 / 团队 handoff 链（入口角色起步）</text>
+
+    <rect x="484" y="206" width="412" height="84" rx="8" fill="#163d26" stroke="#3fb950" stroke-width="1.8"/>
+    <text x="500" y="230" class="t h" font-size="13">agent_loop · 模型 → 工具 → 回填</text>
+    <text x="500" y="252" class="t muted" font-size="11">MAX_REPEAT=3 · 预算（默认 0 = 不限）</text>
+    <text x="500" y="272" class="t muted" font-size="11">验证门禁（最多拦 2 次）· 取消标志</text>
+
+    <rect x="484" y="314" width="412" height="64" rx="8" fill="#12261a" stroke="#2f6b3f"/>
+    <text x="500" y="338" class="t h" font-size="12">Provider 适配</text>
+    <text x="500" y="358" class="t muted" font-size="11">openai · anthropic · gemini · sse · models</text>
+
+    <rect x="484" y="398" width="412" height="80" rx="8" fill="#12261a" stroke="#2f6b3f"/>
+    <text x="500" y="422" class="t h" font-size="12">tools + ToolContext 沙箱</text>
+    <text x="500" y="442" class="t muted" font-size="11">resolve 挡 .. / 跨盘 / 符号链接逃逸</text>
+    <text x="500" y="462" class="t muted" font-size="11">读自动 · 写与 run_command 逐次审批</text>
+
+    <rect x="484" y="498" width="412" height="72" rx="8" fill="#12261a" stroke="#2f6b3f"/>
+    <text x="500" y="522" class="t h" font-size="12">rag · web · mcp · diff / multi_patch</text>
+    <text x="500" y="542" class="t muted" font-size="11">BM25 检索 · 必应 RSS · stdio JSON-RPC</text>
+    <text x="500" y="560" class="t muted" font-size="11">multi_patch 先全量校验再写</text>
+
+    <rect x="484" y="590" width="412" height="52" rx="8" fill="#12261a" stroke="#2f6b3f"/>
+    <text x="500" y="612" class="t h" font-size="12">team · supervisor</text>
+    <text x="500" y="630" class="t muted" font-size="11">能力保留；app 只用 handoff 链</text>
+  </g>
+
+  <!-- ============ 右列：外部 ============ -->
+  <g>
+    <rect x="976" y="136" width="424" height="60" rx="8" fill="#12261a" stroke="#2f6b3f"/>
+    <text x="992" y="158" class="t h" font-size="12">LLM 厂商 API</text>
+    <text x="992" y="178" class="t muted" font-size="11">OpenAI 兼容 / Anthropic / Gemini（HTTPS 流式）</text>
+
+    <rect x="976" y="212" width="424" height="60" rx="8" fill="#2a2110" stroke="#6b5520"/>
+    <text x="992" y="234" class="t h" font-size="12">本地工作区</text>
+    <text x="992" y="254" class="t muted" font-size="11">文件读写 · git status 子进程 · notify watcher</text>
+
+    <rect x="976" y="288" width="424" height="56" rx="8" fill="#2a2110" stroke="#6b5520"/>
+    <text x="992" y="310" class="t h" font-size="12">远程 SSH 主机</text>
+    <text x="992" y="330" class="t muted" font-size="11">ssh:// 工作区 · 密钥 / agent 认证</text>
+
+    <rect x="976" y="360" width="424" height="56" rx="8" fill="#241a33" stroke="#5a3f85"/>
+    <text x="992" y="382" class="t h" font-size="12">MCP server 子进程</text>
+    <text x="992" y="402" class="t muted" font-size="11">stdio JSON-RPC 2.0 · 工具名 mcp__server__tool</text>
+
+    <rect x="976" y="432" width="424" height="56" rx="8" fill="#241a33" stroke="#5a3f85"/>
+    <text x="992" y="454" class="t h" font-size="12">技能市场源</text>
+    <text x="992" y="474" class="t muted" font-size="11">MCP Registry / 腾讯云 / skills.sh（缓存兜底）</text>
+
+    <rect x="976" y="504" width="424" height="44" rx="8" fill="#241a33" stroke="#5a3f85"/>
+    <text x="992" y="530" class="t h" font-size="12">必应 RSS / 公网 http(s)　只读</text>
+
+    <rect x="976" y="564" width="424" height="60" rx="8" fill="#171a21" stroke="#3a4250"/>
+    <text x="992" y="586" class="t h" font-size="12">~/.neverwork</text>
+    <text x="992" y="606" class="t muted" font-size="11">config · settings · sessions/ · marketplace · crash.log</text>
+  </g>
+
+  <!-- ============ 通道：UI ⇄ Agent ============ -->
+  <path d="M404,236 L444,236 L444,165 L484,165" fill="none" stroke="#4f8cff" stroke-width="1.8" marker-end="url(#arr-blue)"/>
+  <text x="450" y="220" class="lbl">spawn</text>
+
+  <path d="M484,256 L404,256" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arr-green)"/>
+  <text x="444" y="249" class="lbl-c" text-anchor="middle">AgentEvent 流</text>
+
+  <path d="M404,282 L484,282" fill="none" stroke="#a371f7" stroke-width="1.8" stroke-dasharray="4 4"
+        marker-end="url(#arr-purple)" marker-start="url(#arr-start-purple)"/>
+  <text x="444" y="300" class="lbl" text-anchor="middle">审批 / ask_user 回包</text>
+
+  <!-- ============ 外部连接 ============ -->
+  <!-- providers → LLM -->
+  <path d="M896,338 L928,338 L928,166 L976,166" fill="none" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arr-green)"/>
+  <text transform="translate(921,252) rotate(-90)" class="lbl" text-anchor="middle">HTTPS 流式</text>
+
+  <!-- tools → 本地文件系统 -->
+  <path d="M896,428 L936,428 L936,242 L976,242" fill="none" stroke="#d29922" stroke-width="1.5" marker-end="url(#arr-orange)"/>
+  <text transform="translate(929,336) rotate(-90)" class="lbl" text-anchor="middle">文件读写</text>
+
+  <!-- tools → SSH -->
+  <path d="M896,450 L944,450 L944,316 L976,316" fill="none" stroke="#d29922" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr-orange)"/>
+  <text transform="translate(937,384) rotate(-90)" class="lbl" text-anchor="middle">ssh 读写</text>
+
+  <!-- tools → MCP -->
+  <path d="M896,468 L952,468 L952,388 L976,388" fill="none" stroke="#a371f7" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr-purple)"/>
+  <text transform="translate(945,428) rotate(-90)" class="lbl" text-anchor="middle">JSON-RPC</text>
+
+  <!-- web → 公网 -->
+  <path d="M896,514 L976,514 L976,526" fill="none" stroke="#a371f7" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr-purple)"/>
+  <text x="906" y="506" class="lbl">GET</text>
+
+  <!-- app 侧出站总线：技能市场 + 会话持久化 -->
+  <path d="M404,556 L404,684 M404,602 L404,684 M404,684 L948,684 L948,460 L976,460" fill="none" stroke="#a371f7" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr-purple)"/>
+  <path d="M948,684 L956,684 L956,594 L976,594" fill="none" stroke="#d29922" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr-orange)"/>
+  <text x="620" y="678" class="lbl">app 侧出站：技能市场（HTTP，失败读缓存）· 会话持久化（tmp + rename）</text>
+
+  <!-- ============ 底部：crate 依赖 ============ -->
+  <line x1="24" y1="700" x2="1416" y2="700" stroke="#262c37"/>
+
+  <text x="60" y="728" class="t h" font-size="13">crate 依赖（静态，无环）</text>
+
+  <rect x="60" y="740" width="180" height="58" rx="8" fill="#17395f" stroke="#4f8cff"/>
+  <text x="150" y="764" class="t h" font-size="12" text-anchor="middle">neverwork（app）</text>
+  <text x="150" y="783" class="t muted" font-size="10" text-anchor="middle">bin · 视图 · 状态 · 编辑内核</text>
+
+  <rect x="300" y="740" width="180" height="58" rx="8" fill="#163d26" stroke="#3fb950"/>
+  <text x="390" y="764" class="t h" font-size="12" text-anchor="middle">neverwork-agent</text>
+  <text x="390" y="783" class="t muted" font-size="10" text-anchor="middle">Provider · 工具 · 循环 · MCP</text>
+
+  <rect x="560" y="740" width="190" height="58" rx="8" fill="#2a2110" stroke="#d29922"/>
+  <text x="655" y="764" class="t h" font-size="12" text-anchor="middle">neverwork-core</text>
+  <text x="655" y="783" class="t muted" font-size="10" text-anchor="middle">模型 · 配置 · 会话 · SSH</text>
+
+  <rect x="300" y="830" width="180" height="50" rx="8" fill="#241a33" stroke="#a371f7"/>
+  <text x="390" y="852" class="t h" font-size="12" text-anchor="middle">neverwork-ui</text>
+  <text x="390" y="870" class="t muted" font-size="10" text-anchor="middle">主题 · 共享组件</text>
+
+  <path d="M240,769 L300,769" fill="none" stroke="#5b6472" stroke-width="1.5" marker-end="url(#arr-blue)"/>
+  <path d="M480,769 L560,769" fill="none" stroke="#5b6472" stroke-width="1.5" marker-end="url(#arr-blue)"/>
+  <path d="M150,798 L150,855 L300,855" fill="none" stroke="#5b6472" stroke-width="1.5" marker-end="url(#arr-blue)"/>
+  <path d="M480,855 L530,855 L530,798" fill="none" stroke="#5b6472" stroke-width="1.5" marker-end="url(#arr-blue)"/>
+  <text x="60" y="905" class="t muted" font-size="10">app 还直接依赖 core（上表未画避免交叉线）</text>
+
+  <!-- ============ 底部：图例 ============ -->
+  <text x="830" y="728" class="t h" font-size="13">图例</text>
+
+  <line x1="830" y1="754" x2="880" y2="754" stroke="#4f8cff" stroke-width="1.8" marker-end="url(#arr-blue)"/>
+  <text x="894" y="758" class="t muted" font-size="11">UI → Agent：启动运行 / 指令</text>
+
+  <line x1="830" y1="784" x2="880" y2="784" stroke="#3fb950" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arr-green)"/>
+  <text x="894" y="788" class="t muted" font-size="11">Agent → UI：流式事件（flume 通道）</text>
+
+  <line x1="830" y1="814" x2="880" y2="814" stroke="#a371f7" stroke-width="1.8" stroke-dasharray="4 4"
+        marker-end="url(#arr-purple)" marker-start="url(#arr-start-purple)"/>
+  <text x="894" y="818" class="t muted" font-size="11">审批 / ask_user 往返（agent 线程阻塞等待）</text>
+
+  <line x1="830" y1="844" x2="880" y2="844" stroke="#d29922" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arr-orange)"/>
+  <text x="894" y="848" class="t muted" font-size="11">子进程 / 文件 / 网络</text>
+
+  <text x="830" y="884" class="t muted" font-size="10">canonical 源：system-context.dot · system-containers.dot</text>
+  <text x="830" y="902" class="t muted" font-size="10">证据与置信度：system-model.evidence.md</text>
+</svg>
