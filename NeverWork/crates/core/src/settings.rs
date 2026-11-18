@@ -251,9 +251,14 @@ impl ProviderPreset {
             ProviderPreset::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
             ProviderPreset::DeepSeek => &["deepseek-flash", "deepseek-v4-pro"],
             ProviderPreset::Qwen => &["qwen-max", "qwen-plus", "qwen-turbo", "qwen2.5-coder-32b-instruct"],
-            // 智谱把 glm-4 / glm-4-plus 一代陆续下线了，测试连通性默认还打旧模型名
-            // 会直接 400「模型不存在」。这里只列当前在线的文本模型。
-            ProviderPreset::Glm => &["glm-4.7", "glm-4.6", "glm-4.5", "glm-4.5-air", "glm-4.5-flash"],
+            // 智谱的历史模型名会直接 400「模型不存在」或自动切到新模型，
+            // 这里只列当前在线的 GLM-5.3 一代。
+            ProviderPreset::Glm => &[
+                "glm-5.3",
+                "glm-5.3-flash",
+                "glm-5.3-flashx",
+                "glm-5.3-flashx-legal",
+            ],
             ProviderPreset::Moonshot => &["moonshot-v1-128k", "moonshot-v1-32k", "kimi-k2-0711-preview"],
             ProviderPreset::Doubao => &["doubao-pro-32k", "doubao-lite-32k", "doubao-seed-1-6"],
             ProviderPreset::Baichuan => &["Baichuan4", "Baichuan3-Turbo"],
@@ -265,6 +270,27 @@ impl ProviderPreset {
             ProviderPreset::SiliconFlow => &["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"],
             ProviderPreset::LmStudio => &["local-model"],
             ProviderPreset::Custom => &[],
+        }
+    }
+
+    /// 内置模型列表的历史版本（用于配置升级判定）。
+    ///
+    /// 旧模型下线的厂商在这里登记历次内置列表；用户配置里的模型列表
+    /// 仍与某个历史版本一致（说明没手动增删过）时才允许整体换代。
+    pub fn legacy_model_sets(&self) -> &'static [&'static [&'static str]] {
+        match self {
+            // glm-4 一代已全部下线；glm-4.5/4.6/4.7 被官方自动切到 GLM-5.3 系列。
+            ProviderPreset::Glm => &[
+                &["glm-4-plus", "glm-4", "glm-4-flash", "glm-4v"],
+                &[
+                    "glm-4.7",
+                    "glm-4.6",
+                    "glm-4.5",
+                    "glm-4.5-air",
+                    "glm-4.5-flash",
+                ],
+            ],
+            _ => &[],
         }
     }
 
@@ -1130,6 +1156,46 @@ impl Settings {
         self.providers.iter_mut().find(|p| p.id == id)
     }
 
+    /// 把仍沿用旧内置预设的厂商模型列表升级到当前预设。
+    ///
+    /// 仅当 `models` 与某个历史内置版本完全一致（顺序无关）时替换：用户
+    /// 手动加过或删过模型的列表保持原样。默认模型不在新列表里时取第一个。
+    /// 返回是否发生了变更（调用方据此决定要不要落盘）。
+    pub fn upgrade_builtin_models(&mut self) -> bool {
+        let mut changed = false;
+        for p in &mut self.providers {
+            let legacy = p.preset.legacy_model_sets();
+            if legacy.is_empty() || p.models.is_empty() {
+                continue;
+            }
+            let mut ids: Vec<&str> = p.models.iter().map(|m| m.id.as_str()).collect();
+            ids.sort_unstable();
+            let still_builtin = legacy.iter().any(|old| {
+                if old.len() != ids.len() {
+                    return false;
+                }
+                let mut want = old.to_vec();
+                want.sort_unstable();
+                want == ids
+            });
+            if !still_builtin {
+                continue;
+            }
+            let fresh: Vec<ModelEntry> = p
+                .preset
+                .models()
+                .iter()
+                .map(|s| ModelEntry::new(*s))
+                .collect();
+            if !fresh.iter().any(|m| m.id == p.model) {
+                p.model = fresh.first().map(|m| m.id.clone()).unwrap_or_default();
+            }
+            p.models = fresh;
+            changed = true;
+        }
+        changed
+    }
+
     /// 记录一次工作区打开：同路径更新打开时间（保留自定义名与收藏），
     /// 超过上限时淘汰最久未打开且未收藏的。
     ///
@@ -1576,5 +1642,64 @@ mod tests {
         let json = r#"{"theme":"dark"}"#;
         let s: Settings = serde_json::from_str(json).unwrap();
         assert!(s.workspaces.is_empty(), "旧配置不能因缺字段整库失效");
+    }
+
+    #[test]
+    fn glm_preset_moves_to_53_family() {
+        let p = ProviderEntry::from_preset(ProviderPreset::Glm);
+        assert_eq!(p.model, "glm-5.3", "新配置默认用当前旗舰");
+        let ids: Vec<&str> = p.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["glm-5.3", "glm-5.3-flash", "glm-5.3-flashx", "glm-5.3-flashx-legal"],
+        );
+    }
+
+    #[test]
+    fn upgrade_builtin_models_replaces_legacy_glm_lists() {
+        let mut s = Settings::default();
+        {
+            let glm = s.providers.iter_mut().find(|p| p.id == "glm").unwrap();
+            glm.models = ["glm-4-plus", "glm-4", "glm-4-flash", "glm-4v"]
+                .iter()
+                .map(|id| ModelEntry::new(*id))
+                .collect();
+            glm.model = "glm-4".into();
+        }
+        assert!(s.upgrade_builtin_models(), "旧内置列表应被升级");
+        let glm = s.providers.iter().find(|p| p.id == "glm").unwrap();
+        assert_eq!(glm.model, "glm-5.3", "旧默认模型不在新列表时取第一个");
+        assert!(glm.models.iter().any(|m| m.id == "glm-5.3-flash"));
+        assert!(!glm.models.iter().any(|m| m.id.starts_with("glm-4")));
+        assert!(!s.upgrade_builtin_models(), "升级后不应反复触发");
+
+        // 上一代内置列表（glm-4.5/4.6/4.7）同样升级。
+        let mut s = Settings::default();
+        {
+            let glm = s.providers.iter_mut().find(|p| p.id == "glm").unwrap();
+            glm.models = ["glm-4.7", "glm-4.6", "glm-4.5", "glm-4.5-air", "glm-4.5-flash"]
+                .iter()
+                .map(|id| ModelEntry::new(*id))
+                .collect();
+            glm.model = "glm-4.7".into();
+        }
+        assert!(s.upgrade_builtin_models());
+        let glm = s.providers.iter().find(|p| p.id == "glm").unwrap();
+        assert_eq!(glm.model, "glm-5.3");
+        assert_eq!(glm.models.len(), 4);
+    }
+
+    #[test]
+    fn upgrade_keeps_user_edited_model_list() {
+        let mut s = Settings::default();
+        {
+            let glm = s.providers.iter_mut().find(|p| p.id == "glm").unwrap();
+            glm.models.push(ModelEntry::new("my-glm"));
+            glm.model = "my-glm".into();
+        }
+        assert!(!s.upgrade_builtin_models(), "手动加过模型的列表不能动");
+        let glm = s.providers.iter().find(|p| p.id == "glm").unwrap();
+        assert_eq!(glm.model, "my-glm");
+        assert!(glm.models.iter().any(|m| m.id == "glm-5.3"));
     }
 }

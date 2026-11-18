@@ -1,7 +1,11 @@
 use neverwork_core::config;
 
+/// `NW_CONFIG_DIR` 是进程级环境变量，设它的测试必须串行，否则互相踩目录。
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn config_roundtrip() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // 用临时目录隔离，避免污染真实用户目录。
     let tmp = std::env::temp_dir().join(format!("neverwork-test-{}", std::process::id()));
     std::env::set_var("NW_CONFIG_DIR", &tmp);
@@ -51,6 +55,32 @@ fn export_with_secrets_opt_in() {
     let (_, back, includes_secrets) = config::import_all(&text).unwrap();
     assert!(includes_secrets);
     assert_eq!(back.providers[0].api_key, "sk-explicit");
+}
+
+#[test]
+fn load_settings_upgrades_legacy_builtin_models() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = std::env::temp_dir().join(format!("neverwork-test-migrate-{}", std::process::id()));
+    std::env::set_var("NW_CONFIG_DIR", &tmp);
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // 旧版配置：智谱还是 glm-4 一代（整代已下线），模型列表为纯字符串数组。
+    let json = r#"{"providers":[{"id":"glm","preset":"glm","name":"智谱 GLM","base_url":"https://open.bigmodel.cn/api/paas/v4","api_key":"sk-glm","models":["glm-4-plus","glm-4","glm-4-flash","glm-4v"],"model":"glm-4","enabled":true}]}"#;
+    std::fs::write(tmp.join("settings.json"), json).unwrap();
+
+    let loaded = config::load_settings();
+    let glm = loaded.providers.iter().find(|p| p.id == "glm").unwrap();
+    assert_eq!(glm.model, "glm-5.3", "旧默认模型不在新列表时取第一个");
+    assert!(glm.models.iter().any(|m| m.id == "glm-5.3-flash"));
+    assert!(!glm.models.iter().any(|m| m.id.starts_with("glm-4")));
+
+    // 迁移必须落盘，否则用户本次不改设置就白迁移。
+    let text = std::fs::read_to_string(tmp.join("settings.json")).unwrap();
+    assert!(text.contains("glm-5.3"));
+    assert!(!text.contains("glm-4-plus"));
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
