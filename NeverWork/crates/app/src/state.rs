@@ -606,6 +606,12 @@ pub struct AppState {
 
     // ===== AI / 团队 =====
     pub streaming: bool,
+    /// 正在生成的是哪个会话（同一时刻只允许跑一轮）。
+    ///
+    /// 界面、停止与收尾一律按它判断，不能拿 `active_session`：生成中点
+    /// 「＋新建会话」后两者不同，按 `active_session` 会把「生成中 / 停止 /
+    /// 已取消」全标到新会话上，旧会话的内容看起来就串进了新会话。
+    pub running_session: Option<usize>,
     pub ai_ready: bool,
     pub notice: Option<String>,
     pub config: Config,
@@ -1226,6 +1232,7 @@ impl AppState {
             run_clock_gen: std::rc::Rc::new(std::cell::Cell::new(0)),
             auto_save_pending: false,
             streaming: false,
+            running_session: None,
             ai_ready,
             notice: None,
             config,
@@ -1579,6 +1586,7 @@ impl AppState {
                     s.sync_action();
                 }
                 me.streaming = true;
+                me.running_session = Some(0);
                 me.turn_started = Some(std::time::Instant::now());
                 me.start_run_clock(cx);
             }
@@ -1648,6 +1656,16 @@ impl AppState {
 
     pub fn session(&self) -> &Session {
         &self.sessions[self.active_session.min(self.sessions.len().saturating_sub(1))]
+    }
+
+    /// 指定会话这一轮是否正在生成。
+    pub(crate) fn is_running_session(&self, idx: usize) -> bool {
+        self.streaming && self.running_session == Some(idx)
+    }
+
+    /// 当前查看的会话是否正在生成（输入区 / 顶部状态 / 停止按钮用）。
+    pub(crate) fn is_running(&self) -> bool {
+        self.is_running_session(self.active_session.min(self.sessions.len().saturating_sub(1)))
     }
 
     /// 当前会话的运行模式。模式在新建会话时选定，之后不可切换。
@@ -1774,6 +1792,21 @@ impl AppState {
         self.new_session_picker = false;
         self.ns_team_open = false;
         self.active_role = None;
+        // 新建 = 全新对话：输入框草稿与待发附件都属于上一个会话。
+        // 不清的话新会话第一条消息就会把旧内容（文本附件正文会拼进 prompt）
+        // 一起发出去，模型自然像「记得」旧会话。
+        self.chat.reset("");
+        self.chat_attachments.clear();
+        self.model_picker = false;
+        self.composer_menu = false;
+        self.thinking_panel = false;
+        self.permission_panel = false;
+        self.permission_confirm = false;
+        self.ask_custom.reset("");
+        self.input_target = InputTarget::Chat;
+        // 轨迹页的选中项/搜索词指向旧会话的消息，换会话后清掉
+        self.trace_selected = None;
+        self.trace_query.reset("");
         self.save_sessions();
         cx.notify();
     }
@@ -1948,6 +1981,14 @@ impl AppState {
         if idx >= self.sessions.len() {
             return;
         }
+        // 生成中不能删：会话下标是整个运行事件流的定位键，删掉一条会让后面
+        // 全部前移，正在跑的会话的后续内容会落进别的会话里。
+        if self.streaming {
+            self.session_delete_confirm = None;
+            self.notice = Some("正在生成，先停止再删除会话".into());
+            cx.notify();
+            return;
+        }
         let removed = self.sessions.remove(idx);
         let short: String = removed.title.chars().take(16).collect();
         if self.sessions.is_empty() {
@@ -1982,6 +2023,13 @@ impl AppState {
     pub(crate) fn click_clean_archived(&mut self, cx: &mut Context<Self>) {
         if !self.archive_clean_confirm {
             self.archive_clean_confirm = true;
+            cx.notify();
+            return;
+        }
+        // 同删除：生成中清归档会打乱下标，运行中的会话内容会串到别人身上。
+        if self.streaming {
+            self.archive_clean_confirm = false;
+            self.notice = Some("正在生成，先停止再清理归档".into());
             cx.notify();
             return;
         }
@@ -3792,10 +3840,19 @@ impl AppState {
                     self.session_search.reset("");
                 } else if self.role_skill_picker.is_some() {
                     self.close_role_skill_picker(cx);
-                } else if self.pending_ask.is_some() {
-                    // 问答卡片不算浮层，但 Esc 应该能跳过：按推荐继续，不卡住链路
+                } else if self
+                    .pending_ask
+                    .as_ref()
+                    .map(|p| p.session_idx == self.active_session)
+                    .unwrap_or(false)
+                {
+                    // 问答卡片不算浮层，但 Esc 应该能跳过：按推荐继续，不卡住链路。
+                    // 只跳过当前会话自己的问题：卡片只在它的会话里渲染，看不到的
+                    // 问题不能被一次 Esc 默默吃掉。
                     self.skip_ask(cx);
-                } else if self.streaming {
+                } else if self.is_running() {
+                    // 只停「当前正在看的会话」的运行；生成中切到别的会话后按 Esc
+                    // 不该把背后那个会话停掉（它已经不在视野里，用户看不到反馈）。
                     self.stop_streaming(cx);
                 }
                 // 浮层/路径行可能刚刚关闭：把输入目标拉回正文。
@@ -3971,7 +4028,21 @@ impl AppState {
     fn send_text(&mut self, text: String, keep_prompt: Option<String>, cx: &mut Context<Self>) {
         // 附件是本轮输入的一部分：先取走，发不出去再放回。
         let attachments = std::mem::take(&mut self.chat_attachments);
-        if self.streaming || (text.is_empty() && attachments.is_empty()) {
+        if self.streaming {
+            // 同一时刻只跑一轮。生成中点「＋新建会话」后当前会话已是新会话，
+            // 不能默默把输入吞掉：说清是哪个会话在跑，否则看起来像新会话卡死。
+            self.chat_attachments = attachments;
+            let running = self.running_session.unwrap_or(self.active_session);
+            let title: String = self
+                .sessions
+                .get(running)
+                .map(|s| s.title.chars().take(12).collect())
+                .unwrap_or_default();
+            self.notice = Some(format!("会话「{title}」还在生成，先停止或等它结束再发送"));
+            cx.notify();
+            return;
+        }
+        if text.is_empty() && attachments.is_empty() {
             self.chat_attachments = attachments;
             return;
         }
@@ -4052,10 +4123,14 @@ impl AppState {
         self.save_sessions();
 
         self.streaming = true;
+        self.running_session = Some(session_idx);
         self.turn_started = Some(std::time::Instant::now());
         // 会话卡片上的「执行中」动图与耗时：流式期间定时重绘。
         self.start_run_clock(cx);
-        self.cancel.store(false, Ordering::Relaxed);
+        // 每一轮都换新的取消令牌：上一轮可能还在跑收尾（长命令可达几十秒），
+        // 共享同一个 AtomicBool 会把它的「已取消」重置回「继续」，被停掉的
+        // 那一轮复活后和新一轮同时往同一会话里写，看起来就是内容串了。
+        self.cancel = Arc::new(AtomicBool::new(false));
         self.chat_scroll_dirty.set(true);
         cx.notify();
 
@@ -4360,6 +4435,9 @@ impl AppState {
             seconds: self.settings.max_run_seconds,
         };
         let cancel = self.cancel.clone();
+        // UI 侧拿同一个令牌判断「收尾事件是否仍属于当前这一轮」：
+        // 停止后又发了新一轮时，旧轮次的收尾不能把新一轮的运行状态清掉。
+        let run_token = cancel.clone();
         // 远程工作区走 ssh 后端；本地 / 无工作区保持原语义。
         let remote_auth = self.remote_auth();
         let ctx = match (&self.remote, &self.root) {
@@ -4516,8 +4594,11 @@ impl AppState {
                         });
                         let _ = weak.update(async_cx, |this, cx| {
                             let Some(p) = participant else { return };
-                            // 顶部流水线跟着当前发言角色高亮
-                            this.active_role = Some(ri);
+                            // 顶部流水线跟着当前发言角色高亮；旧会话的流事件不能
+                            // 给正在看的别的会话点亮角色。
+                            if this.active_session == session_idx {
+                                this.active_role = Some(ri);
+                            }
                             let idx = bubbles.bubble(ri, || {
                                 let i = this.sessions[session_idx].messages.len();
                                 this.sessions[session_idx].messages.push(Message {
@@ -4858,6 +4939,21 @@ impl AppState {
                             cx.notify();
                         });
                     }
+                    // 压缩结束（成功或失败兜底）：收掉黄条，主对话继续。
+                    // 只清自己那条，不顺手把别的提示清掉。
+                    neverwork_agent::AgentEvent::Compacted => {
+                        let _ = weak.update(async_cx, |this, cx| {
+                            let mine = this
+                                .notice
+                                .as_deref()
+                                .map(|n| n.starts_with("上下文已超预算"))
+                                .unwrap_or(false);
+                            if mine {
+                                this.notice = None;
+                                cx.notify();
+                            }
+                        });
+                    }
                     neverwork_agent::AgentEvent::CostLimit { used, limit } => {
                         let _ = weak.update(async_cx, |this, cx| {
                             // 和轮数/时间上限同性质：停下来收尾，不是报错。
@@ -4909,42 +5005,65 @@ impl AppState {
             }
 
             let _ = weak.update(async_cx, |this, cx| {
-                this.streaming = false;
-                this.active_role = None;
-                this.pending = None;
-                this.pending_ask = None;
-                // 先把取消标志取出来，后面要可变借用 sessions
-                let cancelled = this.cancel.load(Ordering::Relaxed);
+                // 只回收本轮自己的状态：生成中点了「＋新建会话」或停止后又发了
+                // 新会话时，这里可能是别的会话在跑，旧会话的收尾不能把它清掉。
+                let still_mine = this.running_session == Some(session_idx)
+                    && Arc::ptr_eq(&run_token, &this.cancel);
+                if still_mine {
+                    this.streaming = false;
+                    this.running_session = None;
+                    this.active_role = None;
+                }
+                // 审批/问答卡属于哪个会话就只清哪个会话的
+                if this.pending.as_ref().map(|p| p.session_idx) == Some(session_idx) {
+                    this.pending = None;
+                }
+                if this.pending_ask.as_ref().map(|p| p.session_idx) == Some(session_idx) {
+                    this.pending_ask = None;
+                }
+                // 取消标志只有「本轮仍是运行会话」时才可信：停止后新一轮会换
+                // 新令牌，拿当前令牌判断会把旧轮次误记成正常跑完（能续跑变不能）。
+                let cancelled = if still_mine {
+                    run_token.load(Ordering::Relaxed)
+                } else {
+                    true
+                };
                 // 把本轮耗时写到最后一条回答上，渲染成 OpenCode 那样的页脚。
-                if let Some(started) = this.turn_started.take() {
-                    let ms = started.elapsed().as_millis() as u64;
-                    if let Some(session) = this.sessions.get_mut(session_idx) {
-                        if let Some(m) = session
-                            .messages
-                            .iter_mut()
-                            .rev()
-                            .find(|m| matches!(m.kind, MessageKind::Agent { .. }))
-                        {
+                let started = if still_mine { this.turn_started.take() } else { None };
+                let ms = started.map(|t| t.elapsed().as_millis() as u64);
+                // 状态归位是本会话自己的事：即使收尾晚于「新建/切走」，也要写回
+                // 它自己的记录，否则卡片会一直停在「工作中」。
+                if let Some(session) = this.sessions.get_mut(session_idx) {
+                    if let Some(m) = session
+                        .messages
+                        .iter_mut()
+                        .rev()
+                        .find(|m| matches!(m.kind, MessageKind::Agent { .. }))
+                    {
+                        if let Some(ms) = ms {
                             m.elapsed_ms = ms;
                             m.tokens_in = turn_usage.0;
                             m.tokens_out = turn_usage.1;
                         }
-                        // 本轮收尾：状态与摘要归位，左侧卡片才反映真实进度
-                        session.status = neverwork_core::SessionStatus::Done;
-                        // `Failed` 是真实失败，不能被「正常收尾」覆盖；
-                        // 用户点过停止则是 `Cancelled`（可续跑），其余算跑完。
-                        if session.stage != neverwork_core::TaskStage::Failed {
-                            session.stage = if cancelled {
-                                neverwork_core::TaskStage::Cancelled
-                            } else {
-                                neverwork_core::TaskStage::Done
-                            };
-                        }
-                        session.sync_action();
-                        let preview = last_preview(session);
-                        session.preview = preview;
-                        session.touch();
                     }
+                    // 本轮收尾：状态与摘要归位，左侧卡片才反映真实进度
+                    session.status = neverwork_core::SessionStatus::Done;
+                    // `Failed` 是真实失败，不能被「正常收尾」覆盖；
+                    // `Cancelled` 是停止时已归位的结果（可续跑）；其余算跑完。
+                    if !matches!(
+                        session.stage,
+                        neverwork_core::TaskStage::Failed | neverwork_core::TaskStage::Cancelled
+                    ) {
+                        session.stage = if cancelled {
+                            neverwork_core::TaskStage::Cancelled
+                        } else {
+                            neverwork_core::TaskStage::Done
+                        };
+                    }
+                    session.sync_action();
+                    let preview = last_preview(session);
+                    session.preview = preview;
+                    session.touch();
                 }
                 // 图片产物：模型用 Markdown 图片 / data URI 给出的图（渲染前先落盘登记）
                 let imgs: Vec<String> = this
@@ -4964,14 +5083,19 @@ impl AppState {
                     }
                 }
                 // 产物条贴在对话流末尾：收尾登记后要滚到底，否则新出现的
-                // footer 落在视口下方，看起来像「没渲染」。
-                this.chat_scroll_dirty.set(true);
+                // footer 落在视口下方，看起来像「没渲染」。别滚别人的会话：
+                // 收尾可能晚于「新建/切走」，不能把当前正在读的会话拽到底部。
+                if this.active_session == session_idx {
+                    this.chat_scroll_dirty.set(true);
+                }
                 // 本轮结束强制落盘：下次启动打开就是这个瞬间的内容
                 this.save_sessions();
                 // 验证用：本轮答完自动追问下一条（`NW_SEND2`）
                 if let Some(q) = this.follow_up.take() {
-                    this.chat.reset(q);
-                    this.send_message(cx);
+                    if this.active_session == session_idx {
+                        this.chat.reset(q);
+                        this.send_message(cx);
+                    }
                 }
                 cx.notify();
             });
@@ -5371,13 +5495,26 @@ impl AppState {
         if let Some(p) = self.pending.take() {
             let _ = p.respond.send(false);
         }
+        // 问答卡同审批：不在这里清掉的话，停止后卡片还挂在对话里，
+        // 点选项也没人接收（Agent 线程已经读到取消退出了）。
+        if let Some(p) = self.pending_ask.take() {
+            let _ = p.respond.send("用户停止了生成，跳过这个问题。".into());
+        }
+        // 停止的是「正在生成的那个会话」：生成中点「＋新建会话」后，
+        // active_session 已经是新会话；拿它会把新会话标成已取消，
+        // 真正在跑的旧会话却还在转。
+        let idx = self
+            .running_session
+            .unwrap_or(self.active_session)
+            .min(self.sessions.len().saturating_sub(1));
         // 立刻复位 streaming：只置取消标志的话，要等 Agent 线程跑完当前工具
         // 才收尾，界面上「生成中」和停止按钮会一直挂着（长工具调用可达几十秒），
         // 用户会以为卡死、也无法继续输入下一条。
         self.streaming = false;
+        self.running_session = None;
+        self.turn_started = None;
         self.active_role = None;
         // 正在执行/待批准的卡片不会再返回结果，直接标成已取消，避免永远转圈。
-        let idx = self.active_session.min(self.sessions.len().saturating_sub(1));
         if let Some(session) = self.sessions.get_mut(idx) {
             for m in session.messages.iter_mut() {
                 if let MessageKind::ToolCall { status, .. } = &mut m.kind {
@@ -5386,8 +5523,13 @@ impl AppState {
                     }
                 }
             }
-            // 用户主动停止：可续跑，但不是失败也不是完成
+            // 用户主动停止：可续跑，但不是失败也不是完成。
+            // status / preview 也当场归位：Agent 线程可能在收尾前就检查到取消，
+            // 不归位卡片会一直停在「工作中」。
             session.stage = neverwork_core::TaskStage::Cancelled;
+            session.status = neverwork_core::SessionStatus::Done;
+            session.preview = last_preview(session);
+            session.touch();
             session.sync_action();
         }
         self.notice = Some("已停止生成".into());

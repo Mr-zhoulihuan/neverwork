@@ -296,7 +296,7 @@ impl AppState {
             .child(stat("▢", format!("{calls} 次调用")))
             .child(stat("⇅", format!("↑{tin} ↓{tout}")))
             .child(div().flex_1());
-        if self.streaming {
+        if self.is_running() {
             head = head.child(
                 div()
                     .flex()

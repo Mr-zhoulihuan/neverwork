@@ -657,8 +657,10 @@ impl AppState {
         let title_text = crate::views::text_fit::fit_text(&session.title, title_w, 14.0);
 
         // 「执行中」：用动图 + 实时耗时替代静态标签。streaming 是全局的，
-        // 重启后残留的 Working 状态因为拿不到本次运行时刻，退回静态胶囊。
-        let running = session.status == SessionStatus::Working && self.streaming;
+        // 重启后残留的 Working 状态因为拿不到本次运行时刻，退回静态胶囊；
+        // 生成中点「＋新建会话」时，新会话卡片不能顶着「执行中」动图。
+        let running =
+            session.status == SessionStatus::Working && self.is_running_session(idx);
         let elapsed = self
             .turn_started
             .map(|t| t.elapsed())

@@ -109,6 +109,7 @@ fn run(
         }
         AgentEvent::HandoffLimit => trace.errors.push("意外触发交接上限".into()),
         AgentEvent::Compacting => eprintln!("[上下文] 正在压缩更早的对话…"),
+        AgentEvent::Compacted => eprintln!("[上下文] 压缩结束"),
         AgentEvent::Usage {
             input_tokens,
             output_tokens,

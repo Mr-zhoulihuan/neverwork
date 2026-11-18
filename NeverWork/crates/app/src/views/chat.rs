@@ -216,10 +216,10 @@ impl AppState {
                             .bg(theme::accent_soft())
                             .text_xs()
                             .text_color(theme::accent())
-                            .child(if self.streaming { "生成中…" } else { "协作团队" }),
+                            .child(if self.is_running() { "生成中…" } else { "协作团队" }),
                     ),
             );
-        } else if self.streaming {
+        } else if self.is_running() {
             col = col.child(
                 div()
                     .flex()
@@ -278,7 +278,7 @@ impl AppState {
             thread = thread.child(self.render_msg(&m, avail, i, cx));
             i += 1;
         }
-        if self.streaming {
+        if self.is_running() {
             thread = thread.child(
                 div()
                     .text_xs()
@@ -536,7 +536,13 @@ impl AppState {
             .gap_2();
 
         // 有待确认的写操作时，输入框上方给出显式提示（卡片里也有按钮）。
-        if let Some(p) = &self.pending {
+        // 只提示「当前会话自己的」：生成中点「＋新建会话」后，旧会话的审批
+        // 卡不属于这里，不能顶到新会话的输入框上方。
+        if let Some(p) = self
+            .pending
+            .as_ref()
+            .filter(|p| p.session_idx == self.active_session)
+        {
             col = col.child(
                 div()
                     .flex()
@@ -598,7 +604,7 @@ impl AppState {
         // ===== 团队 @ 入口：角色 chips 与「本轮交给」提示 =====
         if self.is_team_mode() {
             if let Some(team) = self.team_for_session(self.active_session) {
-                if !self.streaming {
+                if !self.is_running() {
                     let mut chips = div().flex().items_center().gap_2().flex_wrap();
                     for (i, role) in team.roles.iter().enumerate() {
                         let name = role.name.clone();
@@ -776,7 +782,7 @@ impl AppState {
         let mut input_box = div()
             .rounded_lg()
             .border_1()
-            .border_color(if self.streaming {
+            .border_color(if self.is_running() {
                 theme::accent_line()
             } else {
                 theme::border()
@@ -817,7 +823,7 @@ impl AppState {
                         .child(self.permission_chip(cx))
                         // 发送走 Enter，不再占一个按钮。
                         // 只有生成中才出现「停止」，否则没有任何中断入口。
-                        .when(self.streaming, |d| {
+                        .when(self.is_running(), |d| {
                             d.child(
                                 div()
                                     .id("stop-btn")
@@ -839,7 +845,7 @@ impl AppState {
                             )
                         })
                         // 生成中已经有「停止」按钮和顶部状态，这里不再重复提示。
-                        .when(!self.streaming && self.layout_w.get() >= 980.0, |d| {
+                        .when(!self.is_running() && self.layout_w.get() >= 980.0, |d| {
                             d.child(
                                 div()
                                     .text_xs()

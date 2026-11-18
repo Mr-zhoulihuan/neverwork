@@ -619,6 +619,7 @@ fn summarize_oldest(
 
     emit(AgentEvent::Compacting);
     let mut summary = String::new();
+    let failed;
     {
         let mut on = |ev: StreamEvent| {
             if let StreamEvent::Delta(d) = ev {
@@ -629,9 +630,13 @@ fn summarize_oldest(
             ChatMessage::system(SUMMARY_SYSTEM),
             ChatMessage::user(body),
         ];
-        if provider.stream_chat(&req, &mut on).is_err() || summary.trim().is_empty() {
-            return None;
-        }
+        failed = provider.stream_chat(&req, &mut on).is_err() || summary.trim().is_empty();
+    }
+    // 无论摘要成功与否都要报一声「压缩结束」：失败时下面还有
+    // `shrink_tool_results` 兜底，界面的黄条一直挂着会让人以为这轮卡住了。
+    emit(AgentEvent::Compacted);
+    if failed {
+        return None;
     }
 
     // 用 user 承载摘要：它是一段被压缩过的历史记录，不是助手说的话，
@@ -701,6 +706,8 @@ pub enum AgentEvent {
     CostLimit { used: u64, limit: u64 },
     /// 上下文超预算，正在把更早的对话压成摘要（会多打一次轻量模型调用）。
     Compacting,
+    /// 压缩结束（摘要成功，或失败后改由截短工具结果兜底）。
+    Compacted,
     /// 本次运行的用量。
     ///
     /// `est_tokens` 是滑动上下文大小的估算；`input_tokens`/`output_tokens`

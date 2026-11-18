@@ -24,6 +24,11 @@ use crate::diff::{self, DiffLine};
 
 /// 单文件读取上限（超过就截断并告知模型）。
 const MAX_READ_BYTES: usize = 256 * 1024;
+/// 单行最多回显的字符数。压缩后的 JS / 内嵌 base64 的单行能有几十万字符，
+/// 实测一次 `read_file` 读测试报告就返回了 25 万字符，一轮就把上下文顶爆。
+const READ_MAX_LINE_CHARS: usize = 2_000;
+/// 单次 `read_file` 回显的字符总量上限（含行号），超了让模型用 offset 分段读。
+const READ_MAX_OUT_CHARS: usize = 60_000;
 /// 写文件上限，防止模型一次吐出海量内容把磁盘写满。
 const MAX_WRITE_BYTES: usize = 2 * 1024 * 1024;
 /// 目录列表上限。
@@ -1600,6 +1605,11 @@ pub fn wrap_untrusted(body: &str) -> String {
     )
 }
 
+/// 把字符下标收敛到合法的 UTF-8 边界（按字符截断多字节文本不能切成半截）。
+fn char_boundary_at(s: &str, want: usize) -> usize {
+    s.char_indices().nth(want).map(|(i, _)| i).unwrap_or(s.len())
+}
+
 fn read_file(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
     let rel = a.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if rel.trim().is_empty() {
@@ -1639,6 +1649,8 @@ fn read_file(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
 
     let mut out = String::new();
     let mut shown = 0usize;
+    let mut out_chars = 0usize;
+    let mut out_capped = false;
     let total = text.lines().count();
     for (i, line) in text.lines().enumerate() {
         let no = i + 1;
@@ -1648,7 +1660,23 @@ fn read_file(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
         if shown >= limit {
             break;
         }
-        out.push_str(&format!("{no:>5}| {line}\n"));
+        // 单行过长（内嵌 base64 / 压缩后的 JS）：截到上限。一行没有阅读价值，
+        // 但它能吃掉整个上下文预算。
+        let line_text = if line.chars().count() > READ_MAX_LINE_CHARS {
+            let cut = char_boundary_at(line, READ_MAX_LINE_CHARS);
+            format!("{}…（该行过长已截断）", &line[..cut])
+        } else {
+            line.to_string()
+        };
+        let row = format!("{no:>5}| {line_text}\n");
+        let row_chars = row.chars().count();
+        // 总长度封顶：下一行放不下就停，而不是先塞进去再停（否则每次都会超出上限一条）。
+        if shown > 0 && out_chars + row_chars > READ_MAX_OUT_CHARS {
+            out_capped = true;
+            break;
+        }
+        out_chars += row_chars;
+        out.push_str(&row);
         shown += 1;
     }
 
@@ -1658,7 +1686,7 @@ fn read_file(call: &ToolCall, a: &Value, ctx: &ToolContext) -> ToolResult {
         header.push_str(&format!("，显示 {offset}–{}", offset + shown - 1));
     }
     header.push('）');
-    if truncated {
+    if truncated || out_capped {
         header.push_str("；内容过大已截断");
     }
     ToolResult::ok(call, format!("{header}\n{out}"))
@@ -2151,6 +2179,48 @@ mod tests {
         assert!(r.ok);
         assert!(r.content.contains("fn main() {}"));
         assert!(r.content.contains("1|"), "应带行号: {}", r.content);
+    }
+
+    #[test]
+    fn read_caps_giant_single_line() {
+        // 内嵌 base64 的单行能有几十万字符（实测 25 万），一行就把上下文顶爆。
+        let (ctx, _dir) = ctx();
+        let big = "A".repeat(300_000);
+        let content = format!("<html>\n{big}\n</html>\n");
+        execute(
+            &call("write_file", json!({"path": "report.html", "content": content})),
+            &ctx,
+        );
+        let r = execute(&call("read_file", json!({"path": "report.html"})), &ctx);
+        assert!(r.ok, "{}", r.content);
+        assert!(
+            r.content.chars().count() < READ_MAX_LINE_CHARS * 4,
+            "单行必须被截断，实际 {} 字符",
+            r.content.chars().count()
+        );
+        assert!(r.content.contains("该行过长已截断"), "{}…", r.content);
+    }
+
+    #[test]
+    fn read_caps_total_output() {
+        let (ctx, _dir) = ctx();
+        let line = "b".repeat(1_900);
+        let rows: Vec<String> = (0..200).map(|_| line.clone()).collect();
+        execute(
+            &call("write_file", json!({"path": "wide.txt", "content": rows.join("\n")})),
+            &ctx,
+        );
+        let r = execute(
+            &call("read_file", json!({"path": "wide.txt", "limit": 200})),
+            &ctx,
+        );
+        assert!(r.ok, "{}", r.content);
+        assert!(
+            r.content.chars().count() <= READ_MAX_OUT_CHARS + 200,
+            "总量必须封顶，实际 {} 字符",
+            r.content.chars().count()
+        );
+        assert!(r.content.contains("内容过大已截断"), "{}…", r.content);
     }
 
     #[test]
