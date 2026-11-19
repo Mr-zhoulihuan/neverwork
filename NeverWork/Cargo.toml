@@ -19,3 +19,9 @@ opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# xattr 0.2.3（gpui_http_client → zed-async-tar 的传递依赖）在 Linux 上引用
+# libc::ENOATTR（glibc 无此常量）导致编译失败。上游没有修复版，
+# zed-async-tar 又锁死 xattr ^0.2，只能本地打补丁（改动见 vendor/xattr/PATCH.md）。
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
