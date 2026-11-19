@@ -106,10 +106,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libssl-dev libxkbcommon-dev libwayland-dev \
-            libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libfontconfig1-dev libfreetype6-dev \
-            libvulkan-dev mesa-vulkan-drivers libgl1-mesa-dri
+            pkg-config libssl-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig1-dev \
+            libfreetype6-dev libvulkan-dev mesa-vulkan-drivers libgl1-mesa-dri
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -128,7 +128,8 @@ jobs:
 
   build-macos:
     needs: meta
-    runs-on: macos-14
+    # macos-latest 已是 arm64（macos-14 及以后）；写死 macos-14 会因镜像退役被瞬时取消。
+    runs-on: macos-latest
     defaults:
       run:
         working-directory: NeverWork
@@ -183,8 +184,10 @@ jobs:
           MISSING=""
           if [ "$LINUX" != "success" ]; then MISSING="$MISSING Linux"; fi
           if [ "$MACOS" != "success" ]; then MISSING="$MISSING macOS"; fi
+          # 重跑同一个 tag 时先去掉上一轮追加的提示，避免正文里越积越多。
+          gh release view "$TAG" --json body -q .body --repo "$GITHUB_REPOSITORY" \
+            | python3 -c "import re,sys; s=sys.stdin.read(); s=re.sub(r'(?m)^> 本次未产出.*\\n?', '', s); print(s.rstrip())" > body.md
           if [ -n "$MISSING" ]; then
-            gh release view "$TAG" --json body -q .body --repo "$GITHUB_REPOSITORY" > body.md
             printf '\n\n> 本次未产出%s 构建（见 Actions 日志）。\n' "$MISSING" >> body.md
-            gh release edit "$TAG" --notes-file body.md --repo "$GITHUB_REPOSITORY"
           fi
+          timeout 60s gh release edit "$TAG" --notes-file body.md --repo "$GITHUB_REPOSITORY"
