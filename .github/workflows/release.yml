@@ -1,0 +1,188 @@
+# 打 tag 触发：三平台编译并生成 GitHub Release。
+#
+# 发版流程：改 NeverWork/Cargo.toml 的 version（同步 crates/app/assets/neverwork.rc）
+# → git tag v<version> → git push github refs/tags/v<version>
+# tag 必须与 workspace 版本一致，否则 meta job 直接失败（版本号只认 Cargo.toml）。
+#
+# 门禁：Windows 是阻塞平台（失败则不发版）；Linux / macOS 是实验性构建，
+# 失败只让本次运行标红，不影响 Release 生成（release job 用 if: always()）。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: 校验 tag 与 Cargo.toml 版本
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 只取 [workspace.package] 段里的 version，避免依赖行序。
+          VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' NeverWork/Cargo.toml | head -n 1)
+          if [ -z "$VERSION" ]; then
+            echo "无法从 NeverWork/Cargo.toml 的 [workspace.package] 读取 version" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "tag $GITHUB_REF_NAME 与 Cargo.toml 版本 v$VERSION 不一致" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "版本校验通过：$VERSION"
+
+  build-windows:
+    needs: meta
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: NeverWork
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "NeverWork -> target"
+      - name: 编译 release
+        run: cargo build --release -p neverwork
+      - name: 生成 NSIS 安装包
+        shell: pwsh
+        working-directory: NeverWork/installer
+        env:
+          APP_VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+            "$env:ProgramFiles\NSIS\makensis.exe"
+          )
+          $makensis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $makensis) {
+            $cmd = Get-Command makensis -ErrorAction SilentlyContinue
+            if ($cmd) { $makensis = $cmd.Source }
+          }
+          if (-not $makensis) {
+            Write-Host "未找到 NSIS，尝试通过 choco 安装"
+            choco install nsis -y --no-progress
+            $makensis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $makensis) { throw "未找到 makensis.exe" }
+          & $makensis "/DAPP_VERSION=$env:APP_VERSION" "neverwork.nsi"
+          if ($LASTEXITCODE -ne 0) { throw "makensis 编译失败" }
+          Get-Item "..\dist\NeverWork-$env:APP_VERSION-setup.exe" | Select-Object FullName, Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup
+          path: NeverWork/dist/NeverWork-${{ needs.meta.outputs.version }}-setup.exe
+          if-no-files-found: error
+
+  build-linux:
+    needs: meta
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: NeverWork
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 gpui 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libxkbcommon-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libfontconfig1-dev libfreetype6-dev \
+            libvulkan-dev mesa-vulkan-drivers libgl1-mesa-dri
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "NeverWork -> target"
+      - name: 编译 release
+        run: cargo build --release -p neverwork
+      - name: 打包二进制
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: tar -czf "NeverWork-$VERSION-linux-x86_64.tar.gz" -C target/release neverwork
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binary
+          path: NeverWork/NeverWork-${{ needs.meta.outputs.version }}-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  build-macos:
+    needs: meta
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: NeverWork
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "NeverWork -> target"
+      - name: 编译 release
+        run: cargo build --release -p neverwork
+      - name: 打包二进制
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: tar -czf "NeverWork-$VERSION-macos-arm64.tar.gz" -C target/release neverwork
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-binary
+          path: NeverWork/NeverWork-${{ needs.meta.outputs.version }}-macos-arm64.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [meta, build-windows, build-linux, build-macos]
+    if: always() && needs.meta.result == 'success' && needs.build-windows.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: 发布到 GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          LINUX: ${{ needs.build-linux.result }}
+          MACOS: ${{ needs.build-macos.result }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* \
+              --title "NeverWork $VERSION" \
+              --generate-notes \
+              --repo "$GITHUB_REPOSITORY"
+          fi
+          MISSING=""
+          if [ "$LINUX" != "success" ]; then MISSING="$MISSING Linux"; fi
+          if [ "$MACOS" != "success" ]; then MISSING="$MISSING macOS"; fi
+          if [ -n "$MISSING" ]; then
+            gh release view "$TAG" --json body -q .body --repo "$GITHUB_REPOSITORY" > body.md
+            printf '\n\n> 本次未产出%s 构建（见 Actions 日志）。\n' "$MISSING" >> body.md
+            gh release edit "$TAG" --notes-file body.md --repo "$GITHUB_REPOSITORY"
+          fi

@@ -94,7 +94,6 @@ NeverWork/
 docs/
   architecture/  架构图（PNG / SVG / 说明）与模型证据
   screenshots/   产品界面截图
-  superpowers/   设计与计划文档
 pic/             设计参考图
 ```
 
@@ -121,6 +120,23 @@ set NW_PROVIDER=anthropic                    # 可选，配合 claude 模型
 其他运行期变量：`NW_ROOT`（工作区根）、`NW_REMOTE`（`user@host:/path`，直连远程工作区）、`NW_CONFIG_DIR`（覆盖配置目录 `~/.neverwork`）、`NW_VIEW`（`chat|team|skills|settings|file`）、`NW_OPEN`（启动即开文件）。
 
 配置与会话都落在 `~/.neverwork/`：`config.json`（团队）、`settings.json`（偏好与厂商）、`sessions/`（按工作区一份）。**API Key 以明文保存在本地 settings，不会随导出 / 同步外发**。
+
+## 发版（GitHub Actions）
+
+推送 `v*` tag 自动三平台编译并生成 Release（`.github/workflows/release.yml`）：
+
+```bash
+# 1. 改 NeverWork/Cargo.toml 的 version，并同步 crates/app/assets/neverwork.rc
+# 2. 推到 GitHub 并打 tag（tag 必须与 Cargo.toml 版本一致，否则 meta job 直接失败）
+git push github main
+git tag v0.2.0
+git push github refs/tags/v0.2.0
+```
+
+产物：Windows `NeverWork-<ver>-setup.exe`（NSIS）；Linux `NeverWork-<ver>-linux-x86_64.tar.gz`；
+macOS arm64 `NeverWork-<ver>-macos-arm64.tar.gz`。Linux / macOS 是实验性构建，失败只让本次运行标红、
+不阻塞 Release（Release 正文会注明缺哪一平台）。macOS 产物未签名，首次运行需右键打开或
+`xattr -d com.apple.quarantine neverwork`。
 
 ## 开发环境说明
 
