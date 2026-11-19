@@ -22,6 +22,13 @@ Unicode true
 !ifndef APP_VERSION
   !define APP_VERSION "0.2.0"
 !endif
+; CI 交叉编译 arm64 安装包时用 /D 指到别的产物目录；本地构建保持默认。
+!ifndef APP_EXE_DIR
+  !define APP_EXE_DIR "..\target\release"
+!endif
+!ifndef OUT_NAME
+  !define OUT_NAME "NeverWork-${APP_VERSION}-setup.exe"
+!endif
 !define APP_EXE "neverwork.exe"
 !define APP_PUBLISHER "NeverWork"
 !define APP_REG "Software\NeverWork"
@@ -29,7 +36,7 @@ Unicode true
 
 Name "${APP_NAME}"
 BrandingText "${APP_NAME} ${APP_VERSION}"
-OutFile "..\dist\NeverWork-${APP_VERSION}-setup.exe"
+OutFile "..\dist\${OUT_NAME}"
 InstallDir "$LOCALAPPDATA\Programs\NeverWork"
 InstallDirRegKey HKCU "${APP_REG}" "InstallDir"
 RequestExecutionLevel user
@@ -116,7 +123,7 @@ FunctionEnd
 Section "主程序" SEC_MAIN
   SectionIn RO
   SetOutPath "$INSTDIR"
-  File "..\target\release\${APP_EXE}"
+  File "${APP_EXE_DIR}\${APP_EXE}"
   File "..\crates\app\assets\neverwork.ico"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 

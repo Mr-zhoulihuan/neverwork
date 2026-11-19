@@ -123,7 +123,8 @@ set NW_PROVIDER=anthropic                    # 可选，配合 claude 模型
 
 ## 发版（GitHub Actions）
 
-推送 `v*` tag 自动三平台编译并生成 Release（`.github/workflows/release.yml`）：
+推送 `v*` tag 自动全平台编译并生成 Release（`.github/workflows/release.yml`）；也可以在 Actions 页手动
+Run workflow（跳过 tag 校验，按 Cargo.toml 版本编译并发布到 `v<version>`）：
 
 ```bash
 # 1. 改 NeverWork/Cargo.toml 的 version，并同步 crates/app/assets/neverwork.rc
@@ -133,10 +134,20 @@ git tag v0.2.0
 git push github refs/tags/v0.2.0
 ```
 
-产物：Windows `NeverWork-<ver>-setup.exe`（NSIS）；Linux `NeverWork-<ver>-linux-x86_64.tar.gz`；
-macOS arm64 `NeverWork-<ver>-macos-arm64.tar.gz`。Linux / macOS 是实验性构建，失败只让本次运行标红、
-不阻塞 Release（Release 正文会注明缺哪一平台）。macOS 产物未签名，首次运行需右键打开或
-`xattr -d com.apple.quarantine neverwork`。
+产物矩阵（`<ver>` = Cargo.toml 版本）：
+
+| 平台 | 构建方式 | 产物 |
+| --- | --- | --- |
+| Windows x64 | 原生 | `NeverWork-<ver>-setup.exe`（NSIS）、`-windows-x64.zip` |
+| Windows arm64 | 交叉编译（MSVC ARM64 工具链） | `NeverWork-<ver>-windows-arm64-setup.exe`、`-windows-arm64.zip` |
+| Linux x64 | 原生 | `NeverWork-<ver>-linux-x86_64.tar.gz` |
+| Linux arm64 | GitHub 原生 arm64 runner | `NeverWork-<ver>-linux-arm64.tar.gz` |
+| macOS arm64 | 原生（macos-latest 是 arm64） | `NeverWork-<ver>-macos-arm64.dmg`、`.zip`（.app 包内为 ad-hoc 签名） |
+| macOS x64 | 交叉编译 | `NeverWork-<ver>-macos-x64.dmg`、`.zip` |
+
+Windows x64 是阻塞平台：失败则不发版。其余平台是实验性构建，失败只让本次运行标红、不阻塞 Release
+（Release 正文会列出缺哪几个产物）。macOS 包未公证，首次打开需右键打开或
+`xattr -dr com.apple.quarantine /Applications/NeverWork.app`。
 
 ## 开发环境说明
 
